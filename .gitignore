@@ -1,0 +1,27 @@
+# Visual Studio local files
+/.vs/
+*.vcxproj.user
+*.suo
+*.user
+
+# Common build outputs
+/build/
+/Debug/
+/Release/
+/x64/
+/Win32/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+# Logs are normally ignored, but smoke harness logs are committed for PR review.
+*.log
+!/test_logs/
+!/test_logs/**
+
+# Generated test WASM outputs
+/test_wasm_build/
+*.wasm
