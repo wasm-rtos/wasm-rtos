@@ -1,4 +1,4 @@
-#if !defined(MICROWASM_BROWSER)
+#if !defined(WASM_RTOS_BROWSER)
 
 #if !defined(_WIN32)
 #ifndef _POSIX_C_SOURCE

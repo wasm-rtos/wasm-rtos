@@ -1,5 +1,5 @@
-#ifndef MICROWASM_OS_H
-#define MICROWASM_OS_H
+#ifndef WASM_RTOS_H
+#define WASM_RTOS_H
 
 #include <stdint.h>
 

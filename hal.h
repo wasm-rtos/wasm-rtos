@@ -1,9 +1,9 @@
-#ifndef MICROWASM_OS_HAL_H
-#define MICROWASM_OS_HAL_H
+#ifndef WASM_RTOS_HAL_H
+#define WASM_RTOS_HAL_H
 
 #include <stdint.h>
 
-#if defined(MICROWASM_BROWSER)
+#if defined(WASM_RTOS_BROWSER)
 #define WASM_IMPORT(module_name, imported_name) \
     extern __attribute__((import_module(module_name), import_name(imported_name)))
 #else

@@ -619,7 +619,7 @@ OsStatus os_task_load_snapshot(OsTaskHandle task, const uint8_t* buffer, uint32_
         os_clear_last_error();
         task->wasm_started = 1U;
         task->wasm_needs_resume = 1U;
-        os_task_free_return_values(task);
+        task->entry_return_code = 0U;
         os_set_task_ready(task);
         os_recalculate_task_counters();
     }
