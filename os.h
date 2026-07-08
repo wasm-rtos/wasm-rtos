@@ -6,6 +6,7 @@
 #include "wasm3/source/wasm3.h"
 
 typedef struct OsTask* OsTaskHandle;
+typedef struct OsQueue* OsQueueHandle;
 
 typedef M3RawCall OsHostImportFunction;
 
@@ -20,7 +21,11 @@ typedef enum OsStatus
     OS_STATUS_TASK_NOT_FOUND,
     OS_STATUS_NO_READY_TASKS,
     OS_STATUS_BUFFER_TOO_SMALL,
-    OS_STATUS_UNSUPPORTED
+    OS_STATUS_UNSUPPORTED,
+    OS_STATUS_OUT_OF_BOUNDS,
+    OS_STATUS_QUEUE_FULL,
+    OS_STATUS_QUEUE_EMPTY,
+    OS_STATUS_QUEUE_NOT_FOUND
 } OsStatus;
 
 typedef enum OsTaskState
@@ -96,6 +101,20 @@ OsStatus os_task_create_with_args(
     uint32_t priority
 );
 
+OsStatus os_queue_create(
+    OsQueueHandle* out_queue,
+    uint32_t item_size,
+    uint32_t item_count
+);
+
+void os_queue_delete(OsQueueHandle queue);
+uint32_t os_queue_get_id(OsQueueHandle queue);
+OsQueueHandle os_queue_find_by_id(uint32_t queue_id);
+OsStatus os_queue_send(OsQueueHandle queue, const void* item);
+OsStatus os_queue_receive(OsQueueHandle queue, void* out_item);
+uint32_t os_queue_get_count(OsQueueHandle queue);
+uint32_t os_queue_get_space(OsQueueHandle queue);
+
 OsStatus os_host_import_register(
     const char* module_name,
     const char* import_name,
@@ -149,6 +168,18 @@ OsStatus os_task_get_return_values(
     OsValue* out_values,
     uint32_t max_values,
     uint32_t* out_value_count
+);
+OsStatus os_task_read_memory(
+    OsTaskHandle task,
+    uint32_t wasm_address,
+    uint8_t* out_buffer,
+    uint32_t byte_count
+);
+OsStatus os_task_write_memory(
+    OsTaskHandle task,
+    uint32_t wasm_address,
+    const uint8_t* buffer,
+    uint32_t byte_count
 );
 const char* os_task_get_name(OsTaskHandle task);
 OsTaskHandle os_task_get_current(void);

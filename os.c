@@ -43,15 +43,30 @@ typedef struct OsHostImportNode
     struct OsHostImportNode* next;
 } OsHostImportNode;
 
+struct OsQueue
+{
+    uint32_t id;
+    uint32_t item_size;
+    uint32_t item_count;
+    uint32_t count;
+    uint32_t head;
+    uint32_t tail;
+    uint8_t* storage;
+    struct OsQueue* previous;
+    struct OsQueue* next;
+};
+
 typedef struct OsState
 {
     OsTaskHandle task_list;
     OsTaskHandle current_task;
     OsTaskHandle last_scheduled_task;
+    OsQueueHandle queue_list;
     OsHostImportNode* host_import_list;
     uint32_t tick_ms;
     uint32_t last_time_update_ms;
     uint32_t next_task_id;
+    uint32_t next_queue_id;
     uint32_t task_count;
     uint32_t ready_task_count;
     uint32_t waiting_task_count;
@@ -97,6 +112,13 @@ struct OsTask
 
 static OsState g_os;
 
+
+static OsQueueHandle os_queue_allocate(void);
+static void os_queue_free(OsQueueHandle queue);
+static void os_queue_list_insert(OsQueueHandle queue);
+static void os_queue_list_remove(OsQueueHandle queue);
+static int os_queue_is_in_list(OsQueueHandle queue);
+static void os_queue_free_all(void);
 static OsTaskHandle os_task_allocate(void);
 static void os_task_free(OsTaskHandle task);
 static void os_task_list_insert(OsTaskHandle task);
@@ -137,6 +159,8 @@ static M3Result os_link_registered_host_imports(OsTaskHandle task);
 static m3ApiRawFunction(os_wasm_import_os_yield);
 static m3ApiRawFunction(os_wasm_import_os_delay_ms);
 static m3ApiRawFunction(os_wasm_import_os_get_time_ms);
+static m3ApiRawFunction(os_wasm_import_os_queue_send);
+static m3ApiRawFunction(os_wasm_import_os_queue_receive);
 static OsTaskHandle os_select_next_ready_task(void);
 static void os_update_waiting_tasks(void);
 static void os_advance_tick_ms(uint32_t milliseconds);
@@ -144,6 +168,12 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task);
 static OsStatus os_validate_entry_function(OsTaskHandle task);
 static OsStatus os_capture_entry_return_value(OsTaskHandle task);
 static OsStatus os_call_entry_function(OsTaskHandle task, M3Result* out_result);
+static OsStatus os_task_get_memory_pointer(
+    OsTaskHandle task,
+    uint32_t wasm_address,
+    uint32_t byte_count,
+    uint8_t** out_memory
+);
 static void os_set_task_ready(OsTaskHandle task);
 static void os_set_task_waiting(OsTaskHandle task, uint32_t wake_tick_ms);
 static void os_set_task_suspended(OsTaskHandle task);
@@ -161,6 +191,7 @@ OsStatus os_init(void)
     os_shutdown();
 
     g_os.next_task_id = 1U;
+    g_os.next_queue_id = 1U;
     g_os.initialized = 1U;
     os_clear_last_error();
 
@@ -178,6 +209,7 @@ void os_shutdown(void)
         task = next;
     }
 
+    os_queue_free_all();
     os_host_import_free_list();
 
     memset(&g_os, 0, sizeof(g_os));
@@ -229,6 +261,175 @@ OsStatus os_task_create_with_args(
         stack_size,
         priority
     );
+}
+
+
+OsStatus os_queue_create(
+    OsQueueHandle* out_queue,
+    uint32_t item_size,
+    uint32_t item_count
+)
+{
+    OsQueueHandle queue = NULL;
+    size_t storage_size = 0U;
+
+    if (out_queue == NULL || item_size == 0U || item_count == 0U)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!g_os.initialized)
+    {
+        OsStatus status = os_init();
+        if (status != OS_STATUS_OK)
+        {
+            return status;
+        }
+    }
+
+    if ((size_t)item_count > ((size_t)-1) / (size_t)item_size)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    *out_queue = NULL;
+    storage_size = (size_t)item_size * (size_t)item_count;
+
+    queue = os_queue_allocate();
+    if (queue == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+
+    queue->storage = (uint8_t*)calloc(1U, storage_size);
+    if (queue->storage == NULL)
+    {
+        os_queue_free(queue);
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+
+    queue->id = g_os.next_queue_id++;
+    queue->item_size = item_size;
+    queue->item_count = item_count;
+    os_queue_list_insert(queue);
+
+    *out_queue = queue;
+    return OS_STATUS_OK;
+}
+
+void os_queue_delete(OsQueueHandle queue)
+{
+    if (queue == NULL || !os_queue_is_in_list(queue))
+    {
+        return;
+    }
+
+    os_queue_list_remove(queue);
+    os_queue_free(queue);
+}
+
+uint32_t os_queue_get_id(OsQueueHandle queue)
+{
+    if (queue == NULL || !os_queue_is_in_list(queue))
+    {
+        return 0U;
+    }
+
+    return queue->id;
+}
+
+OsQueueHandle os_queue_find_by_id(uint32_t queue_id)
+{
+    OsQueueHandle queue = NULL;
+
+    if (queue_id == 0U)
+    {
+        return NULL;
+    }
+
+    for (queue = g_os.queue_list; queue != NULL; queue = queue->next)
+    {
+        if (queue->id == queue_id)
+        {
+            return queue;
+        }
+    }
+
+    return NULL;
+}
+
+OsStatus os_queue_send(OsQueueHandle queue, const void* item)
+{
+    uint8_t* destination = NULL;
+
+    if (queue == NULL || item == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!os_queue_is_in_list(queue))
+    {
+        return OS_STATUS_QUEUE_NOT_FOUND;
+    }
+
+    if (queue->count >= queue->item_count)
+    {
+        return OS_STATUS_QUEUE_FULL;
+    }
+
+    destination = queue->storage + ((size_t)queue->tail * (size_t)queue->item_size);
+    memcpy(destination, item, queue->item_size);
+    queue->tail = (queue->tail + 1U) % queue->item_count;
+    ++queue->count;
+
+    return OS_STATUS_OK;
+}
+
+OsStatus os_queue_receive(OsQueueHandle queue, void* out_item)
+{
+    uint8_t* source = NULL;
+
+    if (queue == NULL || out_item == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!os_queue_is_in_list(queue))
+    {
+        return OS_STATUS_QUEUE_NOT_FOUND;
+    }
+
+    if (queue->count == 0U)
+    {
+        return OS_STATUS_QUEUE_EMPTY;
+    }
+
+    source = queue->storage + ((size_t)queue->head * (size_t)queue->item_size);
+    memcpy(out_item, source, queue->item_size);
+    queue->head = (queue->head + 1U) % queue->item_count;
+    --queue->count;
+
+    return OS_STATUS_OK;
+}
+
+uint32_t os_queue_get_count(OsQueueHandle queue)
+{
+    if (queue == NULL || !os_queue_is_in_list(queue))
+    {
+        return 0U;
+    }
+
+    return queue->count;
+}
+
+uint32_t os_queue_get_space(OsQueueHandle queue)
+{
+    if (queue == NULL || !os_queue_is_in_list(queue))
+    {
+        return 0U;
+    }
+
+    return queue->item_count - queue->count;
 }
 
 OsStatus os_host_import_register(
@@ -833,6 +1034,65 @@ OsStatus os_task_get_return_values(
     return OS_STATUS_OK;
 }
 
+
+OsStatus os_task_read_memory(
+    OsTaskHandle task,
+    uint32_t wasm_address,
+    uint8_t* out_buffer,
+    uint32_t byte_count
+)
+{
+    uint8_t* memory = NULL;
+    OsStatus status = OS_STATUS_OK;
+
+    if (byte_count > 0U && out_buffer == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    status = os_task_get_memory_pointer(task, wasm_address, byte_count, &memory);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
+    if (byte_count > 0U)
+    {
+        memcpy(out_buffer, memory, byte_count);
+    }
+
+    return OS_STATUS_OK;
+}
+
+OsStatus os_task_write_memory(
+    OsTaskHandle task,
+    uint32_t wasm_address,
+    const uint8_t* buffer,
+    uint32_t byte_count
+)
+{
+    uint8_t* memory = NULL;
+    OsStatus status = OS_STATUS_OK;
+
+    if (byte_count > 0U && buffer == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    status = os_task_get_memory_pointer(task, wasm_address, byte_count, &memory);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
+    if (byte_count > 0U)
+    {
+        memcpy(memory, buffer, byte_count);
+    }
+
+    return OS_STATUS_OK;
+}
+
 const char* os_get_last_error_phase(void)
 {
     return g_os.last_error.phase != NULL ? g_os.last_error.phase : "none";
@@ -1003,6 +1263,109 @@ uint32_t os_get_ready_task_count(void)
 uint32_t os_get_waiting_task_count(void)
 {
     return g_os.waiting_task_count;
+}
+
+
+static OsQueueHandle os_queue_allocate(void)
+{
+    return (OsQueueHandle)calloc(1U, sizeof(struct OsQueue));
+}
+
+static void os_queue_free(OsQueueHandle queue)
+{
+    if (queue == NULL)
+    {
+        return;
+    }
+
+    free(queue->storage);
+    queue->storage = NULL;
+    free(queue);
+}
+
+static void os_queue_list_insert(OsQueueHandle queue)
+{
+    OsQueueHandle cursor = NULL;
+
+    if (queue == NULL)
+    {
+        return;
+    }
+
+    queue->previous = NULL;
+    queue->next = NULL;
+
+    if (g_os.queue_list == NULL)
+    {
+        g_os.queue_list = queue;
+        return;
+    }
+
+    for (cursor = g_os.queue_list; cursor->next != NULL; cursor = cursor->next)
+    {
+    }
+
+    cursor->next = queue;
+    queue->previous = cursor;
+}
+
+static void os_queue_list_remove(OsQueueHandle queue)
+{
+    if (queue == NULL)
+    {
+        return;
+    }
+
+    if (queue->previous != NULL)
+    {
+        queue->previous->next = queue->next;
+    }
+    else if (g_os.queue_list == queue)
+    {
+        g_os.queue_list = queue->next;
+    }
+
+    if (queue->next != NULL)
+    {
+        queue->next->previous = queue->previous;
+    }
+
+    queue->previous = NULL;
+    queue->next = NULL;
+}
+
+static int os_queue_is_in_list(OsQueueHandle queue)
+{
+    OsQueueHandle cursor = NULL;
+
+    if (queue == NULL)
+    {
+        return 0;
+    }
+
+    for (cursor = g_os.queue_list; cursor != NULL; cursor = cursor->next)
+    {
+        if (cursor == queue)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void os_queue_free_all(void)
+{
+    OsQueueHandle queue = g_os.queue_list;
+
+    while (queue != NULL)
+    {
+        OsQueueHandle next = queue->next;
+        os_queue_free(queue);
+        queue = next;
+    }
+
+    g_os.queue_list = NULL;
 }
 
 static OsTaskHandle os_task_allocate(void)
@@ -1525,6 +1888,59 @@ static OsStatus os_call_entry_function(OsTaskHandle task, M3Result* out_result)
     return OS_STATUS_OK;
 }
 
+
+static OsStatus os_task_get_memory_pointer(
+    OsTaskHandle task,
+    uint32_t wasm_address,
+    uint32_t byte_count,
+    uint8_t** out_memory
+)
+{
+    uint8_t* memory = NULL;
+    uint32_t memory_size = 0U;
+
+    if (task == NULL || out_memory == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    *out_memory = NULL;
+
+    if (!os_task_is_in_list(task))
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    if (task->wasm_runtime == NULL)
+    {
+        return OS_STATUS_TASK_DEAD;
+    }
+
+    if (task->wasm_runtime->memory.mallocated == NULL)
+    {
+        return byte_count == 0U ? OS_STATUS_OK : OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    memory = m3_GetMemory(task->wasm_runtime, &memory_size, 0U);
+    if (byte_count > 0U && memory == NULL)
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    if (wasm_address > memory_size)
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    if (byte_count > memory_size - wasm_address)
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    *out_memory = memory != NULL ? memory + wasm_address : NULL;
+    return OS_STATUS_OK;
+}
+
 static void os_task_cleanup_wasm(OsTaskHandle task)
 {
     if (task == NULL)
@@ -1597,6 +2013,32 @@ static M3Result os_link_task_host_imports(OsTaskHandle task)
         "os_get_time_ms",
         "i()",
         os_wasm_import_os_get_time_ms
+    );
+
+    if (result != m3Err_none && result != m3Err_functionLookupFailed)
+    {
+        return result;
+    }
+
+    result = m3_LinkRawFunction(
+        task->wasm_module,
+        "env",
+        "os_queue_send",
+        "i(ii)",
+        os_wasm_import_os_queue_send
+    );
+
+    if (result != m3Err_none && result != m3Err_functionLookupFailed)
+    {
+        return result;
+    }
+
+    result = m3_LinkRawFunction(
+        task->wasm_module,
+        "env",
+        "os_queue_receive",
+        "i(ii)",
+        os_wasm_import_os_queue_receive
     );
 
     if (result != m3Err_none && result != m3Err_functionLookupFailed)
@@ -1695,6 +2137,76 @@ static m3ApiRawFunction(os_wasm_import_os_get_time_ms)
     m3ApiReturn(os_get_tick_ms());
 }
 
+
+
+
+static m3ApiRawFunction(os_wasm_import_os_queue_send)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, queue_id);
+    m3ApiGetArg(uint32_t, item_ptr);
+    OsQueueHandle queue = os_queue_find_by_id(queue_id);
+    OsTaskHandle task = os_task_get_current();
+    uint8_t* item = NULL;
+    OsStatus status = OS_STATUS_OK;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (queue == NULL)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
+    }
+
+    item = (uint8_t*)malloc(queue->item_size);
+    if (item == NULL)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_OUT_OF_MEMORY);
+    }
+
+    status = os_task_read_memory(task, item_ptr, item, queue->item_size);
+    if (status == OS_STATUS_OK)
+    {
+        status = os_queue_send(queue, item);
+    }
+
+    free(item);
+    m3ApiReturn((uint32_t)status);
+}
+
+static m3ApiRawFunction(os_wasm_import_os_queue_receive)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, queue_id);
+    m3ApiGetArg(uint32_t, item_ptr);
+    OsQueueHandle queue = os_queue_find_by_id(queue_id);
+    OsTaskHandle task = os_task_get_current();
+    uint8_t* item = NULL;
+    OsStatus status = OS_STATUS_OK;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (queue == NULL)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
+    }
+
+    item = (uint8_t*)malloc(queue->item_size);
+    if (item == NULL)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_OUT_OF_MEMORY);
+    }
+
+    status = os_queue_receive(queue, item);
+    if (status == OS_STATUS_OK)
+    {
+        status = os_task_write_memory(task, item_ptr, item, queue->item_size);
+    }
+
+    free(item);
+    m3ApiReturn((uint32_t)status);
+}
 
 static OsStatus os_wasm_result_to_status(M3Result result)
 {
