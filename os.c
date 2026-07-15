@@ -29,6 +29,8 @@ typedef enum OsTaskWaitType
 {
     OS_TASK_WAIT_NONE = 0,
     OS_TASK_WAIT_DELAY,
+    OS_TASK_WAIT_QUEUE_SEND,
+    OS_TASK_WAIT_QUEUE_RECEIVE,
     OS_TASK_WAIT_MUTEX,
     OS_TASK_WAIT_SEMAPHORE,
     OS_TASK_WAIT_EVENT_GROUP,
@@ -115,6 +117,7 @@ typedef struct OsState
     uint32_t next_mutex_id;
     uint32_t next_semaphore_id;
     uint32_t next_event_group_id;
+    uint64_t next_wait_sequence;
     uint32_t task_count;
     uint32_t ready_task_count;
     uint32_t waiting_task_count;
@@ -137,10 +140,16 @@ struct OsTask
     OsTaskWaitType wait_type;
     union OsTaskWaitObject
     {
+        OsQueueHandle queue;
         OsMutexHandle mutex;
         OsSemaphoreHandle semaphore;
         OsEventGroupHandle event_group;
     } wait_object;
+    uint64_t wait_sequence;
+    uint8_t* wait_queue_item;
+    void* wait_queue_output;
+    uint8_t wait_queue_has_wasm_output;
+    uint32_t wait_queue_wasm_output_address;
     uint32_t wait_bits;
     uint8_t wait_clear_on_exit;
     uint8_t wait_for_all;
@@ -252,6 +261,8 @@ static m3ApiRawFunction(os_wasm_import_os_delay_ms);
 static m3ApiRawFunction(os_wasm_import_os_get_time_ms);
 static m3ApiRawFunction(os_wasm_import_os_queue_send);
 static m3ApiRawFunction(os_wasm_import_os_queue_receive);
+static m3ApiRawFunction(os_wasm_import_os_queue_send_wait);
+static m3ApiRawFunction(os_wasm_import_os_queue_receive_wait);
 static m3ApiRawFunction(os_wasm_import_os_mutex_create);
 static m3ApiRawFunction(os_wasm_import_os_mutex_delete);
 static m3ApiRawFunction(os_wasm_import_os_mutex_lock);
@@ -271,6 +282,15 @@ static m3ApiRawFunction(os_wasm_import_os_task_notify_wait);
 static m3ApiRawFunction(os_wasm_import_os_task_notify_take);
 static OsTaskHandle os_select_next_ready_task(void);
 static void os_preempt_for_higher_priority_ready_task(void);
+static OsTaskHandle os_select_queue_waiter(
+    OsQueueHandle queue,
+    OsTaskWaitType wait_type
+);
+static OsStatus os_queue_deliver_to_waiting_receiver(
+    OsTaskHandle task,
+    const void* item
+);
+static void os_queue_fill_from_waiting_sender(OsQueueHandle queue);
 static OsTaskHandle os_select_mutex_waiter(OsMutexHandle mutex);
 static OsTaskHandle os_select_semaphore_waiter(OsSemaphoreHandle semaphore);
 static void os_update_waiting_tasks(void);
@@ -301,6 +321,7 @@ static void os_complete_task_wait(
 );
 static void os_cancel_task_wait(OsTaskHandle task, OsStatus status);
 static void os_clear_task_wait(OsTaskHandle task);
+static void os_clear_queue_wait(OsTaskHandle task);
 static OsStatus os_prepare_wait_return(OsTaskHandle task, uint32_t* raw_return);
 static void os_clear_wait_return(OsTaskHandle task);
 static void os_write_wait_return(OsTaskHandle task, uint32_t value);
@@ -331,6 +352,7 @@ OsStatus os_init(void)
     g_os.next_mutex_id = 1U;
     g_os.next_semaphore_id = 1U;
     g_os.next_event_group_id = 1U;
+    g_os.next_wait_sequence = 1U;
     g_os.initialized = 1U;
     os_clear_last_error();
 
@@ -461,13 +483,27 @@ OsStatus os_queue_create(
 
 void os_queue_delete(OsQueueHandle queue)
 {
+    OsTaskHandle task = NULL;
+
     if (queue == NULL || !os_queue_is_in_list(queue))
     {
         return;
     }
 
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        if ((task->wait_type == OS_TASK_WAIT_QUEUE_SEND ||
+             task->wait_type == OS_TASK_WAIT_QUEUE_RECEIVE) &&
+            task->wait_object.queue == queue)
+        {
+            os_complete_task_wait(task, OS_STATUS_QUEUE_NOT_FOUND, 0U);
+        }
+    }
+
     os_queue_list_remove(queue);
     os_queue_free(queue);
+    os_recalculate_task_counters();
+    os_preempt_for_higher_priority_ready_task();
 }
 
 uint32_t os_queue_get_id(OsQueueHandle queue)
@@ -502,7 +538,9 @@ OsQueueHandle os_queue_find_by_id(uint32_t queue_id)
 
 OsStatus os_queue_send(OsQueueHandle queue, const void* item)
 {
+    OsTaskHandle receiver = NULL;
     uint8_t* destination = NULL;
+    OsStatus status = OS_STATUS_OK;
 
     if (queue == NULL || item == NULL)
     {
@@ -512,6 +550,15 @@ OsStatus os_queue_send(OsQueueHandle queue, const void* item)
     if (!os_queue_is_in_list(queue))
     {
         return OS_STATUS_QUEUE_NOT_FOUND;
+    }
+
+    receiver = os_select_queue_waiter(queue, OS_TASK_WAIT_QUEUE_RECEIVE);
+    if (receiver != NULL)
+    {
+        status = os_queue_deliver_to_waiting_receiver(receiver, item);
+        os_recalculate_task_counters();
+        os_preempt_for_higher_priority_ready_task();
+        return status;
     }
 
     if (queue->count >= queue->item_count)
@@ -551,7 +598,110 @@ OsStatus os_queue_receive(OsQueueHandle queue, void* out_item)
     queue->head = (queue->head + 1U) % queue->item_count;
     --queue->count;
 
+    os_queue_fill_from_waiting_sender(queue);
+    os_recalculate_task_counters();
+    os_preempt_for_higher_priority_ready_task();
+
     return OS_STATUS_OK;
+}
+
+OsStatus os_queue_send_wait(
+    OsQueueHandle queue,
+    const void* item,
+    uint32_t timeout_ms
+)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsStatus status = OS_STATUS_OK;
+
+    status = os_queue_send(queue, item);
+    if (status != OS_STATUS_QUEUE_FULL)
+    {
+        if (task != NULL)
+        {
+            task->last_wait_status = status;
+            task->last_wait_value = 0U;
+        }
+        return status;
+    }
+
+    if (timeout_ms == 0U)
+    {
+        if (task != NULL)
+        {
+            task->last_wait_status = OS_STATUS_TIMEOUT;
+            task->last_wait_value = 0U;
+        }
+        return OS_STATUS_TIMEOUT;
+    }
+
+    if (task == NULL || task->state != OS_TASK_RUNNING)
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    task->wait_queue_item = (uint8_t*)malloc(queue->item_size);
+    if (task->wait_queue_item == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+
+    memcpy(task->wait_queue_item, item, queue->item_size);
+    task->wait_object.queue = queue;
+    task->wait_return_kind = OS_WAIT_RETURN_STATUS;
+    status = os_begin_task_wait(task, OS_TASK_WAIT_QUEUE_SEND, timeout_ms);
+    if (status != OS_STATUS_OK)
+    {
+        os_clear_queue_wait(task);
+    }
+
+    return status;
+}
+
+OsStatus os_queue_receive_wait(
+    OsQueueHandle queue,
+    void* out_item,
+    uint32_t timeout_ms
+)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsStatus status = os_queue_receive(queue, out_item);
+
+    if (status != OS_STATUS_QUEUE_EMPTY)
+    {
+        if (task != NULL)
+        {
+            task->last_wait_status = status;
+            task->last_wait_value = 0U;
+        }
+        return status;
+    }
+
+    if (timeout_ms == 0U)
+    {
+        if (task != NULL)
+        {
+            task->last_wait_status = OS_STATUS_TIMEOUT;
+            task->last_wait_value = 0U;
+        }
+        return OS_STATUS_TIMEOUT;
+    }
+
+    if (task == NULL || task->state != OS_TASK_RUNNING)
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    task->wait_object.queue = queue;
+    task->wait_queue_output = out_item;
+    task->wait_return_kind = OS_WAIT_RETURN_STATUS;
+    status = os_begin_task_wait(task, OS_TASK_WAIT_QUEUE_RECEIVE, timeout_ms);
+    if (status != OS_STATUS_OK)
+    {
+        os_clear_queue_wait(task);
+    }
+
+    return status;
 }
 
 uint32_t os_queue_get_count(OsQueueHandle queue)
@@ -2568,6 +2718,7 @@ static void os_task_free(OsTaskHandle task)
     }
 
     os_task_cleanup_wasm(task);
+    os_clear_queue_wait(task);
     os_task_free_entry_args(task);
     os_task_free_return_values(task);
     free(task);
@@ -3175,6 +3326,8 @@ static M3Result os_link_task_host_imports(OsTaskHandle task)
         { "os_get_time_ms", "i()", os_wasm_import_os_get_time_ms },
         { "os_queue_send", "i(ii)", os_wasm_import_os_queue_send },
         { "os_queue_receive", "i(ii)", os_wasm_import_os_queue_receive },
+        { "os_queue_send_wait", "i(iii)", os_wasm_import_os_queue_send_wait },
+        { "os_queue_receive_wait", "i(iii)", os_wasm_import_os_queue_receive_wait },
         { "os_mutex_create", "i()", os_wasm_import_os_mutex_create },
         { "os_mutex_delete", "i(i)", os_wasm_import_os_mutex_delete },
         { "os_mutex_lock", "i(ii)", os_wasm_import_os_mutex_lock },
@@ -3379,6 +3532,103 @@ static m3ApiRawFunction(os_wasm_import_os_queue_receive)
 
     free(item);
     m3ApiReturn((uint32_t)status);
+}
+
+static m3ApiRawFunction(os_wasm_import_os_queue_send_wait)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, queue_id);
+    m3ApiGetArg(uint32_t, item_ptr);
+    m3ApiGetArg(uint32_t, timeout_ms);
+    OsQueueHandle queue = os_queue_find_by_id(queue_id);
+    OsTaskHandle task = os_task_get_current();
+    uint8_t* item = NULL;
+    OsStatus status = OS_STATUS_OK;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (queue == NULL)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
+    }
+
+    status = os_prepare_wait_return(task, raw_return);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn((uint32_t)status);
+    }
+
+    item = (uint8_t*)malloc(queue->item_size);
+    if (item == NULL)
+    {
+        os_clear_wait_return(task);
+        m3ApiReturn((uint32_t)OS_STATUS_OUT_OF_MEMORY);
+    }
+
+    status = os_task_read_memory(task, item_ptr, item, queue->item_size);
+    if (status == OS_STATUS_OK)
+    {
+        status = os_queue_send_wait(queue, item, timeout_ms);
+    }
+    free(item);
+
+    *raw_return = (uint32_t)status;
+    if (task != NULL && task->wait_type == OS_TASK_WAIT_QUEUE_SEND)
+    {
+        return m3_Yield();
+    }
+
+    os_clear_wait_return(task);
+    return m3Err_none;
+}
+
+static m3ApiRawFunction(os_wasm_import_os_queue_receive_wait)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, queue_id);
+    m3ApiGetArg(uint32_t, item_ptr);
+    m3ApiGetArg(uint32_t, timeout_ms);
+    OsQueueHandle queue = os_queue_find_by_id(queue_id);
+    OsTaskHandle task = os_task_get_current();
+    uint8_t* item = NULL;
+    OsStatus status = OS_STATUS_OK;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (queue == NULL)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
+    }
+
+    status = os_prepare_wait_return(task, raw_return);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn((uint32_t)status);
+    }
+
+    status = os_task_get_memory_pointer(
+        task,
+        item_ptr,
+        queue->item_size,
+        &item
+    );
+    if (status == OS_STATUS_OK)
+    {
+        status = os_queue_receive_wait(queue, item, timeout_ms);
+    }
+
+    *raw_return = (uint32_t)status;
+    if (task != NULL && task->wait_type == OS_TASK_WAIT_QUEUE_RECEIVE)
+    {
+        task->wait_queue_has_wasm_output = 1U;
+        task->wait_queue_wasm_output_address = item_ptr;
+        return m3_Yield();
+    }
+
+    os_clear_wait_return(task);
+    return m3Err_none;
 }
 
 static m3ApiRawFunction(os_wasm_import_os_mutex_create)
@@ -3857,6 +4107,107 @@ static void os_preempt_for_higher_priority_ready_task(void)
     }
 }
 
+static OsTaskHandle os_select_queue_waiter(
+    OsQueueHandle queue,
+    OsTaskWaitType wait_type
+)
+{
+    OsTaskHandle task = NULL;
+    OsTaskHandle selected = NULL;
+
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        if (task->state == OS_TASK_WAITING &&
+            task->wait_type == wait_type &&
+            task->wait_object.queue == queue &&
+            (selected == NULL ||
+             task->priority > selected->priority ||
+             (task->priority == selected->priority &&
+              task->wait_sequence < selected->wait_sequence)))
+        {
+            selected = task;
+        }
+    }
+
+    return selected;
+}
+
+static OsStatus os_queue_deliver_to_waiting_receiver(
+    OsTaskHandle task,
+    const void* item
+)
+{
+    OsQueueHandle queue = NULL;
+    OsStatus status = OS_STATUS_OK;
+
+    if (task == NULL || item == NULL ||
+        task->wait_type != OS_TASK_WAIT_QUEUE_RECEIVE)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    queue = task->wait_object.queue;
+    if (queue == NULL || !os_queue_is_in_list(queue))
+    {
+        os_complete_task_wait(task, OS_STATUS_QUEUE_NOT_FOUND, 0U);
+        return OS_STATUS_QUEUE_NOT_FOUND;
+    }
+
+    if (task->wait_queue_output == NULL &&
+        !task->wait_queue_has_wasm_output)
+    {
+        os_complete_task_wait(task, OS_STATUS_INVALID_ARGUMENT, 0U);
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (task->wait_queue_has_wasm_output)
+    {
+        status = os_task_write_memory(
+            task,
+            task->wait_queue_wasm_output_address,
+            (const uint8_t*)item,
+            queue->item_size
+        );
+    }
+    else
+    {
+        memcpy(task->wait_queue_output, item, queue->item_size);
+    }
+    os_complete_task_wait(task, status, 0U);
+    return status;
+}
+
+static void os_queue_fill_from_waiting_sender(OsQueueHandle queue)
+{
+    OsTaskHandle sender = NULL;
+    uint8_t* destination = NULL;
+
+    if (queue == NULL || !os_queue_is_in_list(queue) ||
+        queue->count >= queue->item_count)
+    {
+        return;
+    }
+
+    sender = os_select_queue_waiter(queue, OS_TASK_WAIT_QUEUE_SEND);
+    if (sender == NULL)
+    {
+        return;
+    }
+
+    if (sender->wait_queue_item == NULL)
+    {
+        os_complete_task_wait(sender, OS_STATUS_INVALID_ARGUMENT, 0U);
+        return;
+    }
+
+    destination = queue->storage +
+        ((size_t)queue->tail * (size_t)queue->item_size);
+    memcpy(destination, sender->wait_queue_item, queue->item_size);
+    queue->tail = (queue->tail + 1U) % queue->item_count;
+    ++queue->count;
+    os_complete_task_wait(sender, OS_STATUS_OK, 0U);
+}
+
 static OsTaskHandle os_select_mutex_waiter(OsMutexHandle mutex)
 {
     OsTaskHandle task = NULL;
@@ -3867,7 +4218,10 @@ static OsTaskHandle os_select_mutex_waiter(OsMutexHandle mutex)
         if (task->state == OS_TASK_WAITING &&
             task->wait_type == OS_TASK_WAIT_MUTEX &&
             task->wait_object.mutex == mutex &&
-            (selected == NULL || task->priority > selected->priority))
+            (selected == NULL ||
+             task->priority > selected->priority ||
+             (task->priority == selected->priority &&
+              task->wait_sequence < selected->wait_sequence)))
         {
             selected = task;
         }
@@ -3886,7 +4240,10 @@ static OsTaskHandle os_select_semaphore_waiter(OsSemaphoreHandle semaphore)
         if (task->state == OS_TASK_WAITING &&
             task->wait_type == OS_TASK_WAIT_SEMAPHORE &&
             task->wait_object.semaphore == semaphore &&
-            (selected == NULL || task->priority > selected->priority))
+            (selected == NULL ||
+             task->priority > selected->priority ||
+             (task->priority == selected->priority &&
+              task->wait_sequence < selected->wait_sequence)))
         {
             selected = task;
         }
@@ -3908,6 +4265,7 @@ static OsStatus os_begin_task_wait(
     }
 
     task->wait_type = wait_type;
+    task->wait_sequence = g_os.next_wait_sequence++;
     task->wait_has_timeout = timeout_ms == OS_WAIT_FOREVER ? 0U : 1U;
     task->wake_tick_ms = task->wait_has_timeout
         ? g_os.tick_ms + timeout_ms
@@ -3963,8 +4321,10 @@ static void os_clear_task_wait(OsTaskHandle task)
         return;
     }
 
+    os_clear_queue_wait(task);
     task->wait_type = OS_TASK_WAIT_NONE;
     task->wait_object.mutex = NULL;
+    task->wait_sequence = 0U;
     task->wait_bits = 0U;
     task->wait_clear_on_exit = 0U;
     task->wait_for_all = 0U;
@@ -3973,6 +4333,21 @@ static void os_clear_task_wait(OsTaskHandle task)
     task->notification_clear_on_exit = 0U;
     task->notification_take_clear_count = 0U;
     os_clear_wait_return(task);
+}
+
+static void os_clear_queue_wait(OsTaskHandle task)
+{
+    if (task == NULL)
+    {
+        return;
+    }
+
+    free(task->wait_queue_item);
+    task->wait_queue_item = NULL;
+
+    task->wait_queue_output = NULL;
+    task->wait_queue_has_wasm_output = 0U;
+    task->wait_queue_wasm_output_address = 0U;
 }
 
 static OsStatus os_prepare_wait_return(OsTaskHandle task, uint32_t* raw_return)
