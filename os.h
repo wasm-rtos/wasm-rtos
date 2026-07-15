@@ -12,6 +12,7 @@ typedef struct OsQueue* OsQueueHandle;
 typedef struct OsMutex* OsMutexHandle;
 typedef struct OsSemaphore* OsSemaphoreHandle;
 typedef struct OsEventGroup* OsEventGroupHandle;
+typedef struct OsTimer* OsTimerHandle;
 
 typedef M3RawCall OsHostImportFunction;
 
@@ -37,7 +38,8 @@ typedef enum OsStatus
     OS_STATUS_MUTEX_NOT_FOUND,
     OS_STATUS_SEMAPHORE_FULL,
     OS_STATUS_SEMAPHORE_NOT_FOUND,
-    OS_STATUS_EVENT_GROUP_NOT_FOUND
+    OS_STATUS_EVENT_GROUP_NOT_FOUND,
+    OS_STATUS_TIMER_NOT_FOUND
 } OsStatus;
 
 typedef enum OsTaskState
@@ -84,6 +86,18 @@ typedef enum OsNotifyAction
     OS_NOTIFY_SET_VALUE_WITH_OVERWRITE,
     OS_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE
 } OsNotifyAction;
+
+typedef uint32_t (*OsClockNowMsFunction)(void* context);
+typedef void (*OsClockArmWakeupFunction)(void* context, uint32_t delay_ms);
+typedef void (*OsClockCancelWakeupFunction)(void* context);
+
+typedef struct OsClockPort
+{
+    OsClockNowMsFunction now_ms;
+    OsClockArmWakeupFunction arm_wakeup;
+    OsClockCancelWakeupFunction cancel_wakeup;
+    void* context;
+} OsClockPort;
 
 typedef struct OsValue
 {
@@ -272,6 +286,37 @@ OsStatus os_task_notify_take(
 uint32_t os_task_get_notification_value(OsTaskHandle task);
 uint8_t os_task_is_notification_pending(OsTaskHandle task);
 
+/* Timers notify their target task and are deleted when that task exits. */
+OsStatus os_timer_create(
+    OsTimerHandle* out_timer,
+    uint32_t period_ms,
+    uint8_t auto_reload,
+    OsTaskHandle target_task,
+    uint32_t notify_value,
+    OsNotifyAction notify_action
+);
+void os_timer_delete(OsTimerHandle timer);
+uint32_t os_timer_get_id(OsTimerHandle timer);
+OsTimerHandle os_timer_find_by_id(uint32_t timer_id);
+OsStatus os_timer_start(OsTimerHandle timer);
+OsStatus os_timer_stop(OsTimerHandle timer);
+OsStatus os_timer_reset(OsTimerHandle timer);
+OsStatus os_timer_change_period(OsTimerHandle timer, uint32_t period_ms);
+uint8_t os_timer_is_active(OsTimerHandle timer);
+uint32_t os_timer_get_period_ms(OsTimerHandle timer);
+
+/*
+ * now_ms is a monotonic platform clock. arm_wakeup and cancel_wakeup must
+ * either both be supplied for tickless operation or both be NULL for polling.
+ * A hardware ISR should only defer work; call os_clock_wakeup from a safe
+ * platform context after the interrupt or event-loop callback is delivered.
+ */
+OsStatus os_clock_port_set(const OsClockPort* port);
+void os_clock_port_clear(void);
+OsStatus os_clock_poll(void);
+OsStatus os_clock_wakeup(void);
+uint8_t os_clock_is_tickless(void);
+
 const char* os_get_last_error_phase(void);
 const char* os_get_last_error_result(void);
 const char* os_get_last_error_task_name(void);
@@ -280,11 +325,13 @@ OsStatus os_get_last_error_status(void);
 void os_tick(uint32_t milliseconds);
 OsStatus os_update_time_ms(uint32_t now_ms);
 uint32_t os_get_tick_ms(void);
+uint32_t os_get_next_wakeup_ms(void);
 
 OsStatus os_schedule(void);
 
 uint32_t os_get_task_count(void);
 uint32_t os_get_ready_task_count(void);
 uint32_t os_get_waiting_task_count(void);
+uint32_t os_get_timer_count(void);
 
 #endif
