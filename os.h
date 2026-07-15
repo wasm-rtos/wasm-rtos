@@ -133,6 +133,16 @@ uint32_t os_queue_get_id(OsQueueHandle queue);
 OsQueueHandle os_queue_find_by_id(uint32_t queue_id);
 OsStatus os_queue_send(OsQueueHandle queue, const void* item);
 OsStatus os_queue_receive(OsQueueHandle queue, void* out_item);
+OsStatus os_queue_send_wait(
+    OsQueueHandle queue,
+    const void* item,
+    uint32_t timeout_ms
+);
+OsStatus os_queue_receive_wait(
+    OsQueueHandle queue,
+    void* out_item,
+    uint32_t timeout_ms
+);
 uint32_t os_queue_get_count(OsQueueHandle queue);
 uint32_t os_queue_get_space(OsQueueHandle queue);
 
