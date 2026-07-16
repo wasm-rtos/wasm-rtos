@@ -5,6 +5,7 @@
 
 #include "wasm3/source/wasm3.h"
 
+/* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
 
 typedef struct OsTask* OsTaskHandle;
@@ -152,6 +153,12 @@ OsStatus os_queue_send_wait(
     const void* item,
     uint32_t timeout_ms
 );
+/*
+ * A receive that can complete immediately accepts any writable C buffer.
+ * If it must block, out_item must point into the current WASM task's linear
+ * memory so the kernel can retain a stable offset instead of a native pointer.
+ * Native buffers return OS_STATUS_UNSUPPORTED rather than being retained.
+ */
 OsStatus os_queue_receive_wait(
     OsQueueHandle queue,
     void* out_item,
@@ -212,6 +219,11 @@ void os_request_preempt(void);
 OsStatus os_task_suspend(OsTaskHandle task);
 OsStatus os_task_resume(OsTaskHandle task);
 
+/*
+ * Snapshots contain WASM runtime state, not RTOS wait or timer state.
+ * Snapshot operations return OS_STATUS_BUSY while the task is waiting or has
+ * an attached software timer.
+ */
 OsStatus os_task_get_snapshot_size(
     OsTaskHandle task,
     uint32_t* out_size

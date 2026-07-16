@@ -168,7 +168,6 @@ struct OsTask
     } wait_object;
     uint64_t wait_sequence;
     uint8_t* wait_queue_item;
-    void* wait_queue_output;
     uint8_t wait_queue_has_wasm_output;
     uint32_t wait_queue_wasm_output_address;
     uint32_t wait_bits;
@@ -254,6 +253,7 @@ static void os_task_list_insert(OsTaskHandle task);
 static void os_task_list_remove(OsTaskHandle task);
 static int os_task_is_in_list(OsTaskHandle task);
 static uint8_t os_task_is_dead(OsTaskHandle task);
+static uint8_t os_task_snapshot_is_busy(OsTaskHandle task);
 static void os_recalculate_task_counters(void);
 static void os_copy_task_name(OsTaskHandle task, const char* task_name);
 static OsStatus os_task_initialize(
@@ -332,6 +332,7 @@ static OsTaskHandle os_select_semaphore_waiter(OsSemaphoreHandle semaphore);
 static void os_update_time_events(void);
 static void os_update_waiting_tasks(void);
 static void os_advance_tick_ms(uint32_t milliseconds);
+static OsStatus os_sync_clock_before_deadline(void);
 static void os_clock_rearm(void);
 static OsTaskRunResult os_run_task_slice(OsTaskHandle task);
 static OsStatus os_validate_entry_function(OsTaskHandle task);
@@ -342,6 +343,12 @@ static OsStatus os_task_get_memory_pointer(
     uint32_t wasm_address,
     uint32_t byte_count,
     uint8_t** out_memory
+);
+static OsStatus os_task_get_memory_address(
+    OsTaskHandle task,
+    const void* memory,
+    uint32_t byte_count,
+    uint32_t* out_wasm_address
 );
 static void os_set_task_ready(OsTaskHandle task);
 static void os_set_task_waiting(OsTaskHandle task, uint32_t wake_tick_ms);
@@ -685,6 +692,12 @@ OsStatus os_queue_send_wait(
         return OS_STATUS_TASK_NOT_FOUND;
     }
 
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
     task->wait_queue_item = (uint8_t*)malloc(queue->item_size);
     if (task->wait_queue_item == NULL)
     {
@@ -710,6 +723,7 @@ OsStatus os_queue_receive_wait(
 )
 {
     OsTaskHandle task = g_os.current_task;
+    uint32_t wasm_output_address = 0U;
     OsStatus status = os_queue_receive(queue, out_item);
 
     if (status != OS_STATUS_QUEUE_EMPTY)
@@ -737,8 +751,28 @@ OsStatus os_queue_receive_wait(
         return OS_STATUS_TASK_NOT_FOUND;
     }
 
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
+    status = os_task_get_memory_address(
+        task,
+        out_item,
+        queue->item_size,
+        &wasm_output_address
+    );
+    if (status != OS_STATUS_OK)
+    {
+        task->last_wait_status = OS_STATUS_UNSUPPORTED;
+        task->last_wait_value = 0U;
+        return OS_STATUS_UNSUPPORTED;
+    }
+
     task->wait_object.queue = queue;
-    task->wait_queue_output = out_item;
+    task->wait_queue_has_wasm_output = 1U;
+    task->wait_queue_wasm_output_address = wasm_output_address;
     task->wait_return_kind = OS_WAIT_RETURN_STATUS;
     status = os_begin_task_wait(task, OS_TASK_WAIT_QUEUE_RECEIVE, timeout_ms);
     if (status != OS_STATUS_OK)
@@ -894,6 +928,12 @@ OsStatus os_mutex_lock(OsMutexHandle mutex, uint32_t timeout_ms)
         task->last_wait_status = OS_STATUS_TIMEOUT;
         task->last_wait_value = 0U;
         return OS_STATUS_TIMEOUT;
+    }
+
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
     }
 
     task->wait_object.mutex = mutex;
@@ -1078,6 +1118,12 @@ OsStatus os_semaphore_take(OsSemaphoreHandle semaphore, uint32_t timeout_ms)
         task->last_wait_status = OS_STATUS_TIMEOUT;
         task->last_wait_value = 0U;
         return OS_STATUS_TIMEOUT;
+    }
+
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
     }
 
     task->wait_object.semaphore = semaphore;
@@ -1316,6 +1362,12 @@ OsStatus os_event_group_wait_bits(
         return OS_STATUS_TIMEOUT;
     }
 
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
     task->wait_object.event_group = event_group;
     task->wait_bits = bits_to_wait_for;
     task->wait_clear_on_exit = clear_on_exit ? 1U : 0U;
@@ -1499,6 +1551,8 @@ OsStatus os_task_delete(OsTaskHandle task)
 
 OsStatus os_task_delay_ms(uint32_t delay_ms)
 {
+    OsStatus status = OS_STATUS_OK;
+
     if (g_os.current_task == NULL)
     {
         return OS_STATUS_TASK_NOT_FOUND;
@@ -1507,6 +1561,17 @@ OsStatus os_task_delay_ms(uint32_t delay_ms)
     if (delay_ms == 0U)
     {
         return os_task_yield();
+    }
+
+    if (delay_ms > (uint32_t)INT32_MAX)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
     }
 
     os_set_task_waiting(g_os.current_task, g_os.tick_ms + delay_ms);
@@ -1638,6 +1703,11 @@ OsStatus os_task_get_snapshot_size(OsTaskHandle task, uint32_t* out_size)
         return OS_STATUS_ERROR;
     }
 
+    if (os_task_snapshot_is_busy(task))
+    {
+        return OS_STATUS_BUSY;
+    }
+
     result = m3_GetRuntimeSnapshotSize(task->wasm_runtime, out_size);
     status = os_wasm_snapshot_result_to_status(result);
     if (status == OS_STATUS_OK)
@@ -1682,6 +1752,11 @@ OsStatus os_task_save_snapshot(
         return OS_STATUS_ERROR;
     }
 
+    if (os_task_snapshot_is_busy(task))
+    {
+        return OS_STATUS_BUSY;
+    }
+
     result = m3_SaveRuntimeSnapshot(task->wasm_runtime, buffer, buffer_size, out_size);
     status = os_wasm_snapshot_result_to_status(result);
     if (status == OS_STATUS_OK)
@@ -1719,6 +1794,11 @@ OsStatus os_task_load_snapshot(OsTaskHandle task, const uint8_t* buffer, uint32_
     if (g_os.current_task == task)
     {
         return OS_STATUS_ERROR;
+    }
+
+    if (os_task_snapshot_is_busy(task))
+    {
+        return OS_STATUS_BUSY;
     }
 
     result = m3_LoadRuntimeSnapshot(task->wasm_runtime, buffer, buffer_size);
@@ -1961,6 +2041,12 @@ OsStatus os_task_notify_wait(
         return OS_STATUS_TASK_NOT_FOUND;
     }
 
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
     if (task->notification_pending)
     {
         task->last_wait_value = task->notification_value;
@@ -2001,6 +2087,12 @@ OsStatus os_task_notify_take(
     if (task == NULL || task->state != OS_TASK_RUNNING)
     {
         return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
     }
 
     if (task->notification_value > 0U)
@@ -2144,9 +2236,22 @@ OsTimerHandle os_timer_find_by_id(uint32_t timer_id)
 
 OsStatus os_timer_start(OsTimerHandle timer)
 {
+    OsStatus status = OS_STATUS_OK;
+
     if (timer == NULL)
     {
         return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!os_timer_is_in_list(timer))
+    {
+        return OS_STATUS_TIMER_NOT_FOUND;
+    }
+
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
     }
 
     if (!os_timer_is_in_list(timer))
@@ -2185,9 +2290,22 @@ OsStatus os_timer_reset(OsTimerHandle timer)
 
 OsStatus os_timer_change_period(OsTimerHandle timer, uint32_t period_ms)
 {
+    OsStatus status = OS_STATUS_OK;
+
     if (timer == NULL || period_ms == 0U || period_ms > (uint32_t)INT32_MAX)
     {
         return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!os_timer_is_in_list(timer))
+    {
+        return OS_STATUS_TIMER_NOT_FOUND;
+    }
+
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
     }
 
     if (!os_timer_is_in_list(timer))
@@ -3248,6 +3366,31 @@ static uint8_t os_task_is_dead(OsTaskHandle task)
     return (task != NULL && task->state == OS_TASK_DEAD) ? 1U : 0U;
 }
 
+static uint8_t os_task_snapshot_is_busy(OsTaskHandle task)
+{
+    OsTimerHandle timer = NULL;
+
+    if (task == NULL)
+    {
+        return 0U;
+    }
+
+    if (task->state == OS_TASK_WAITING || task->wait_type != OS_TASK_WAIT_NONE)
+    {
+        return 1U;
+    }
+
+    for (timer = g_os.timer_list; timer != NULL; timer = timer->next)
+    {
+        if (timer->target_task == task)
+        {
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
 static void os_recalculate_task_counters(void)
 {
     OsTaskHandle task = NULL;
@@ -3728,6 +3871,59 @@ static OsStatus os_task_get_memory_pointer(
     return OS_STATUS_OK;
 }
 
+static OsStatus os_task_get_memory_address(
+    OsTaskHandle task,
+    const void* memory,
+    uint32_t byte_count,
+    uint32_t* out_wasm_address
+)
+{
+    uint8_t* wasm_memory = NULL;
+    uint32_t memory_size = 0U;
+    uintptr_t memory_address = (uintptr_t)memory;
+    uintptr_t wasm_memory_address = 0U;
+    uintptr_t offset = 0U;
+
+    if (task == NULL || memory == NULL || out_wasm_address == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    *out_wasm_address = 0U;
+
+    if (!os_task_is_in_list(task))
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    if (task->wasm_runtime == NULL || task->wasm_runtime->memory.mallocated == NULL)
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    wasm_memory = m3_GetMemory(task->wasm_runtime, &memory_size, 0U);
+    if (wasm_memory == NULL)
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    wasm_memory_address = (uintptr_t)wasm_memory;
+    if (memory_address < wasm_memory_address)
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    offset = memory_address - wasm_memory_address;
+    if (offset > (uintptr_t)memory_size ||
+        byte_count > memory_size - (uint32_t)offset)
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+
+    *out_wasm_address = (uint32_t)offset;
+    return OS_STATUS_OK;
+}
+
 static void os_task_cleanup_wasm(OsTaskHandle task)
 {
     if (task == NULL)
@@ -4077,8 +4273,6 @@ static m3ApiRawFunction(os_wasm_import_os_queue_receive_wait)
     *raw_return = (uint32_t)status;
     if (task != NULL && task->wait_type == OS_TASK_WAIT_QUEUE_RECEIVE)
     {
-        task->wait_queue_has_wasm_output = 1U;
-        task->wait_queue_wasm_output_address = item_ptr;
         return m3_Yield();
     }
 
@@ -4731,26 +4925,18 @@ static OsStatus os_queue_deliver_to_waiting_receiver(
         return OS_STATUS_QUEUE_NOT_FOUND;
     }
 
-    if (task->wait_queue_output == NULL &&
-        !task->wait_queue_has_wasm_output)
+    if (!task->wait_queue_has_wasm_output)
     {
         os_complete_task_wait(task, OS_STATUS_INVALID_ARGUMENT, 0U);
         return OS_STATUS_INVALID_ARGUMENT;
     }
 
-    if (task->wait_queue_has_wasm_output)
-    {
-        status = os_task_write_memory(
-            task,
-            task->wait_queue_wasm_output_address,
-            (const uint8_t*)item,
-            queue->item_size
-        );
-    }
-    else
-    {
-        memcpy(task->wait_queue_output, item, queue->item_size);
-    }
+    status = os_task_write_memory(
+        task,
+        task->wait_queue_wasm_output_address,
+        (const uint8_t*)item,
+        queue->item_size
+    );
     os_complete_task_wait(task, status, 0U);
     return status;
 }
@@ -4837,7 +5023,8 @@ static OsStatus os_begin_task_wait(
 )
 {
     if (task == NULL || task->state != OS_TASK_RUNNING ||
-        wait_type == OS_TASK_WAIT_NONE || wait_type == OS_TASK_WAIT_DELAY)
+        wait_type == OS_TASK_WAIT_NONE || wait_type == OS_TASK_WAIT_DELAY ||
+        (timeout_ms != OS_WAIT_FOREVER && timeout_ms > (uint32_t)INT32_MAX))
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
@@ -4924,7 +5111,6 @@ static void os_clear_queue_wait(OsTaskHandle task)
     free(task->wait_queue_item);
     task->wait_queue_item = NULL;
 
-    task->wait_queue_output = NULL;
     task->wait_queue_has_wasm_output = 0U;
     task->wait_queue_wasm_output_address = 0U;
 }
@@ -5259,8 +5445,27 @@ static void os_update_waiting_tasks(void)
 
 static void os_advance_tick_ms(uint32_t milliseconds)
 {
-    g_os.tick_ms += milliseconds;
-    os_update_time_events();
+    uint32_t step_ms = 0U;
+
+    do
+    {
+        step_ms = milliseconds > (uint32_t)INT32_MAX
+            ? (uint32_t)INT32_MAX
+            : milliseconds;
+        g_os.tick_ms += step_ms;
+        milliseconds -= step_ms;
+        os_update_time_events();
+    } while (milliseconds > 0U);
+}
+
+static OsStatus os_sync_clock_before_deadline(void)
+{
+    if (g_os.clock_port.now_ms == NULL || g_os.processing_time_events)
+    {
+        return OS_STATUS_OK;
+    }
+
+    return os_clock_poll();
 }
 
 static void os_clock_rearm(void)
