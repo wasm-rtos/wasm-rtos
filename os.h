@@ -40,7 +40,9 @@ typedef enum OsStatus
     OS_STATUS_SEMAPHORE_FULL,
     OS_STATUS_SEMAPHORE_NOT_FOUND,
     OS_STATUS_EVENT_GROUP_NOT_FOUND,
-    OS_STATUS_TIMER_NOT_FOUND
+    OS_STATUS_TIMER_NOT_FOUND,
+    OS_STATUS_ABORTED,
+    OS_STATUS_NOT_WAITING
 } OsStatus;
 
 typedef enum OsTaskState
@@ -214,6 +216,20 @@ void os_host_import_clear_all(void);
 
 OsStatus os_task_delete(OsTaskHandle task);
 OsStatus os_task_delay_ms(uint32_t delay_ms);
+/*
+ * Advance *previous_wake_time_ms by period_ms and block until that absolute
+ * deadline when it is still in the future. The phase is advanced even when
+ * the deadline was missed, matching FreeRTOS vTaskDelayUntil semantics.
+ */
+OsStatus os_task_delay_until(
+    uint32_t* previous_wake_time_ms,
+    uint32_t period_ms
+);
+/*
+ * Wake a task blocked by a delay or synchronization wait. Blocking imports
+ * that return a status resume with OS_STATUS_ABORTED.
+ */
+OsStatus os_task_abort_wait(OsTaskHandle task);
 OsStatus os_task_yield(void);
 void os_request_preempt(void);
 OsStatus os_task_suspend(OsTaskHandle task);
