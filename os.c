@@ -287,6 +287,8 @@ static M3Result os_link_task_host_imports(OsTaskHandle task);
 static M3Result os_link_registered_host_imports(OsTaskHandle task);
 static m3ApiRawFunction(os_wasm_import_os_yield);
 static m3ApiRawFunction(os_wasm_import_os_delay_ms);
+static m3ApiRawFunction(os_wasm_import_os_task_delay_until);
+static m3ApiRawFunction(os_wasm_import_os_task_abort_wait);
 static m3ApiRawFunction(os_wasm_import_os_get_time_ms);
 static m3ApiRawFunction(os_wasm_import_os_queue_send);
 static m3ApiRawFunction(os_wasm_import_os_queue_receive);
@@ -1578,6 +1580,79 @@ OsStatus os_task_delay_ms(uint32_t delay_ms)
     os_request_task_stop(g_os.current_task);
     os_recalculate_task_counters();
 
+    return OS_STATUS_OK;
+}
+
+OsStatus os_task_delay_until(
+    uint32_t* previous_wake_time_ms,
+    uint32_t period_ms
+)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsStatus status = OS_STATUS_OK;
+    uint32_t wake_tick_ms = 0U;
+
+    if (task == NULL || task->state != OS_TASK_RUNNING)
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    if (previous_wake_time_ms == NULL || period_ms == 0U ||
+        period_ms > (uint32_t)INT32_MAX)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
+    wake_tick_ms = *previous_wake_time_ms + period_ms;
+    *previous_wake_time_ms = wake_tick_ms;
+    task->last_wait_status = OS_STATUS_OK;
+    task->last_wait_value = 0U;
+
+    if (os_time_reached(g_os.tick_ms, wake_tick_ms))
+    {
+        return OS_STATUS_OK;
+    }
+
+    os_set_task_waiting(task, wake_tick_ms);
+    os_request_task_stop(task);
+    os_recalculate_task_counters();
+
+    return OS_STATUS_OK;
+}
+
+OsStatus os_task_abort_wait(OsTaskHandle task)
+{
+    if (task == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!os_task_is_in_list(task))
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    if (os_task_is_dead(task))
+    {
+        return OS_STATUS_TASK_DEAD;
+    }
+
+    if (task->state != OS_TASK_WAITING ||
+        task->wait_type == OS_TASK_WAIT_NONE)
+    {
+        return OS_STATUS_NOT_WAITING;
+    }
+
+    os_cancel_task_wait(task, OS_STATUS_ABORTED);
+    os_recalculate_task_counters();
+    os_preempt_for_higher_priority_ready_task();
+    os_clock_rearm();
     return OS_STATUS_OK;
 }
 
@@ -3967,6 +4042,8 @@ static M3Result os_link_task_host_imports(OsTaskHandle task)
     {
         { "os_yield", "v()", os_wasm_import_os_yield },
         { "os_delay_ms", "v(i)", os_wasm_import_os_delay_ms },
+        { "os_task_delay_until", "i(ii)", os_wasm_import_os_task_delay_until },
+        { "os_task_abort_wait", "i(i)", os_wasm_import_os_task_abort_wait },
         { "os_get_time_ms", "i()", os_wasm_import_os_get_time_ms },
         { "os_queue_send", "i(ii)", os_wasm_import_os_queue_send },
         { "os_queue_receive", "i(ii)", os_wasm_import_os_queue_receive },
@@ -4101,6 +4178,71 @@ static m3ApiRawFunction(os_wasm_import_os_delay_ms)
     }
 
     return m3_Yield();
+}
+
+static m3ApiRawFunction(os_wasm_import_os_task_delay_until)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, previous_wake_time_address);
+    m3ApiGetArg(uint32_t, period_ms);
+    OsTaskHandle task = os_task_get_current();
+    uint8_t* previous_wake_time_memory = NULL;
+    uint32_t previous_wake_time_ms = 0U;
+    OsStatus status = OS_STATUS_OK;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    status = os_task_get_memory_pointer(
+        task,
+        previous_wake_time_address,
+        (uint32_t)sizeof(uint32_t),
+        &previous_wake_time_memory
+    );
+    if (status == OS_STATUS_OK)
+    {
+        memcpy(
+            &previous_wake_time_ms,
+            previous_wake_time_memory,
+            sizeof(previous_wake_time_ms)
+        );
+        status = os_task_delay_until(&previous_wake_time_ms, period_ms);
+        memcpy(
+            previous_wake_time_memory,
+            &previous_wake_time_ms,
+            sizeof(previous_wake_time_ms)
+        );
+    }
+
+    *raw_return = (uint32_t)status;
+    if (task != NULL && task->wait_type == OS_TASK_WAIT_DELAY)
+    {
+        status = os_prepare_wait_return(task, raw_return);
+        if (status != OS_STATUS_OK)
+        {
+            os_cancel_task_wait(task, status);
+            m3ApiReturn((uint32_t)status);
+        }
+        return m3_Yield();
+    }
+
+    os_clear_wait_return(task);
+    return m3Err_none;
+}
+
+static m3ApiRawFunction(os_wasm_import_os_task_abort_wait)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, task_id);
+    OsTaskHandle task = os_task_find_by_id(task_id);
+    OsStatus status = task != NULL
+        ? os_task_abort_wait(task)
+        : OS_STATUS_TASK_NOT_FOUND;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    m3ApiReturn((uint32_t)status);
 }
 
 static m3ApiRawFunction(os_wasm_import_os_get_time_ms)
