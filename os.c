@@ -127,6 +127,7 @@ typedef struct OsState
     OsHostImportNode* host_import_list;
     OsClockPort clock_port;
     uint32_t tick_ms;
+    uint64_t tick_ms_extended;
     uint32_t last_time_update_ms;
     uint32_t next_task_id;
     uint32_t next_queue_id;
@@ -1590,7 +1591,10 @@ OsStatus os_task_delay_until(
 {
     OsTaskHandle task = g_os.current_task;
     OsStatus status = OS_STATUS_OK;
+    uint32_t elapsed_since_phase_ms = 0U;
     uint32_t wake_tick_ms = 0U;
+    uint64_t previous_wake_time_extended_ms = 0U;
+    uint64_t wake_time_extended_ms = 0U;
 
     if (task == NULL || task->state != OS_TASK_RUNNING)
     {
@@ -1609,12 +1613,22 @@ OsStatus os_task_delay_until(
         return status;
     }
 
-    wake_tick_ms = *previous_wake_time_ms + period_ms;
+    elapsed_since_phase_ms = g_os.tick_ms - *previous_wake_time_ms;
+    if (g_os.tick_ms_extended < (uint64_t)elapsed_since_phase_ms)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    previous_wake_time_extended_ms =
+        g_os.tick_ms_extended - (uint64_t)elapsed_since_phase_ms;
+    wake_time_extended_ms =
+        previous_wake_time_extended_ms + (uint64_t)period_ms;
+    wake_tick_ms = (uint32_t)wake_time_extended_ms;
     *previous_wake_time_ms = wake_tick_ms;
     task->last_wait_status = OS_STATUS_OK;
     task->last_wait_value = 0U;
 
-    if (os_time_reached(g_os.tick_ms, wake_tick_ms))
+    if (wake_time_extended_ms <= g_os.tick_ms_extended)
     {
         return OS_STATUS_OK;
     }
@@ -5595,6 +5609,7 @@ static void os_advance_tick_ms(uint32_t milliseconds)
             ? (uint32_t)INT32_MAX
             : milliseconds;
         g_os.tick_ms += step_ms;
+        g_os.tick_ms_extended += (uint64_t)step_ms;
         milliseconds -= step_ms;
         os_update_time_events();
     } while (milliseconds > 0U);
