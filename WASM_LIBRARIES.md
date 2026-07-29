@@ -65,7 +65,7 @@ them again only when a task first calls one of that library's imports.
 
 Each resident library instance belongs to one task. Its globals and linear
 memory persist between calls while it remains resident. Eviction destroys its
-wasm3 runtime, compiled code, stack, globals, and linear memory, then calls
+wasm3 runtime, execution state, stack, globals, and linear memory, then calls
 `release` for the source bytes. A later call creates a fresh instance.
 
 Library calls run with the same fuel slices as the owning task. A long-running
@@ -87,8 +87,8 @@ and `OS_WASM_LIBRARY_PINNED` instances are never selected. A load fails with
 
 If `resident_size_bytes` is nonzero, wasm-rtos uses it as the accounting cost
 of each task-local instance. If it is zero, wasm-rtos estimates the cost from
-the source bytes, stack, linear memory, runtime structures, and wasm3 code
-pages, refreshing the estimate as execution allocates memory or code.
+the source bytes, direct runtime allocations, linear memory, environment, and
+module metadata, refreshing the estimate as execution allocates memory.
 
 Use the cache inspection functions in `os.h` to display resident count and
 size. `os_wasm_library_evict()` explicitly unloads an inactive, evictable

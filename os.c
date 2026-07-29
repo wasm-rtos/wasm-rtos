@@ -2,7 +2,6 @@
 
 #include "wasm3/source/wasm3.h"
 #include "wasm3/source/m3_env.h"
-#include "wasm3/source/m3_code.h"
 #include "wasm3/source/m3_api_wasi.h"
 
 #include <stddef.h>
@@ -4583,7 +4582,6 @@ static uint64_t os_wasm_library_runtime_size(
     OsWasmLibraryInstance* instance
 )
 {
-    IM3CodePage page = NULL;
     uint64_t size = 0U;
 
     if (instance == NULL || instance->library == NULL)
@@ -4597,7 +4595,6 @@ static uint64_t os_wasm_library_runtime_size(
     }
 
     size = (uint64_t)instance->wasm_size +
-        (uint64_t)instance->library->source.stack_size +
         (uint64_t)sizeof(OsWasmLibraryInstance);
 
     if (instance->wasm_environment != NULL)
@@ -4606,23 +4603,7 @@ static uint64_t os_wasm_library_runtime_size(
     }
     if (instance->wasm_runtime != NULL)
     {
-        size += (uint64_t)sizeof(*instance->wasm_runtime);
-        size += (uint64_t)m3_GetMemorySize(instance->wasm_runtime);
-
-        for (page = instance->wasm_runtime->pagesOpen;
-             page != NULL;
-             page = page->info.next)
-        {
-            size += (uint64_t)sizeof(M3CodePageHeader) +
-                (uint64_t)page->info.numLines * (uint64_t)sizeof(code_t);
-        }
-        for (page = instance->wasm_runtime->pagesFull;
-             page != NULL;
-             page = page->info.next)
-        {
-            size += (uint64_t)sizeof(M3CodePageHeader) +
-                (uint64_t)page->info.numLines * (uint64_t)sizeof(code_t);
-        }
+        size += m3_GetRuntimeMemoryUsage(instance->wasm_runtime);
     }
     if (instance->wasm_module != NULL)
     {
