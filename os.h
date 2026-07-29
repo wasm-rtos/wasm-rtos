@@ -132,8 +132,8 @@ typedef struct OsWasmLibrarySource
     uint32_t stack_size;
     /*
      * Cache accounting cost for one resident task-local instance. Set to zero
-     * to estimate it from the WASM bytes, direct runtime allocations, linear
-     * memory, and module metadata after loading.
+     * to estimate it from the WASM bytes, runtime stack, linear memory, and
+     * wasm3 code pages after loading.
      */
     uint64_t resident_size_bytes;
 } OsWasmLibrarySource;
