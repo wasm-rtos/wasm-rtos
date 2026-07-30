@@ -5909,11 +5909,6 @@ static OsStatus os_task_get_memory_pointer(
         return OS_STATUS_TASK_DEAD;
     }
 
-    if (task->wasm_runtime->memory.mallocated == NULL)
-    {
-        return byte_count == 0U ? OS_STATUS_OK : OS_STATUS_OUT_OF_BOUNDS;
-    }
-
     memory = m3_GetMemory(task->wasm_runtime, &memory_size, 0U);
     if (byte_count > 0U && memory == NULL)
     {
@@ -5959,7 +5954,7 @@ static OsStatus os_task_get_memory_address(
         return OS_STATUS_TASK_NOT_FOUND;
     }
 
-    if (task->wasm_runtime == NULL || task->wasm_runtime->memory.mallocated == NULL)
+    if (task->wasm_runtime == NULL)
     {
         return OS_STATUS_OUT_OF_BOUNDS;
     }
