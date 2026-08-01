@@ -7,7 +7,6 @@
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
-#define OS_WASM_LIBRARY_CACHE_UNLIMITED UINT64_MAX
 
 typedef struct OsTask* OsTaskHandle;
 typedef struct OsQueue* OsQueueHandle;
@@ -15,7 +14,6 @@ typedef struct OsMutex* OsMutexHandle;
 typedef struct OsSemaphore* OsSemaphoreHandle;
 typedef struct OsEventGroup* OsEventGroupHandle;
 typedef struct OsTimer* OsTimerHandle;
-typedef struct OsWasmLibrary* OsWasmLibraryHandle;
 
 typedef M3RawCall OsHostImportFunction;
 
@@ -44,11 +42,7 @@ typedef enum OsStatus
     OS_STATUS_EVENT_GROUP_NOT_FOUND,
     OS_STATUS_TIMER_NOT_FOUND,
     OS_STATUS_ABORTED,
-    OS_STATUS_NOT_WAITING,
-    OS_STATUS_WASM_LIBRARY_NOT_FOUND,
-    OS_STATUS_WASM_EXPORT_NOT_FOUND,
-    OS_STATUS_WASM_SIGNATURE_MISMATCH,
-    OS_STATUS_WASM_CACHE_FULL
+    OS_STATUS_NOT_WAITING
 } OsStatus;
 
 typedef enum OsTaskState
@@ -96,25 +90,9 @@ typedef enum OsNotifyAction
     OS_NOTIFY_SET_VALUE_WITHOUT_OVERWRITE
 } OsNotifyAction;
 
-typedef enum OsWasmLibraryPolicy
-{
-    OS_WASM_LIBRARY_EVICTABLE = 0,
-    OS_WASM_LIBRARY_PINNED
-} OsWasmLibraryPolicy;
-
 typedef uint32_t (*OsClockNowMsFunction)(void* context);
 typedef void (*OsClockArmWakeupFunction)(void* context, uint32_t delay_ms);
 typedef void (*OsClockCancelWakeupFunction)(void* context);
-typedef OsStatus (*OsWasmLibraryAcquireFunction)(
-    void* context,
-    const uint8_t** out_wasm_bytes,
-    uint32_t* out_wasm_size
-);
-typedef void (*OsWasmLibraryReleaseFunction)(
-    void* context,
-    const uint8_t* wasm_bytes,
-    uint32_t wasm_size
-);
 
 typedef struct OsClockPort
 {
@@ -123,20 +101,6 @@ typedef struct OsClockPort
     OsClockCancelWakeupFunction cancel_wakeup;
     void* context;
 } OsClockPort;
-
-typedef struct OsWasmLibrarySource
-{
-    OsWasmLibraryAcquireFunction acquire;
-    OsWasmLibraryReleaseFunction release;
-    void* context;
-    uint32_t stack_size;
-    /*
-     * Cache accounting cost for one resident task-local instance. Set to zero
-     * to estimate it from the WASM bytes, runtime stack, linear memory, and
-     * wasm3 code pages after loading.
-     */
-    uint64_t resident_size_bytes;
-} OsWasmLibrarySource;
 
 typedef struct OsValue
 {
@@ -249,47 +213,6 @@ OsStatus os_host_import_register(
 );
 
 void os_host_import_clear_all(void);
-
-/*
- * Register a standard Core WebAssembly library module. acquire/release are
- * called once during registration to validate and copy exported scalar
- * signatures, then again for every task-local resident instance. The module
- * bytes need only remain valid between a matching acquire/release pair.
- *
- * Version 1 accepts exported functions using only i32/i64/f32/f64 values.
- * Library imports are rejected; strings, pointers, shared memories, and a
- * persistent swapped state are intentionally reserved for a later ABI.
- */
-OsStatus os_wasm_library_register(
-    OsWasmLibraryHandle* out_library,
-    const char* module_name,
-    const OsWasmLibrarySource* source,
-    OsWasmLibraryPolicy policy
-);
-OsStatus os_wasm_library_unregister(OsWasmLibraryHandle library);
-OsWasmLibraryHandle os_wasm_library_find(const char* module_name);
-uint32_t os_wasm_library_get_id(OsWasmLibraryHandle library);
-const char* os_wasm_library_get_name(OsWasmLibraryHandle library);
-
-/*
- * Imported library functions are linked while a task is created, but their
- * modules are acquired and instantiated only on the first call. Resident
- * task-local instances remain cached until explicitly evicted, their task is
- * deleted, or the cache needs space. LRU eviction never removes an active or
- * pinned instance.
- */
-OsStatus os_wasm_library_cache_set_limit(uint64_t limit_bytes);
-uint64_t os_wasm_library_cache_get_limit(void);
-uint64_t os_wasm_library_cache_get_resident_size(void);
-uint32_t os_wasm_library_cache_get_resident_count(void);
-uint8_t os_wasm_library_is_resident(
-    OsTaskHandle task,
-    OsWasmLibraryHandle library
-);
-OsStatus os_wasm_library_evict(
-    OsTaskHandle task,
-    OsWasmLibraryHandle library
-);
 
 OsStatus os_task_delete(OsTaskHandle task);
 OsStatus os_task_delay_ms(uint32_t delay_ms);
