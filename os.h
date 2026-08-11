@@ -3,7 +3,11 @@
 
 #include <stdint.h>
 
+#include "wasm3/source/m3_config.h"
 #include "wasm3/source/wasm3.h"
+#if d_m3HasDylink
+#include "wasm3/source/m3_dylink.h"
+#endif
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
@@ -14,6 +18,9 @@ typedef struct OsMutex* OsMutexHandle;
 typedef struct OsSemaphore* OsSemaphoreHandle;
 typedef struct OsEventGroup* OsEventGroupHandle;
 typedef struct OsTimer* OsTimerHandle;
+#if d_m3HasDylink
+typedef struct OsWasmLibrary* OsWasmLibraryHandle;
+#endif
 
 typedef M3RawCall OsHostImportFunction;
 
@@ -214,6 +221,31 @@ OsStatus os_host_import_register(
 
 void os_host_import_clear_all(void);
 
+#if d_m3HasDylink
+/*
+ * Register a resident dylink.0 side module. The byte buffer must remain valid
+ * until os_shutdown(). PIE tasks created through the normal os_task_create
+ * APIs are collected into one link group and share one instance of every
+ * dependency, including its memory, globals, and indirect-function table.
+ * Standalone Core Wasm tasks keep their existing isolated runtimes.
+ *
+ * Registration and linked-task creation close when the group is sealed, either
+ * explicitly or by the first os_schedule() call.
+ */
+OsStatus os_wasm_library_register(
+    OsWasmLibraryHandle* out_library,
+    const char* module_name,
+    uint8_t* wasm_bytes,
+    uint32_t wasm_size
+);
+OsWasmLibraryHandle os_wasm_library_find(const char* module_name);
+uint32_t os_wasm_library_get_id(OsWasmLibraryHandle library);
+const char* os_wasm_library_get_name(OsWasmLibraryHandle library);
+uint32_t os_wasm_library_get_count(void);
+OsStatus os_wasm_link_group_seal(void);
+uint8_t os_wasm_link_group_is_sealed(void);
+#endif
+
 OsStatus os_task_delete(OsTaskHandle task);
 OsStatus os_task_delay_ms(uint32_t delay_ms);
 /*
@@ -238,7 +270,9 @@ OsStatus os_task_resume(OsTaskHandle task);
 /*
  * Snapshots contain WASM runtime state, not RTOS wait or timer state.
  * Snapshot operations return OS_STATUS_BUSY while the task is waiting or has
- * an attached software timer.
+ * an attached software timer. Resident dylink tasks return
+ * OS_STATUS_UNSUPPORTED because their library memory and globals belong to the
+ * whole link group rather than one task.
  */
 OsStatus os_task_get_snapshot_size(
     OsTaskHandle task,
