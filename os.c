@@ -315,6 +315,7 @@ static M3Result os_dylink_resolve_module(
 );
 static M3Result os_dylink_link_host_imports(void* context, IM3Module module);
 static void os_make_dylink_task_name(OsTaskHandle task);
+static OsStatus os_dylink_attach_task(OsTaskHandle task);
 #endif
 static OsStatus os_task_create_wasm(
     OsTaskHandle task,
@@ -1815,6 +1816,104 @@ OsStatus os_wasm_link_group_seal(void)
     free(contexts);
     os_recalculate_task_counters();
     return seal_status;
+}
+
+static OsStatus os_dylink_attach_task(OsTaskHandle task)
+{
+    M3DylinkProgram program;
+    M3DylinkOptions options;
+    IM3DylinkContext context = NULL;
+    M3Result result = m3Err_none;
+
+    if (task == NULL || task->wasm_module == NULL ||
+        g_os.dylink_environment == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    memset(&program, 0, sizeof(program));
+    memset(&options, 0, sizeof(options));
+    program.name = task->wasm_dylink_name;
+    program.module = task->wasm_module;
+    program.nativeStackSize = task->stack_size;
+    program.linearStackSize = OS_DYLINK_LINEAR_STACK_SIZE;
+    program.userdata = task;
+    options.context = &g_os;
+    options.resolveModule = os_dylink_resolve_module;
+    options.linkHostImports = os_dylink_link_host_imports;
+    options.linearStackSize = OS_DYLINK_LINEAR_STACK_SIZE;
+
+    if (g_os.dylink_runtime == NULL)
+    {
+        g_os.dylink_runtime = m3_NewRuntime(
+            g_os.dylink_environment,
+            task->stack_size,
+            task
+        );
+        if (g_os.dylink_runtime == NULL)
+        {
+            return OS_STATUS_OUT_OF_MEMORY;
+        }
+        result = m3_DylinkLoadGroup(
+            g_os.dylink_runtime,
+            &program,
+            1U,
+            &options,
+            &context
+        );
+        if (result != m3Err_none)
+        {
+            if (task->wasm_module != NULL &&
+                task->wasm_module->runtime == g_os.dylink_runtime)
+            {
+                task->wasm_module = NULL;
+            }
+            m3_FreeRuntime(g_os.dylink_runtime);
+            g_os.dylink_runtime = NULL;
+        }
+    }
+    else
+    {
+        result = m3_DylinkAddProgram(
+            g_os.dylink_runtime,
+            &program,
+            &options,
+            &context
+        );
+    }
+
+    if (result != m3Err_none || context == NULL)
+    {
+        OsStatus status = result == m3Err_mallocFailed
+            ? OS_STATUS_OUT_OF_MEMORY : OS_STATUS_WASM_ERROR;
+        os_set_last_error(task, "dylink_add_program", result, status);
+        return status;
+    }
+
+    task->wasm_runtime = g_os.dylink_runtime;
+    task->wasm_dylink_context = context;
+    task->wasm_module_loaded = 1U;
+    result = m3_DylinkActivateContext(context);
+    if (result == m3Err_none)
+    {
+        result = m3_FindFunctionInModule(
+            &task->wasm_entry_function,
+            task->wasm_module,
+            task->entry_function_name
+        );
+    }
+    if (result != m3Err_none)
+    {
+        (void)m3_DylinkRemoveProgram(context);
+        task->wasm_module = NULL;
+        task->wasm_runtime = NULL;
+        task->wasm_dylink_context = NULL;
+        task->wasm_module_loaded = 0U;
+        os_set_last_error(task, "find_linked_function", result,
+                          OS_STATUS_WASM_ERROR);
+        return OS_STATUS_WASM_ERROR;
+    }
+    return OS_STATUS_OK;
 }
 #endif
 
@@ -4108,13 +4207,6 @@ static OsStatus os_task_create_wasm(
         IM3Function entry = NULL;
         OsStatus status = OS_STATUS_OK;
 
-        if (g_os.dylink_sealed)
-        {
-            os_set_last_error(task, "join_dylink_group", "dylink group is sealed",
-                              OS_STATUS_BUSY);
-            return OS_STATUS_BUSY;
-        }
-
         m3_FreeRuntime(task->wasm_runtime);
         task->wasm_runtime = NULL;
         task->wasm_stack_base = NULL;
@@ -4162,6 +4254,10 @@ static OsStatus os_task_create_wasm(
             return status;
         }
         task->wasm_dylink_task = 1U;
+        if (g_os.dylink_sealed)
+        {
+            return os_dylink_attach_task(task);
+        }
         return OS_STATUS_OK;
     }
 #endif
@@ -4526,6 +4622,20 @@ static void os_task_cleanup_wasm(OsTaskHandle task)
 #if d_m3HasDylink
     if (task->wasm_dylink_task)
     {
+        if (task->wasm_dylink_context != NULL && task->wasm_module_loaded)
+        {
+            M3Result result =
+                m3_DylinkRemoveProgram(task->wasm_dylink_context);
+            if (result != m3Err_none)
+            {
+                os_set_last_error(task, "dylink_remove_program", result,
+                                  OS_STATUS_WASM_ERROR);
+            }
+            else
+            {
+                task->wasm_module = NULL;
+            }
+        }
         if (task->wasm_module != NULL && !task->wasm_module_loaded)
         {
             m3_FreeModule(task->wasm_module);

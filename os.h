@@ -229,8 +229,10 @@ void os_host_import_clear_all(void);
  * dependency, including its memory, globals, and indirect-function table.
  * Standalone Core Wasm tasks keep their existing isolated runtimes.
  *
- * Registration and linked-task creation close when the group is sealed, either
- * explicitly or by the first os_schedule() call.
+ * Library registration closes when the group is sealed, either explicitly or
+ * by the first os_schedule() call. PIE tasks may still be created and deleted
+ * afterwards; newly needed registered libraries are instantiated lazily and
+ * stay resident until os_shutdown().
  */
 OsStatus os_wasm_library_register(
     OsWasmLibraryHandle* out_library,
