@@ -1,4 +1,5 @@
 #include "os.h"
+#include "fs.h"
 
 #include "wasm3/source/wasm3.h"
 #include "wasm3/source/m3_env.h"
@@ -537,6 +538,9 @@ void os_shutdown(void)
     os_event_group_free_all();
     os_timer_free_all();
     os_host_import_free_list();
+#if OS_HAS_FS
+    os_fs_shutdown();
+#endif
 
     memset(&g_os, 0, sizeof(g_os));
 }
@@ -3957,6 +3961,9 @@ static void os_task_free(OsTaskHandle task)
         --g_os.spawned_task_count;
     }
 #endif
+#if OS_HAS_FS
+    os_fs_release_task(task->id);
+#endif
     free(task);
 }
 
@@ -5001,6 +5008,14 @@ static M3Result os_link_module_host_imports(IM3Module module)
     {
         return result;
     }
+#if OS_HAS_FS
+    /* Route WASI file calls to the virtual file system, not the host's. */
+    result = os_fs_link_wasi(module);
+    if (result != m3Err_none)
+    {
+        return result;
+    }
+#endif
 #endif
 
     return m3Err_none;

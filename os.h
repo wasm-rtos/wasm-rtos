@@ -12,9 +12,17 @@
 /*
  * Build options (define to 0 to leave a feature out of the image):
  *   OS_HAS_PROCESSES  os_task_spawn() and the "wasm-rtos:proc" guest imports
+ *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
+ *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
+#endif
+#ifndef OS_HAS_FS
+#define OS_HAS_FS 1
+#endif
+#ifndef OS_FS_TAR
+#define OS_FS_TAR OS_HAS_FS
 #endif
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
@@ -58,7 +66,12 @@ typedef enum OsStatus
     OS_STATUS_TIMER_NOT_FOUND,
     OS_STATUS_ABORTED,
     OS_STATUS_NOT_WAITING,
-    OS_STATUS_LIMIT_REACHED
+    OS_STATUS_LIMIT_REACHED,
+    OS_STATUS_FILE_NOT_FOUND,
+    OS_STATUS_NOT_A_DIRECTORY,
+    OS_STATUS_IS_A_DIRECTORY,
+    OS_STATUS_READ_ONLY,
+    OS_STATUS_END_OF_DIRECTORY
 } OsStatus;
 
 typedef enum OsTaskState
