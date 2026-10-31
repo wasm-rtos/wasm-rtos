@@ -22,7 +22,10 @@
 #define OS_PROC_MAX_ARG_LENGTH 256U
 #endif
 #define OS_DEFAULT_STACK_SIZE (64U * 1024U)
+/* Interpreter work units per scheduler slice; override at build time. */
+#ifndef OS_TASK_SLICE_FUEL
 #define OS_TASK_SLICE_FUEL 10000ULL
+#endif
 #if d_m3HasDylink
 #define OS_DYLINK_LINEAR_STACK_SIZE (64U * 1024U)
 #define OS_DYLINK_TASK_NAME_MAX 24U
