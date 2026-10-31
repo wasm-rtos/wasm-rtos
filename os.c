@@ -13,6 +13,11 @@
 
 #define OS_TASK_NAME_MAX 32U
 #define OS_ERROR_DETAIL_MAX 96U
+#ifndef OS_MAX_SPAWNED_TASKS
+#define OS_MAX_SPAWNED_TASKS 16U
+#endif
+#define OS_PROC_MAX_ARGS 32U
+#define OS_PROC_MAX_ARG_LENGTH 256U
 #define OS_DEFAULT_STACK_SIZE (64U * 1024U)
 #define OS_TASK_SLICE_FUEL 10000ULL
 #if d_m3HasDylink
@@ -43,7 +48,8 @@ typedef enum OsTaskWaitType
     OS_TASK_WAIT_SEMAPHORE,
     OS_TASK_WAIT_EVENT_GROUP,
     OS_TASK_WAIT_NOTIFICATION,
-    OS_TASK_WAIT_NOTIFICATION_TAKE
+    OS_TASK_WAIT_NOTIFICATION_TAKE,
+    OS_TASK_WAIT_CHILD
 } OsTaskWaitType;
 
 typedef enum OsWaitReturnKind
@@ -164,6 +170,7 @@ typedef struct OsState
     uint32_t next_event_group_id;
     uint32_t next_timer_id;
     uint64_t next_wait_sequence;
+    uint32_t spawned_task_count;
     uint32_t task_count;
     uint32_t ready_task_count;
     uint32_t waiting_task_count;
@@ -236,6 +243,18 @@ struct OsTask
     uint8_t wasm_needs_resume;
     uint8_t delete_requested;
     uint32_t run_count;
+
+    /* Process state for tasks started through os_task_spawn */
+    uint32_t parent_id;
+    uint32_t wait_child_id;
+    uint8_t spawned;
+    uint8_t auto_reap;
+    uint8_t exit_collected;
+    uint8_t reap_pending;
+    uint8_t* owned_wasm_bytes;
+    char** argv;
+    uint32_t argc;
+    const char* default_argv[1];
 
 #if d_m3HasDylink
     IM3DylinkContext wasm_dylink_context;
@@ -359,6 +378,11 @@ static m3ApiRawFunction(os_wasm_import_os_event_group_clear_bits);
 static m3ApiRawFunction(os_wasm_import_os_event_group_wait_bits);
 static m3ApiRawFunction(os_wasm_import_os_task_notify);
 static m3ApiRawFunction(os_wasm_import_os_task_notify_wait);
+static m3ApiRawFunction(os_wasm_import_proc_spawn);
+static m3ApiRawFunction(os_wasm_import_proc_wait);
+static m3ApiRawFunction(os_wasm_import_proc_kill);
+static m3ApiRawFunction(os_wasm_import_proc_self);
+static m3ApiRawFunction(os_wasm_import_proc_parent);
 static m3ApiRawFunction(os_wasm_import_os_task_notify_take);
 static m3ApiRawFunction(os_wasm_import_os_timer_create);
 static m3ApiRawFunction(os_wasm_import_os_timer_delete);
@@ -405,6 +429,11 @@ static void os_set_task_ready(OsTaskHandle task);
 static void os_set_task_waiting(OsTaskHandle task, uint32_t wake_tick_ms);
 static void os_set_task_suspended(OsTaskHandle task);
 static void os_set_task_dead(OsTaskHandle task);
+static void os_process_on_task_dead(OsTaskHandle task);
+static void os_reap_processes(void);
+#if defined(OS_HAS_WASM3_WASI)
+static void os_apply_task_wasi_args(OsTaskHandle task);
+#endif
 static OsStatus os_begin_task_wait(
     OsTaskHandle task,
     OsTaskWaitType wait_type,
@@ -453,6 +482,7 @@ OsStatus os_init(void)
     g_os.next_wasm_library_id = 1U;
 #endif
     g_os.next_wait_sequence = 1U;
+    g_os.spawned_task_count = 0U;
     g_os.initialized = 1U;
     os_clear_last_error();
 
@@ -3297,6 +3327,8 @@ OsStatus os_schedule(void)
         os_update_time_events();
     }
 
+    os_reap_processes();
+
     task = os_select_next_ready_task();
     if (task == NULL)
     {
@@ -3902,6 +3934,13 @@ static void os_task_free(OsTaskHandle task)
     os_clear_queue_wait(task);
     os_task_free_entry_args(task);
     os_task_free_return_values(task);
+    /* The module was parsed in place, so its bytes outlive the runtime. */
+    free(task->owned_wasm_bytes);
+    free(task->argv);
+    if (task->spawned && g_os.spawned_task_count > 0U)
+    {
+        --g_os.spawned_task_count;
+    }
     free(task);
 }
 
@@ -4878,6 +4917,14 @@ static M3Result os_link_module_host_imports(IM3Module module)
         { "os_timer_change_period", "i(ii)", os_wasm_import_os_timer_change_period },
         { "os_timer_is_active", "i(i)", os_wasm_import_os_timer_is_active }
     };
+    static const struct OsBuiltinImport proc_imports[] =
+    {
+        { "spawn", "i(iiiii)", os_wasm_import_proc_spawn },
+        { "wait", "i(iii)", os_wasm_import_proc_wait },
+        { "kill", "i(i)", os_wasm_import_proc_kill },
+        { "self", "i()", os_wasm_import_proc_self },
+        { "parent", "i()", os_wasm_import_proc_parent }
+    };
     uint32_t import_index = 0U;
     M3Result result = m3Err_none;
 
@@ -4896,6 +4943,24 @@ static M3Result os_link_module_host_imports(IM3Module module)
             imports[import_index].name,
             imports[import_index].signature,
             imports[import_index].function
+        );
+
+        if (result != m3Err_none && result != m3Err_functionLookupFailed)
+        {
+            return result;
+        }
+    }
+
+    for (import_index = 0U;
+         import_index < (uint32_t)(sizeof(proc_imports) / sizeof(proc_imports[0]));
+         ++import_index)
+    {
+        result = m3_LinkRawFunction(
+            module,
+            "wasm-rtos:proc",
+            proc_imports[import_index].name,
+            proc_imports[import_index].signature,
+            proc_imports[import_index].function
         );
 
         if (result != m3Err_none && result != m3Err_functionLookupFailed)
@@ -6470,6 +6535,10 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
         return OS_TASK_RUN_ERROR;
     }
 
+#if defined(OS_HAS_WASM3_WASI)
+    os_apply_task_wasi_args(task);
+#endif
+
 #if d_m3HasDylink
     if (task->wasm_dylink_task)
     {
@@ -6596,6 +6665,526 @@ static void os_set_task_suspended(OsTaskHandle task)
     os_clock_rearm();
 }
 
+/* ---------------------------------------------------------------------------
+ * Processes: spawn, wait and reclaim WebAssembly programs started at run time
+ * ------------------------------------------------------------------------ */
+
+/* Pack argv into one allocation: the pointer table followed by the strings. */
+static char** os_pack_argv(const char* const* argv, uint32_t argc)
+{
+    size_t total = (size_t)(argc + 1U) * sizeof(char*);
+    char** packed = NULL;
+    char* cursor = NULL;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < argc; ++index)
+    {
+        total += strlen(argv[index]) + 1U;
+    }
+
+    packed = (char**)malloc(total);
+    if (packed == NULL)
+    {
+        return NULL;
+    }
+
+    cursor = (char*)(packed + argc + 1U);
+    for (index = 0U; index < argc; ++index)
+    {
+        size_t length = strlen(argv[index]) + 1U;
+        memcpy(cursor, argv[index], length);
+        packed[index] = cursor;
+        cursor += length;
+    }
+    packed[argc] = NULL;
+    return packed;
+}
+
+static const char* os_process_name_from_argv(char** argv, uint32_t argc)
+{
+    const char* name = NULL;
+    const char* cursor = NULL;
+
+    if (argv == NULL || argc == 0U || argv[0] == NULL || argv[0][0] == '\0')
+    {
+        return "process";
+    }
+
+    name = argv[0];
+    for (cursor = argv[0]; *cursor != '\0'; ++cursor)
+    {
+        if (*cursor == '/')
+        {
+            name = cursor + 1;
+        }
+    }
+    return name[0] != '\0' ? name : "process";
+}
+
+/* Takes ownership of wasm_bytes and argv on every path. */
+static OsStatus os_task_spawn_owned(
+    OsTaskHandle* out_task,
+    uint8_t* wasm_bytes,
+    uint32_t wasm_size,
+    char** argv,
+    uint32_t argc,
+    uint32_t priority
+)
+{
+    OsTaskHandle parent = g_os.current_task;
+    OsTaskHandle task = NULL;
+    OsStatus status = OS_STATUS_OK;
+
+    if (g_os.spawned_task_count >= OS_MAX_SPAWNED_TASKS)
+    {
+        free(wasm_bytes);
+        free(argv);
+        os_set_last_error(parent, "spawn", "process limit reached", OS_STATUS_LIMIT_REACHED);
+        return OS_STATUS_LIMIT_REACHED;
+    }
+
+    if (priority == 0U)
+    {
+        priority = parent != NULL ? parent->base_priority : (uint32_t)OS_TASK_PRIORITY_NORMAL;
+    }
+
+    status = os_task_initialize(
+        &task,
+        wasm_bytes,
+        wasm_size,
+        NULL,
+        NULL,
+        0U,
+        os_process_name_from_argv(argv, argc),
+        0U,
+        priority
+    );
+    if (status != OS_STATUS_OK)
+    {
+        free(wasm_bytes);
+        free(argv);
+        return status;
+    }
+
+    task->owned_wasm_bytes = wasm_bytes;
+    task->argv = argv;
+    task->argc = argc;
+    task->parent_id = parent != NULL ? parent->id : 0U;
+    task->spawned = 1U;
+    /* Host-spawned processes stay until the host deletes them, like os_task_create. */
+    task->auto_reap = parent != NULL ? 1U : 0U;
+    ++g_os.spawned_task_count;
+
+    *out_task = task;
+    os_preempt_for_higher_priority_ready_task();
+    return OS_STATUS_OK;
+}
+
+OsStatus os_task_spawn(
+    OsTaskHandle* out_task,
+    const uint8_t* wasm_bytes,
+    uint32_t wasm_size,
+    const char* const* argv,
+    uint32_t argc,
+    uint32_t priority
+)
+{
+    uint8_t* bytes_copy = NULL;
+    char** argv_copy = NULL;
+    uint32_t index = 0U;
+
+    if (out_task == NULL || wasm_bytes == NULL || wasm_size == 0U ||
+        (argc > 0U && argv == NULL) || argc > OS_PROC_MAX_ARGS)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    for (index = 0U; index < argc; ++index)
+    {
+        if (argv[index] == NULL)
+        {
+            return OS_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    *out_task = NULL;
+    bytes_copy = (uint8_t*)malloc(wasm_size);
+    if (bytes_copy == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    memcpy(bytes_copy, wasm_bytes, wasm_size);
+
+    if (argc > 0U)
+    {
+        argv_copy = os_pack_argv(argv, argc);
+        if (argv_copy == NULL)
+        {
+            free(bytes_copy);
+            return OS_STATUS_OUT_OF_MEMORY;
+        }
+    }
+
+    return os_task_spawn_owned(out_task, bytes_copy, wasm_size, argv_copy, argc, priority);
+}
+
+uint32_t os_task_get_parent_id(OsTaskHandle task)
+{
+    if (!os_task_is_in_list(task))
+    {
+        return 0U;
+    }
+
+    return task->parent_id;
+}
+
+static OsStatus os_process_exit_status(OsTaskHandle task)
+{
+    if (task->exit_reason == OS_TASK_EXIT_WASM_ERROR)
+    {
+        return OS_STATUS_WASM_ERROR;
+    }
+    if (task->exit_reason == OS_TASK_EXIT_DELETED)
+    {
+        return OS_STATUS_ABORTED;
+    }
+    return OS_STATUS_OK;
+}
+
+/*
+ * Called whenever a task becomes dead or is destroyed. Wakes a parent that
+ * waits for it, marks unreachable spawned children for reclamation and
+ * orphans the task's own children. Never frees a task: the scheduler may
+ * still be using the dead one, so reclamation happens in os_reap_processes.
+ */
+static void os_process_on_task_dead(OsTaskHandle task)
+{
+    OsTaskHandle parent = NULL;
+    OsTaskHandle child = NULL;
+
+    if (task == NULL)
+    {
+        return;
+    }
+
+    for (child = g_os.task_list; child != NULL; child = child->next)
+    {
+        if (child != task && child->parent_id == task->id && task->id != 0U)
+        {
+            child->parent_id = 0U;
+            if (child->auto_reap && child->state == OS_TASK_DEAD)
+            {
+                child->reap_pending = 1U;
+            }
+        }
+    }
+
+    if (task->exit_collected)
+    {
+        return;
+    }
+
+    parent = task->parent_id != 0U ? os_task_find_by_id(task->parent_id) : NULL;
+    if (parent == NULL || parent->state == OS_TASK_DEAD)
+    {
+        if (task->auto_reap)
+        {
+            task->reap_pending = 1U;
+        }
+        return;
+    }
+
+    if (parent->state == OS_TASK_WAITING &&
+        parent->wait_type == OS_TASK_WAIT_CHILD &&
+        parent->wait_child_id == task->id)
+    {
+        task->exit_collected = 1U;
+        task->reap_pending = task->auto_reap;
+        os_complete_task_wait(parent, os_process_exit_status(task), task->exit_code);
+        os_recalculate_task_counters();
+        os_preempt_for_higher_priority_ready_task();
+    }
+}
+
+static void os_reap_processes(void)
+{
+    OsTaskHandle task = g_os.task_list;
+
+    while (task != NULL)
+    {
+        OsTaskHandle next = task->next;
+
+        if (task->reap_pending && task->state == OS_TASK_DEAD &&
+            task != g_os.current_task)
+        {
+            os_destroy_task(task);
+            /* Destroying may orphan and mark later tasks; restart the scan. */
+            next = g_os.task_list;
+        }
+
+        task = next;
+    }
+}
+
+#if defined(OS_HAS_WASM3_WASI)
+/* WASI keeps one argument context; point it at the task about to run. */
+static void os_apply_task_wasi_args(OsTaskHandle task)
+{
+    m3_wasi_context_t* context = m3_GetWasiContext();
+
+    if (context == NULL)
+    {
+        return;
+    }
+
+    if (task->argv != NULL && task->argc > 0U)
+    {
+        context->argc = task->argc;
+        context->argv = (ccstr_t*)task->argv;
+    }
+    else
+    {
+        task->default_argv[0] = task->name;
+        context->argc = 1U;
+        context->argv = (ccstr_t*)task->default_argv;
+    }
+}
+#endif
+
+static OsStatus os_read_guest_string(OsTaskHandle task, uint32_t address, char* out, uint32_t out_size)
+{
+    uint32_t length = 0U;
+
+    for (length = 0U; length + 1U < out_size; ++length)
+    {
+        uint8_t byte = 0U;
+        OsStatus status = os_task_read_memory(task, address + length, &byte, 1U);
+        if (status != OS_STATUS_OK)
+        {
+            return status;
+        }
+        out[length] = (char)byte;
+        if (byte == 0U)
+        {
+            return OS_STATUS_OK;
+        }
+    }
+
+    return OS_STATUS_BUFFER_TOO_SMALL;
+}
+
+static m3ApiRawFunction(os_wasm_import_proc_spawn)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, bytes_address);
+    m3ApiGetArg(uint32_t, bytes_length);
+    m3ApiGetArg(uint32_t, argv_address);
+    m3ApiGetArg(uint32_t, argc);
+    m3ApiGetArg(uint32_t, priority);
+    OsTaskHandle task = os_task_get_current();
+    OsTaskHandle child = NULL;
+    uint8_t* bytes = NULL;
+    char** argv = NULL;
+    char* strings = NULL;
+    OsStatus status = OS_STATUS_OK;
+    uint32_t index = 0U;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (task == NULL || bytes_length == 0U || argc > OS_PROC_MAX_ARGS)
+    {
+        m3ApiReturn(-(int32_t)OS_STATUS_INVALID_ARGUMENT);
+    }
+
+    bytes = (uint8_t*)malloc(bytes_length);
+    if (bytes == NULL)
+    {
+        m3ApiReturn(-(int32_t)OS_STATUS_OUT_OF_MEMORY);
+    }
+    status = os_task_read_memory(task, bytes_address, bytes, bytes_length);
+
+    if (status == OS_STATUS_OK && argc > 0U)
+    {
+        /* Copy every argument out of guest memory, then pack them. */
+        strings = (char*)malloc((size_t)argc * OS_PROC_MAX_ARG_LENGTH);
+        if (strings == NULL)
+        {
+            status = OS_STATUS_OUT_OF_MEMORY;
+        }
+        for (index = 0U; status == OS_STATUS_OK && index < argc; ++index)
+        {
+            uint8_t raw[sizeof(uint32_t)];
+            uint32_t string_address = 0U;
+            status = os_task_read_memory(task, argv_address + index * 4U, raw, 4U);
+            if (status == OS_STATUS_OK)
+            {
+                string_address = (uint32_t)raw[0] | ((uint32_t)raw[1] << 8U) |
+                                 ((uint32_t)raw[2] << 16U) | ((uint32_t)raw[3] << 24U);
+                status = os_read_guest_string(
+                    task,
+                    string_address,
+                    strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH,
+                    OS_PROC_MAX_ARG_LENGTH
+                );
+            }
+        }
+        if (status == OS_STATUS_OK)
+        {
+            const char* pointers[OS_PROC_MAX_ARGS];
+            for (index = 0U; index < argc; ++index)
+            {
+                pointers[index] = strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH;
+            }
+            argv = os_pack_argv(pointers, argc);
+            if (argv == NULL)
+            {
+                status = OS_STATUS_OUT_OF_MEMORY;
+            }
+        }
+        free(strings);
+    }
+
+    if (status != OS_STATUS_OK)
+    {
+        free(bytes);
+        free(argv);
+        m3ApiReturn(-(int32_t)status);
+    }
+
+    status = os_task_spawn_owned(&child, bytes, bytes_length, argv, argc, priority);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(-(int32_t)status);
+    }
+
+    m3ApiReturn((int32_t)child->id);
+}
+
+static m3ApiRawFunction(os_wasm_import_proc_wait)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, pid);
+    m3ApiGetArg(uint32_t, out_code_address);
+    m3ApiGetArg(uint32_t, timeout_ms);
+    OsTaskHandle task = os_task_get_current();
+    OsTaskHandle child = os_task_find_by_id(pid);
+    OsStatus status = OS_STATUS_OK;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (task == NULL || child == NULL || child->parent_id != task->id || child->exit_collected)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_TASK_NOT_FOUND);
+    }
+
+    if (out_code_address != 0U)
+    {
+        uint8_t zero[sizeof(uint32_t)] = { 0U, 0U, 0U, 0U };
+        status = os_task_write_memory(task, out_code_address, zero, (uint32_t)sizeof(zero));
+        if (status != OS_STATUS_OK)
+        {
+            m3ApiReturn((uint32_t)status);
+        }
+    }
+
+    if (child->state == OS_TASK_DEAD)
+    {
+        uint32_t code = child->exit_code;
+        status = os_process_exit_status(child);
+        child->exit_collected = 1U;
+        child->reap_pending = child->auto_reap;
+        if (out_code_address != 0U)
+        {
+            uint8_t bytes[sizeof(uint32_t)];
+            bytes[0] = (uint8_t)(code & 0xffU);
+            bytes[1] = (uint8_t)((code >> 8U) & 0xffU);
+            bytes[2] = (uint8_t)((code >> 16U) & 0xffU);
+            bytes[3] = (uint8_t)((code >> 24U) & 0xffU);
+            (void)os_task_write_memory(task, out_code_address, bytes, (uint32_t)sizeof(bytes));
+        }
+        m3ApiReturn((uint32_t)status);
+    }
+
+    if (timeout_ms == 0U)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_TIMEOUT);
+    }
+
+    status = os_prepare_wait_return(task, raw_return);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn((uint32_t)status);
+    }
+
+    task->wait_has_wasm_output = out_code_address != 0U ? 1U : 0U;
+    task->wait_wasm_output_address = out_code_address;
+    task->wait_return_kind = OS_WAIT_RETURN_STATUS;
+    task->wait_child_id = child->id;
+    status = os_begin_task_wait(task, OS_TASK_WAIT_CHILD, timeout_ms);
+    *raw_return = (uint32_t)status;
+    if (status != OS_STATUS_OK)
+    {
+        os_clear_wait_return(task);
+        task->wait_child_id = 0U;
+        return m3Err_none;
+    }
+
+    return m3_Yield();
+}
+
+static m3ApiRawFunction(os_wasm_import_proc_kill)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, pid);
+    OsTaskHandle task = os_task_get_current();
+    OsTaskHandle child = os_task_find_by_id(pid);
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (task == NULL || child == NULL || child->parent_id != task->id)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_TASK_NOT_FOUND);
+    }
+
+    if (child->state == OS_TASK_DEAD)
+    {
+        m3ApiReturn((uint32_t)OS_STATUS_TASK_DEAD);
+    }
+
+    /* Keep the dead child until the parent collects it with wait. */
+    os_record_task_exit(child, OS_TASK_EXIT_DELETED, 0U);
+    os_set_task_dead(child);
+    os_recalculate_task_counters();
+    m3ApiReturn((uint32_t)OS_STATUS_OK);
+}
+
+static m3ApiRawFunction(os_wasm_import_proc_self)
+{
+    m3ApiReturnType(uint32_t);
+    OsTaskHandle task = os_task_get_current();
+    (void)runtime;
+    (void)_ctx;
+    (void)_sp;
+    (void)_mem;
+
+    m3ApiReturn(task != NULL ? task->id : 0U);
+}
+
+static m3ApiRawFunction(os_wasm_import_proc_parent)
+{
+    m3ApiReturnType(uint32_t);
+    OsTaskHandle task = os_task_get_current();
+    (void)runtime;
+    (void)_ctx;
+    (void)_sp;
+    (void)_mem;
+
+    m3ApiReturn(task != NULL ? task->parent_id : 0U);
+}
+
 static void os_set_task_dead(OsTaskHandle task)
 {
     if (task == NULL)
@@ -6614,6 +7203,7 @@ static void os_set_task_dead(OsTaskHandle task)
     task->state = OS_TASK_DEAD;
     task->wake_tick_ms = 0U;
     os_task_cleanup_wasm(task);
+    os_process_on_task_dead(task);
     os_clock_rearm();
 }
 
@@ -6701,6 +7291,7 @@ static void os_destroy_task(OsTaskHandle task)
     os_timer_delete_for_task(task);
     os_record_task_exit(task, OS_TASK_EXIT_DELETED, 0U);
     task->state = OS_TASK_DEAD;
+    os_process_on_task_dead(task);
     os_task_list_remove(task);
     os_task_free(task);
     os_recalculate_task_counters();
