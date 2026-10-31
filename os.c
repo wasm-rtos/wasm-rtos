@@ -13,11 +13,13 @@
 
 #define OS_TASK_NAME_MAX 32U
 #define OS_ERROR_DETAIL_MAX 96U
+#if OS_HAS_PROCESSES
 #ifndef OS_MAX_SPAWNED_TASKS
 #define OS_MAX_SPAWNED_TASKS 16U
 #endif
 #define OS_PROC_MAX_ARGS 32U
 #define OS_PROC_MAX_ARG_LENGTH 256U
+#endif
 #define OS_DEFAULT_STACK_SIZE (64U * 1024U)
 #define OS_TASK_SLICE_FUEL 10000ULL
 #if d_m3HasDylink
@@ -170,7 +172,9 @@ typedef struct OsState
     uint32_t next_event_group_id;
     uint32_t next_timer_id;
     uint64_t next_wait_sequence;
+#if OS_HAS_PROCESSES
     uint32_t spawned_task_count;
+#endif
     uint32_t task_count;
     uint32_t ready_task_count;
     uint32_t waiting_task_count;
@@ -244,6 +248,7 @@ struct OsTask
     uint8_t delete_requested;
     uint32_t run_count;
 
+#if OS_HAS_PROCESSES
     /* Process state for tasks started through os_task_spawn */
     uint32_t parent_id;
     uint32_t wait_child_id;
@@ -255,6 +260,7 @@ struct OsTask
     char** argv;
     uint32_t argc;
     const char* default_argv[1];
+#endif
 
 #if d_m3HasDylink
     IM3DylinkContext wasm_dylink_context;
@@ -378,11 +384,13 @@ static m3ApiRawFunction(os_wasm_import_os_event_group_clear_bits);
 static m3ApiRawFunction(os_wasm_import_os_event_group_wait_bits);
 static m3ApiRawFunction(os_wasm_import_os_task_notify);
 static m3ApiRawFunction(os_wasm_import_os_task_notify_wait);
+#if OS_HAS_PROCESSES
 static m3ApiRawFunction(os_wasm_import_proc_spawn);
 static m3ApiRawFunction(os_wasm_import_proc_wait);
 static m3ApiRawFunction(os_wasm_import_proc_kill);
 static m3ApiRawFunction(os_wasm_import_proc_self);
 static m3ApiRawFunction(os_wasm_import_proc_parent);
+#endif
 static m3ApiRawFunction(os_wasm_import_os_task_notify_take);
 static m3ApiRawFunction(os_wasm_import_os_timer_create);
 static m3ApiRawFunction(os_wasm_import_os_timer_delete);
@@ -429,10 +437,12 @@ static void os_set_task_ready(OsTaskHandle task);
 static void os_set_task_waiting(OsTaskHandle task, uint32_t wake_tick_ms);
 static void os_set_task_suspended(OsTaskHandle task);
 static void os_set_task_dead(OsTaskHandle task);
+#if OS_HAS_PROCESSES
 static void os_process_on_task_dead(OsTaskHandle task);
 static void os_reap_processes(void);
 #if defined(OS_HAS_WASM3_WASI)
 static void os_apply_task_wasi_args(OsTaskHandle task);
+#endif
 #endif
 static OsStatus os_begin_task_wait(
     OsTaskHandle task,
@@ -482,7 +492,9 @@ OsStatus os_init(void)
     g_os.next_wasm_library_id = 1U;
 #endif
     g_os.next_wait_sequence = 1U;
+#if OS_HAS_PROCESSES
     g_os.spawned_task_count = 0U;
+#endif
     g_os.initialized = 1U;
     os_clear_last_error();
 
@@ -3327,7 +3339,9 @@ OsStatus os_schedule(void)
         os_update_time_events();
     }
 
+#if OS_HAS_PROCESSES
     os_reap_processes();
+#endif
 
     task = os_select_next_ready_task();
     if (task == NULL)
@@ -3934,6 +3948,7 @@ static void os_task_free(OsTaskHandle task)
     os_clear_queue_wait(task);
     os_task_free_entry_args(task);
     os_task_free_return_values(task);
+#if OS_HAS_PROCESSES
     /* The module was parsed in place, so its bytes outlive the runtime. */
     free(task->owned_wasm_bytes);
     free(task->argv);
@@ -3941,6 +3956,7 @@ static void os_task_free(OsTaskHandle task)
     {
         --g_os.spawned_task_count;
     }
+#endif
     free(task);
 }
 
@@ -4917,6 +4933,7 @@ static M3Result os_link_module_host_imports(IM3Module module)
         { "os_timer_change_period", "i(ii)", os_wasm_import_os_timer_change_period },
         { "os_timer_is_active", "i(i)", os_wasm_import_os_timer_is_active }
     };
+#if OS_HAS_PROCESSES
     static const struct OsBuiltinImport proc_imports[] =
     {
         { "spawn", "i(iiiii)", os_wasm_import_proc_spawn },
@@ -4925,6 +4942,7 @@ static M3Result os_link_module_host_imports(IM3Module module)
         { "self", "i()", os_wasm_import_proc_self },
         { "parent", "i()", os_wasm_import_proc_parent }
     };
+#endif
     uint32_t import_index = 0U;
     M3Result result = m3Err_none;
 
@@ -4951,6 +4969,7 @@ static M3Result os_link_module_host_imports(IM3Module module)
         }
     }
 
+#if OS_HAS_PROCESSES
     for (import_index = 0U;
          import_index < (uint32_t)(sizeof(proc_imports) / sizeof(proc_imports[0]));
          ++import_index)
@@ -4969,6 +4988,7 @@ static M3Result os_link_module_host_imports(IM3Module module)
         }
     }
 
+#endif
     result = os_link_registered_host_imports(module);
     if (result != m3Err_none)
     {
@@ -6535,7 +6555,7 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
         return OS_TASK_RUN_ERROR;
     }
 
-#if defined(OS_HAS_WASM3_WASI)
+#if OS_HAS_PROCESSES && defined(OS_HAS_WASM3_WASI)
     os_apply_task_wasi_args(task);
 #endif
 
@@ -6665,6 +6685,7 @@ static void os_set_task_suspended(OsTaskHandle task)
     os_clock_rearm();
 }
 
+#if OS_HAS_PROCESSES
 /* ---------------------------------------------------------------------------
  * Processes: spawn, wait and reclaim WebAssembly programs started at run time
  * ------------------------------------------------------------------------ */
@@ -7184,6 +7205,7 @@ static m3ApiRawFunction(os_wasm_import_proc_parent)
 
     m3ApiReturn(task != NULL ? task->parent_id : 0U);
 }
+#endif /* OS_HAS_PROCESSES */
 
 static void os_set_task_dead(OsTaskHandle task)
 {
@@ -7203,7 +7225,9 @@ static void os_set_task_dead(OsTaskHandle task)
     task->state = OS_TASK_DEAD;
     task->wake_tick_ms = 0U;
     os_task_cleanup_wasm(task);
+#if OS_HAS_PROCESSES
     os_process_on_task_dead(task);
+#endif
     os_clock_rearm();
 }
 
@@ -7291,7 +7315,9 @@ static void os_destroy_task(OsTaskHandle task)
     os_timer_delete_for_task(task);
     os_record_task_exit(task, OS_TASK_EXIT_DELETED, 0U);
     task->state = OS_TASK_DEAD;
+#if OS_HAS_PROCESSES
     os_process_on_task_dead(task);
+#endif
     os_task_list_remove(task);
     os_task_free(task);
     os_recalculate_task_counters();

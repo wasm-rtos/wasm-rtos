@@ -9,6 +9,14 @@
 #include "wasm3/source/m3_dylink.h"
 #endif
 
+/*
+ * Build options (define to 0 to leave a feature out of the image):
+ *   OS_HAS_PROCESSES  os_task_spawn() and the "wasm-rtos:proc" guest imports
+ */
+#ifndef OS_HAS_PROCESSES
+#define OS_HAS_PROCESSES 1
+#endif
+
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
 
@@ -258,6 +266,7 @@ uint8_t os_wasm_link_group_is_sealed(void);
 
 OsStatus os_task_delete(OsTaskHandle task);
 
+#if OS_HAS_PROCESSES
 /*
  * Start a WebAssembly program as a new process, like an executable loader.
  * The module bytes and argv are copied, so the caller may release them
@@ -292,6 +301,7 @@ OsStatus os_task_spawn(
     uint32_t priority
 );
 uint32_t os_task_get_parent_id(OsTaskHandle task);
+#endif
 OsStatus os_task_delay_ms(uint32_t delay_ms);
 /*
  * Advance *previous_wake_time_ms by period_ms and block until that absolute
