@@ -12,6 +12,7 @@
 #include <string.h>
 
 #define OS_TASK_NAME_MAX 32U
+#define OS_ERROR_DETAIL_MAX 96U
 #define OS_DEFAULT_STACK_SIZE (64U * 1024U)
 #define OS_TASK_SLICE_FUEL 10000ULL
 #if d_m3HasDylink
@@ -58,6 +59,7 @@ typedef struct OsLastError
     const char* phase;
     char task_name[OS_TASK_NAME_MAX];
     uint8_t has_task_name;
+    char detail[OS_ERROR_DETAIL_MAX];
 } OsLastError;
 
 typedef struct OsHostImportNode
@@ -328,6 +330,8 @@ static void os_task_cleanup_wasm(OsTaskHandle task);
 static OsStatus os_wasm_result_to_status(M3Result result);
 static OsStatus os_wasm_snapshot_result_to_status(M3Result result);
 static M3Result os_link_task_host_imports(OsTaskHandle task);
+static OsStatus os_check_module_imports(OsTaskHandle task, IM3Module module);
+static const char* os_detect_entry_function(IM3Module module);
 static M3Result os_link_module_host_imports(IM3Module module);
 static M3Result os_link_registered_host_imports(IM3Module module);
 static m3ApiRawFunction(os_wasm_import_os_yield);
@@ -1933,7 +1937,6 @@ static OsStatus os_task_initialize(
     OsStatus status = OS_STATUS_OK;
 
     if (out_task == NULL || wasm_bytes == NULL || wasm_size == 0U ||
-        entry_function_name == NULL || entry_function_name[0] == '\0' ||
         (entry_arg_count > 0U && entry_args == NULL))
     {
         return OS_STATUS_INVALID_ARGUMENT;
@@ -4236,10 +4239,14 @@ static OsStatus os_task_create_wasm(
             return status;
         }
 
-        entry = (IM3Function)v_FindFunction(
-            task->wasm_module,
-            (void*)entry_function_name
-        );
+        if (entry_function_name == NULL || entry_function_name[0] == '\0')
+        {
+            entry_function_name = os_detect_entry_function(task->wasm_module);
+            task->entry_function_name = entry_function_name;
+        }
+        entry = entry_function_name != NULL
+            ? (IM3Function)v_FindFunction(task->wasm_module, (void*)entry_function_name)
+            : NULL;
         if (entry == NULL)
         {
             os_set_last_error(task, "find_linked_function",
@@ -4277,6 +4284,27 @@ static OsStatus os_task_create_wasm(
         OsStatus status = os_wasm_result_to_status(result);
         os_set_last_error(task, "link_imports", result, status);
         return status;
+    }
+
+    {
+        OsStatus status = os_check_module_imports(task, task->wasm_module);
+        if (status != OS_STATUS_OK)
+        {
+            return status;
+        }
+    }
+
+    if (entry_function_name == NULL || entry_function_name[0] == '\0')
+    {
+        entry_function_name = os_detect_entry_function(task->wasm_module);
+        if (entry_function_name == NULL)
+        {
+            os_set_last_error(task, "find_function",
+                              "no entry point: export _start, app_main or main",
+                              OS_STATUS_WASM_ERROR);
+            return OS_STATUS_WASM_ERROR;
+        }
+        task->entry_function_name = entry_function_name;
     }
 
     result = m3_FindFunction(
@@ -4669,6 +4697,133 @@ static void os_task_cleanup_wasm(OsTaskHandle task)
         m3_FreeEnvironment(task->wasm_environment);
         task->wasm_environment = NULL;
     }
+}
+
+/*
+ * Reject a module whose function imports are not all resolved, before any
+ * guest code runs. wasm3 binds imports lazily, so without this check a
+ * missing import would only trap when the importing call is first compiled.
+ */
+static OsStatus os_check_module_imports(OsTaskHandle task, IM3Module module)
+{
+    char* detail = g_os.last_error.detail;
+    const uint32_t detail_size = (uint32_t)sizeof(g_os.last_error.detail);
+    uint32_t missing_count = 0U;
+    uint32_t length = 0U;
+    uint32_t import_index = 0U;
+
+    if (module == NULL || module->functions == NULL)
+    {
+        return OS_STATUS_OK;
+    }
+
+    for (import_index = 0U; import_index < module->numFuncImports; ++import_index)
+    {
+        IM3Function function = &module->functions[import_index];
+        const char* parts[3];
+        uint32_t part_index = 0U;
+
+        if (function->compiled != NULL)
+        {
+            continue;
+        }
+
+        ++missing_count;
+        if (missing_count > 1U)
+        {
+            continue;
+        }
+
+        parts[0] = function->import.moduleUtf8 != NULL ? function->import.moduleUtf8 : "?";
+        parts[1] = ".";
+        parts[2] = function->import.fieldUtf8 != NULL ? function->import.fieldUtf8 : "?";
+        length = 0U;
+        for (const char* prefix = "missing import "; *prefix != '\0' && length + 1U < detail_size; ++prefix)
+        {
+            detail[length++] = *prefix;
+        }
+        for (part_index = 0U; part_index < 3U; ++part_index)
+        {
+            for (const char* text = parts[part_index]; *text != '\0' && length + 1U < detail_size; ++text)
+            {
+                detail[length++] = *text;
+            }
+        }
+        detail[length] = '\0';
+    }
+
+    if (missing_count == 0U)
+    {
+        return OS_STATUS_OK;
+    }
+
+    if (missing_count > 1U)
+    {
+        /* Append " (+N more)" when it fits. */
+        char suffix[24];
+        uint32_t suffix_length = 0U;
+        uint32_t remaining = missing_count - 1U;
+        char digits[11];
+        uint32_t digit_count = 0U;
+
+        do
+        {
+            digits[digit_count++] = (char)('0' + (remaining % 10U));
+            remaining /= 10U;
+        } while (remaining != 0U && digit_count < (uint32_t)sizeof(digits));
+
+        suffix[suffix_length++] = ' ';
+        suffix[suffix_length++] = '(';
+        suffix[suffix_length++] = '+';
+        while (digit_count > 0U)
+        {
+            suffix[suffix_length++] = digits[--digit_count];
+        }
+        for (const char* text = " more)"; *text != '\0'; ++text)
+        {
+            suffix[suffix_length++] = *text;
+        }
+        if (length + suffix_length < detail_size)
+        {
+            memcpy(detail + length, suffix, suffix_length);
+            detail[length + suffix_length] = '\0';
+        }
+    }
+
+    os_set_last_error(task, "check_imports", detail, OS_STATUS_WASM_ERROR);
+    return OS_STATUS_WASM_ERROR;
+}
+
+/*
+ * Pick the entry point the way a loader picks an executable's: a WASI command
+ * (_start) first, then the wasm-rtos task convention, then a bare main.
+ */
+static const char* os_detect_entry_function(IM3Module module)
+{
+    static const char* const candidates[] = { "_start", "app_main", "main" };
+    uint32_t candidate_index = 0U;
+    uint32_t function_index = 0U;
+
+    if (module == NULL || module->functions == NULL)
+    {
+        return NULL;
+    }
+
+    for (candidate_index = 0U;
+         candidate_index < (uint32_t)(sizeof(candidates) / sizeof(candidates[0]));
+         ++candidate_index)
+    {
+        for (function_index = 0U; function_index < module->numFunctions; ++function_index)
+        {
+            const char* export_name = module->functions[function_index].export_name;
+            if (export_name != NULL && strcmp(export_name, candidates[candidate_index]) == 0)
+            {
+                return candidates[candidate_index];
+            }
+        }
+    }
+
+    return NULL;
 }
 
 static M3Result os_link_task_host_imports(OsTaskHandle task)

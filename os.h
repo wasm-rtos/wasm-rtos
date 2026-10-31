@@ -124,6 +124,13 @@ typedef struct OsValue
 OsStatus os_init(void);
 void os_shutdown(void);
 
+/*
+ * entry_function_name may be NULL or "" to let the loader pick the entry
+ * point: _start (WASI command), then app_main, then main. Every function
+ * import must resolve when the task is created; otherwise creation fails
+ * with OS_STATUS_WASM_ERROR and os_get_last_error_result() names the first
+ * missing import.
+ */
 OsStatus os_task_create(
     OsTaskHandle* out_task,
     uint8_t* wasm_bytes,
