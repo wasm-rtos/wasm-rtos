@@ -49,7 +49,8 @@ typedef enum OsStatus
     OS_STATUS_EVENT_GROUP_NOT_FOUND,
     OS_STATUS_TIMER_NOT_FOUND,
     OS_STATUS_ABORTED,
-    OS_STATUS_NOT_WAITING
+    OS_STATUS_NOT_WAITING,
+    OS_STATUS_LIMIT_REACHED
 } OsStatus;
 
 typedef enum OsTaskState
@@ -256,6 +257,41 @@ uint8_t os_wasm_link_group_is_sealed(void);
 #endif
 
 OsStatus os_task_delete(OsTaskHandle task);
+
+/*
+ * Start a WebAssembly program as a new process, like an executable loader.
+ * The module bytes and argv are copied, so the caller may release them
+ * afterwards. The entry point is detected (_start, app_main, main); a WASI
+ * program receives argv through args_get. priority 0 inherits the calling
+ * task's base priority, or OS_TASK_PRIORITY_NORMAL when called from the host.
+ *
+ * A process spawned from inside a task becomes that task's child. A dead
+ * child is reclaimed after its parent collects it (the guest proc wait
+ * call), or as soon as it dies when its parent is gone. A process spawned
+ * by the host has no parent and stays until the host deletes it, exactly
+ * like a task from os_task_create. At most
+ * OS_MAX_SPAWNED_TASKS spawned processes exist at once; further spawns
+ * return OS_STATUS_LIMIT_REACHED.
+ *
+ * Guest programs use the "wasm-rtos:proc" import module:
+ *   spawn(bytes, len, argv, argc, priority) -> pid, or -OsStatus on failure
+ *   wait(pid, out_exit_code, timeout_ms)    -> OsStatus (blocks the caller)
+ *   kill(pid)                               -> OsStatus (own children only)
+ *   self()                                  -> pid
+ *   parent()                                -> parent pid, 0 if none
+ * wait returns OS_STATUS_OK for a normal exit, OS_STATUS_WASM_ERROR when the
+ * child trapped and OS_STATUS_ABORTED when it was deleted; the exit code is
+ * written to out_exit_code when it is not 0.
+ */
+OsStatus os_task_spawn(
+    OsTaskHandle* out_task,
+    const uint8_t* wasm_bytes,
+    uint32_t wasm_size,
+    const char* const* argv,
+    uint32_t argc,
+    uint32_t priority
+);
+uint32_t os_task_get_parent_id(OsTaskHandle task);
 OsStatus os_task_delay_ms(uint32_t delay_ms);
 /*
  * Advance *previous_wake_time_ms by period_ms and block until that absolute
