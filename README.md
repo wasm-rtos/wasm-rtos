@@ -48,6 +48,7 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_MAX_SPAWNED_TASKS` | 16 | processes alive at once |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
+| `OS_NATIVE_STACK_BUDGET` | 16 KiB | C stack nested Wasm calls may use in one slice before it ends early (0 = unlimited) |
 | `d_m3HasDylink` | 0 | `dylink.0` libraries (`os_wasm_library_register`) |
 | `d_m3HasHeapAccounting` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
 

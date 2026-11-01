@@ -29,6 +29,14 @@
 #ifndef OS_DEFAULT_STACK_SIZE
 #define OS_DEFAULT_STACK_SIZE (8U * 1024U)
 #endif
+/*
+ * Native C stack that nested Wasm calls may take in one slice; past it the
+ * slice ends early (resuming starts over at the top of the native stack).
+ * Each nested call takes about 100 bytes. 0 = unlimited.
+ */
+#ifndef OS_NATIVE_STACK_BUDGET
+#define OS_NATIVE_STACK_BUDGET (16U * 1024U)
+#endif
 /* Fill for unused interpreter stack, so the high-water mark can be found. */
 #define OS_STACK_PAINT 0xA5U
 /* Interpreter work units per scheduler slice; override at build time. */
@@ -4163,6 +4171,7 @@ static OsStatus os_task_create_wasm(
         return OS_STATUS_OUT_OF_MEMORY;
     }
     memset(task->wasm_runtime->stack, OS_STACK_PAINT, task->wasm_runtime->stackSize);
+    m3_SetNativeStackBudget(task->wasm_runtime, OS_NATIVE_STACK_BUDGET);
     task->wasm_stack_base = (uint8_t*)task->wasm_runtime->stack;
 
     result = m3_ParseModule(
