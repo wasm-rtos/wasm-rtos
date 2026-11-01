@@ -2953,8 +2953,9 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
         /* m3_NewRuntime allocates four guard slots past the stack. */
         out_usage->stack_bytes = runtime->originStack != NULL
             ? runtime->stackSize + 4U * (uint32_t)sizeof(m3slot_t) : 0U;
+        /* What is allocated, including spare room kept by memory.grow. */
         out_usage->linear_memory_bytes = runtime->memory.mallocated != NULL
-            ? (uint32_t)(sizeof(M3MemoryHeader) + runtime->memory.mallocated->length) : 0U;
+            ? (uint32_t)(sizeof(M3MemoryHeader) + runtime->memory.mallocated->capacity) : 0U;
         out_usage->code_bytes = os_code_page_list_bytes(runtime->pagesOpen) +
                                 os_code_page_list_bytes(runtime->pagesFull);
     }
