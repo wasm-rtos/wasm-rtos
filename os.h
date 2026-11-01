@@ -450,6 +450,10 @@ uint8_t os_timer_is_active(OsTimerHandle timer);
 uint32_t os_timer_get_period_ms(OsTimerHandle timer);
 
 /*
+ * Time is the kernel's only platform dependency, and the kernel contains no
+ * platform code: a board, the browser or a test either installs a clock port
+ * or drives time itself with os_tick() / os_update_time_ms().
+ *
  * now_ms is a monotonic platform clock. arm_wakeup and cancel_wakeup must
  * either both be supplied for tickless operation or both be NULL for polling.
  * A hardware ISR should only defer work; call os_clock_wakeup from a safe
