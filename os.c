@@ -7044,26 +7044,6 @@ static void os_request_task_stop(OsTaskHandle task)
     m3_SetFuel(task->wasm_runtime, 0U);
 }
 
-static void os_mark_current_task_exiting(uint32_t exit_code)
-{
-    OsTaskHandle task = g_os.current_task;
-
-    if (task == NULL)
-    {
-        return;
-    }
-
-    os_record_task_exit(task, OS_TASK_EXIT_EXPLICIT, exit_code);
-    os_cancel_task_wait(task, OS_STATUS_TASK_DEAD);
-    os_release_task_mutexes(task);
-    os_timer_delete_for_task(task);
-    task->state = OS_TASK_DEAD;
-    task->wake_tick_ms = 0U;
-    os_request_task_stop(task);
-    os_recalculate_task_counters();
-    os_clock_rearm();
-}
-
 static void os_request_task_delete(OsTaskHandle task)
 {
     if (task == NULL)
