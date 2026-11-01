@@ -1,12 +1,13 @@
-// wasm-rtos ABI 1.0: what a program imports from the kernel.
+// wasm-rtos ABI 1.1: what a program imports from the kernel.
 //
 // Lowered to core wasm imports by hand ("canonical ABI lite"): every function
 // returns s32, zero or a value on success and a negative `error` otherwise;
 // a string is passed as (pointer, length) in UTF-8; a list<string> as a
 // pointer to (pointer, length) pairs and a count. The import module of an
-// interface is "wasm-rtos:kernel/<interface>@1.0.0". docs/abi.md has the rules.
+// interface is "wasm-rtos:kernel/<interface>@1.<minor>.0", the minor version
+// the program was built for. docs/abi.md has the rules.
 
-package wasm-rtos:kernel@1.0.0;
+package wasm-rtos:kernel@1.1.0;
 
 interface types {
     // A handle to a kernel object; it belongs to the calling program.
@@ -18,6 +19,8 @@ interface types {
         ok, fault, inval, badh, nomem, limit, notfound, timeout, aborted, busy,
         notowner, full, empty, unsupported, toolong, badprogram, isdir, notdir,
         dead, mismatch, trapped, killed,
+        @since(version = 1.1.0)
+        inuse,
     }
 }
 
@@ -84,10 +87,28 @@ interface proc {
     parent: func() -> s32;
 }
 
+// Pins by the device profile's names, one owner at a time.
+@since(version = 1.1.0)
+interface gpio {
+    use types.{handle};
+    flags mode { output, pull-up, pull-down, open-drain, active-low, init-high }
+    flags edges { rising, falling }
+    open: func(name: string, mode: mode) -> handle;
+    set: func(pin: handle, level: u32) -> s32;
+    get: func(pin: handle) -> s32;
+    set-mode: func(pin: handle, mode: mode) -> s32;
+    // The handle is ready for wait.any once a watched edge happened.
+    watch: func(pin: handle, edges: edges) -> s32;
+    // Edges since the last call; resets the count.
+    events: func(pin: handle) -> s32;
+}
+
 world program {
     import handle;
     import sync;
     import timer;
     import wait;
     import proc;
+    @since(version = 1.1.0)
+    import gpio;
 }

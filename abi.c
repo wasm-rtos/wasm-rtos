@@ -54,7 +54,8 @@ enum
     WR_EDEAD = 18,
     WR_EMISMATCH = 19,
     WR_ETRAPPED = 20,
-    WR_EKILLED = 21
+    WR_EKILLED = 21,
+    WR_EINUSE = 22
 };
 
 #define WR_SYNC_EVENT_ALL 1U
@@ -140,6 +141,13 @@ static OsAbiState* os_abi_state(uint8_t create)
 
 static void os_abi_drop(OsAbiHandle* handle)
 {
+#if OS_HAS_GPIO
+    if (handle->type == OS_OBJECT_GPIO)
+    {
+        os_gpio_close(handle->id);
+    }
+    else
+#endif
     if (handle->type != OS_OBJECT_TASK)
     {
         os_object_release(handle->type, handle->id);
@@ -1032,7 +1040,125 @@ static m3ApiRawFunction(os_abi_proc_parent)
 #endif
 }
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS
+/* ---------------------------------------------------------------------------
+ * gpio
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_GPIO
+static m3ApiRawFunction(os_abi_gpio_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, flags);
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(name_address, name_length, &name);
+    if (handle < 0)
+    {
+        m3ApiReturn(handle);
+    }
+    if (name == NULL)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    status = os_gpio_open(name, name_length, flags, &id);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_abi_handle_new(OS_OBJECT_GPIO, id);
+    if (handle < 0)
+    {
+        os_gpio_close(id);
+    }
+    m3ApiReturn(handle);
+}
+
+static m3ApiRawFunction(os_abi_gpio_set)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, level);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_gpio_set(entry->id, level)));
+}
+
+static m3ApiRawFunction(os_abi_gpio_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
+    uint32_t level = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    status = os_gpio_get(entry->id, &level);
+    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)level : os_abi_error(status));
+}
+
+static m3ApiRawFunction(os_abi_gpio_set_mode)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, flags);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_gpio_set_mode(entry->id, flags)));
+}
+
+static m3ApiRawFunction(os_abi_gpio_watch)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, edges);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_gpio_watch(entry->id, edges)));
+}
+
+static m3ApiRawFunction(os_abi_gpio_events)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
+    uint32_t events = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    events = os_gpio_take_events(entry->id);
+    m3ApiReturn((int32_t)(events > 0x7FFFFFFFU ? 0x7FFFFFFFU : events));
+}
+#endif
+
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static m3ApiRawFunction(os_abi_unsupported)
 {
@@ -1217,81 +1343,137 @@ typedef struct OsAbiImport
     const char* name;
     const char* signature;
     M3RawCall function;
+    /* ABI minor version that added the call; kernel interfaces only. */
+    uint8_t since;
 } OsAbiImport;
 
-#define WR_MODULE(interface) "wasm-rtos:kernel/" interface "@1.0.0"
+/*
+ * Kernel interfaces are imported as "wasm-rtos:kernel/<interface>@1.<minor>.0".
+ * A program built for 1.N imports 1.N names; this kernel links every minor
+ * from the one that added a call up to OS_ABI_VERSION_MINOR.
+ */
+#define WR_KERNEL_PREFIX "wasm-rtos:kernel/"
+#define WR_MODULE(interface) WR_KERNEL_PREFIX interface
 
 static const OsAbiImport g_abi_imports[] =
 {
-    { WR_MODULE("handle"), "close", "i(i)", os_abi_handle_close },
+    { WR_MODULE("handle"), "close", "i(i)", os_abi_handle_close, 0U },
 
-    { WR_MODULE("sync"), "mutex-create", "i(ii)", os_abi_mutex_create },
-    { WR_MODULE("sync"), "mutex-lock", "i(ii)", os_abi_mutex_lock },
-    { WR_MODULE("sync"), "mutex-unlock", "i(i)", os_abi_mutex_unlock },
-    { WR_MODULE("sync"), "semaphore-create", "i(iiii)", os_abi_semaphore_create },
-    { WR_MODULE("sync"), "semaphore-take", "i(ii)", os_abi_semaphore_take },
-    { WR_MODULE("sync"), "semaphore-give", "i(i)", os_abi_semaphore_give },
-    { WR_MODULE("sync"), "event-create", "i(ii)", os_abi_event_create },
-    { WR_MODULE("sync"), "event-set", "i(ii)", os_abi_event_set },
-    { WR_MODULE("sync"), "event-clear", "i(ii)", os_abi_event_clear },
-    { WR_MODULE("sync"), "event-get", "i(i)", os_abi_event_get },
-    { WR_MODULE("sync"), "event-wait", "i(iiii)", os_abi_event_wait },
-    { WR_MODULE("sync"), "queue-create", "i(iiii)", os_abi_queue_create },
-    { WR_MODULE("sync"), "queue-send", "i(iii)", os_abi_queue_send },
-    { WR_MODULE("sync"), "queue-receive", "i(iii)", os_abi_queue_receive },
+    { WR_MODULE("sync"), "mutex-create", "i(ii)", os_abi_mutex_create, 0U },
+    { WR_MODULE("sync"), "mutex-lock", "i(ii)", os_abi_mutex_lock, 0U },
+    { WR_MODULE("sync"), "mutex-unlock", "i(i)", os_abi_mutex_unlock, 0U },
+    { WR_MODULE("sync"), "semaphore-create", "i(iiii)", os_abi_semaphore_create, 0U },
+    { WR_MODULE("sync"), "semaphore-take", "i(ii)", os_abi_semaphore_take, 0U },
+    { WR_MODULE("sync"), "semaphore-give", "i(i)", os_abi_semaphore_give, 0U },
+    { WR_MODULE("sync"), "event-create", "i(ii)", os_abi_event_create, 0U },
+    { WR_MODULE("sync"), "event-set", "i(ii)", os_abi_event_set, 0U },
+    { WR_MODULE("sync"), "event-clear", "i(ii)", os_abi_event_clear, 0U },
+    { WR_MODULE("sync"), "event-get", "i(i)", os_abi_event_get, 0U },
+    { WR_MODULE("sync"), "event-wait", "i(iiii)", os_abi_event_wait, 0U },
+    { WR_MODULE("sync"), "queue-create", "i(iiii)", os_abi_queue_create, 0U },
+    { WR_MODULE("sync"), "queue-send", "i(iii)", os_abi_queue_send, 0U },
+    { WR_MODULE("sync"), "queue-receive", "i(iii)", os_abi_queue_receive, 0U },
 
-    { WR_MODULE("timer"), "create", "i(ii)", os_abi_timer_create },
-    { WR_MODULE("timer"), "start", "i(i)", os_abi_timer_start },
-    { WR_MODULE("timer"), "stop", "i(i)", os_abi_timer_stop },
-    { WR_MODULE("timer"), "set-period", "i(ii)", os_abi_timer_set_period },
-    { WR_MODULE("timer"), "read", "i(i)", os_abi_timer_read },
+    { WR_MODULE("timer"), "create", "i(ii)", os_abi_timer_create, 0U },
+    { WR_MODULE("timer"), "start", "i(i)", os_abi_timer_start, 0U },
+    { WR_MODULE("timer"), "stop", "i(i)", os_abi_timer_stop, 0U },
+    { WR_MODULE("timer"), "set-period", "i(ii)", os_abi_timer_set_period, 0U },
+    { WR_MODULE("timer"), "read", "i(i)", os_abi_timer_read, 0U },
 
-    { WR_MODULE("wait"), "any", "i(iii)", os_abi_wait_any },
+    { WR_MODULE("wait"), "any", "i(iii)", os_abi_wait_any, 0U },
 
     /* Every call is linked; what the build leaves out returns -WR_EUNSUPPORTED. */
 #if OS_HAS_PROCESSES
-    { WR_MODULE("proc"), "spawn", "i(iiiiii)", os_abi_proc_spawn },
+    { WR_MODULE("proc"), "spawn", "i(iiiiii)", os_abi_proc_spawn, 0U },
 #if OS_HAS_FS
-    { WR_MODULE("proc"), "spawn-path", "i(iiiiii)", os_abi_proc_spawn_path },
+    { WR_MODULE("proc"), "spawn-path", "i(iiiiii)", os_abi_proc_spawn_path, 0U },
 #else
-    { WR_MODULE("proc"), "spawn-path", "i(iiiiii)", os_abi_unsupported },
+    { WR_MODULE("proc"), "spawn-path", "i(iiiiii)", os_abi_unsupported, 0U },
 #endif
-    { WR_MODULE("proc"), "wait", "i(ii)", os_abi_proc_wait },
-    { WR_MODULE("proc"), "kill", "i(i)", os_abi_proc_kill },
+    { WR_MODULE("proc"), "wait", "i(ii)", os_abi_proc_wait, 0U },
+    { WR_MODULE("proc"), "kill", "i(i)", os_abi_proc_kill, 0U },
 #else
-    { WR_MODULE("proc"), "spawn", "i(iiiiii)", os_abi_unsupported },
-    { WR_MODULE("proc"), "spawn-path", "i(iiiiii)", os_abi_unsupported },
-    { WR_MODULE("proc"), "wait", "i(ii)", os_abi_unsupported },
-    { WR_MODULE("proc"), "kill", "i(i)", os_abi_unsupported },
+    { WR_MODULE("proc"), "spawn", "i(iiiiii)", os_abi_unsupported, 0U },
+    { WR_MODULE("proc"), "spawn-path", "i(iiiiii)", os_abi_unsupported, 0U },
+    { WR_MODULE("proc"), "wait", "i(ii)", os_abi_unsupported, 0U },
+    { WR_MODULE("proc"), "kill", "i(i)", os_abi_unsupported, 0U },
 #endif
-    { WR_MODULE("proc"), "self", "i()", os_abi_proc_self },
-    { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent },
+    { WR_MODULE("proc"), "self", "i()", os_abi_proc_self, 0U },
+    { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
+
+#if OS_HAS_GPIO
+    { WR_MODULE("gpio"), "open", "i(iii)", os_abi_gpio_open, 1U },
+    { WR_MODULE("gpio"), "set", "i(ii)", os_abi_gpio_set, 1U },
+    { WR_MODULE("gpio"), "get", "i(i)", os_abi_gpio_get, 1U },
+    { WR_MODULE("gpio"), "set-mode", "i(ii)", os_abi_gpio_set_mode, 1U },
+    { WR_MODULE("gpio"), "watch", "i(ii)", os_abi_gpio_watch, 1U },
+    { WR_MODULE("gpio"), "events", "i(i)", os_abi_gpio_events, 1U },
+#else
+    { WR_MODULE("gpio"), "open", "i(iii)", os_abi_unsupported, 1U },
+    { WR_MODULE("gpio"), "set", "i(ii)", os_abi_unsupported, 1U },
+    { WR_MODULE("gpio"), "get", "i(i)", os_abi_unsupported, 1U },
+    { WR_MODULE("gpio"), "set-mode", "i(ii)", os_abi_unsupported, 1U },
+    { WR_MODULE("gpio"), "watch", "i(ii)", os_abi_unsupported, 1U },
+    { WR_MODULE("gpio"), "events", "i(i)", os_abi_unsupported, 1U },
+#endif
 
 #if defined(OS_ABI_HAS_WASI)
-    { "wasi_snapshot_preview1", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get },
-    { "wasi_snapshot_preview1", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get },
-    { "wasi_snapshot_preview1", "sched_yield", "i()", os_abi_wasi_sched_yield },
-    { "wasi_snapshot_preview1", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff },
-    { "wasi_unstable", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get },
-    { "wasi_unstable", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get },
-    { "wasi_unstable", "sched_yield", "i()", os_abi_wasi_sched_yield },
-    { "wasi_unstable", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff },
+    { "wasi_snapshot_preview1", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get, 0U },
+    { "wasi_snapshot_preview1", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get, 0U },
+    { "wasi_snapshot_preview1", "sched_yield", "i()", os_abi_wasi_sched_yield, 0U },
+    { "wasi_snapshot_preview1", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff, 0U },
+    { "wasi_unstable", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get, 0U },
+    { "wasi_unstable", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get, 0U },
+    { "wasi_unstable", "sched_yield", "i()", os_abi_wasi_sched_yield, 0U },
+    { "wasi_unstable", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff, 0U },
 #endif
 };
 
 /* Bind every ABI import the module uses; call after m3_LinkWASI to override it. */
 M3Result os_abi_link(IM3Module module)
 {
+    const size_t prefix_length = sizeof(WR_KERNEL_PREFIX) - 1U;
     uint32_t index = 0U;
 
     for (index = 0U; index < (uint32_t)(sizeof(g_abi_imports) / sizeof(g_abi_imports[0])); ++index)
     {
-        M3Result result = m3_LinkRawFunction(module, g_abi_imports[index].module, g_abi_imports[index].name,
-                                             g_abi_imports[index].signature, g_abi_imports[index].function);
-        if (result != m3Err_none && result != m3Err_functionLookupFailed)
+        const OsAbiImport* import = &g_abi_imports[index];
+        uint32_t minor = import->since;
+        uint8_t versioned = strncmp(import->module, WR_KERNEL_PREFIX, prefix_length) == 0;
+
+        do
         {
-            return result;
+            /* "<module>@1.<minor>.0" for kernel interfaces, the name itself otherwise. */
+            char name[48];
+            const char* module_name = import->module;
+            M3Result result = m3Err_none;
+
+            if (versioned)
+            {
+                size_t length = strlen(import->module);
+                if (length + 8U > sizeof(name))
+                {
+                    return "wasm-rtos interface name too long";
+                }
+                memcpy(name, import->module, length);
+                name[length++] = '@';
+                name[length++] = '1';
+                name[length++] = '.';
+                if (minor >= 10U)
+                {
+                    name[length++] = (char)('0' + minor / 10U);
+                }
+                name[length++] = (char)('0' + minor % 10U);
+                memcpy(name + length, ".0", 3U);
+                module_name = name;
+            }
+            result = m3_LinkRawFunction(module, module_name, import->name, import->signature, import->function);
+            if (result != m3Err_none && result != m3Err_functionLookupFailed)
+            {
+                return result;
+            }
         }
+        while (versioned && ++minor <= OS_ABI_VERSION_MINOR);
     }
     return m3Err_none;
 }

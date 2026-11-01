@@ -16,7 +16,8 @@ typedef enum OsObjectType
     OS_OBJECT_SEMAPHORE,
     OS_OBJECT_EVENT_GROUP,
     OS_OBJECT_TIMER,
-    OS_OBJECT_TASK
+    OS_OBJECT_TASK,
+    OS_OBJECT_GPIO
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -102,5 +103,35 @@ uint32_t os_timer_take_expirations(OsTimerHandle timer);
  */
 OsStatus os_wait_any(const OsWaitTarget* targets, uint32_t count, uint32_t timeout_ms, uint32_t* out_index);
 uint8_t os_wait_target_ready(const OsWaitTarget* target);
+/* Wake tasks in wait.any whose targets became ready outside the kernel's objects. */
+void os_wait_any_recheck(void);
+
+#if OS_HAS_GPIO
+/* ---- GPIO for programs (gpio.c) -------------------------------------------- */
+
+/*
+ * Pins are named by id (1-based). Flags are the guest's: OS_GPIO_OUTPUT,
+ * PULL_UP, PULL_DOWN, OPEN_DRAIN, OS_GPIO_GUEST_ACTIVE_LOW and INIT_HIGH as
+ * a logical level. Levels and edges are logical (after inversion).
+ * os_gpio_open: OS_STATUS_FILE_NOT_FOUND for an unknown name, OS_STATUS_BUSY
+ * when another program owns the pin.
+ */
+#define OS_GPIO_GUEST_ACTIVE_LOW 0x10U
+#define OS_GPIO_GUEST_RISING     0x01U
+#define OS_GPIO_GUEST_FALLING    0x02U
+
+OsStatus os_gpio_open(const char* name, uint32_t length, uint32_t flags, uint32_t* out_id);
+void os_gpio_close(uint32_t id);
+OsStatus os_gpio_set(uint32_t id, uint32_t level);
+OsStatus os_gpio_get(uint32_t id, uint32_t* out_level);
+OsStatus os_gpio_set_mode(uint32_t id, uint32_t flags);
+OsStatus os_gpio_watch(uint32_t id, uint32_t edges);
+/* Edges since the last call; resets the count. */
+uint32_t os_gpio_take_events(uint32_t id);
+uint8_t os_gpio_ready(uint32_t id);
+/* Deliver edges reported by os_gpio_edge; wakes waiting programs. */
+void os_gpio_poll(void);
+void os_gpio_shutdown(void);
+#endif
 
 #endif

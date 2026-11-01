@@ -1,9 +1,14 @@
-# wasm-rtos ABI 1.0
+# wasm-rtos ABI 1.1
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
 calls arrive in minor versions, and only a new major version may change or
 remove anything here.
+
+| Version | Adds |
+|---|---|
+| 1.0 | `handle`, `sync`, `timer`, `wait`, `proc`, WASI, metadata |
+| 1.1 | `gpio`, error `WR_EINUSE` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -77,11 +82,16 @@ remove anything here.
 | 19 | `WR_EMISMATCH` | a named object exists with other parameters |
 | 20 | `WR_ETRAPPED` | `proc.wait`: the child trapped |
 | 21 | `WR_EKILLED` | `proc.wait`: the child was killed |
+| 22 | `WR_EINUSE` | another program uses it (1.1) |
 
 ## Interfaces
 
-Each interface is the import module `wasm-rtos:kernel/<name>@1.0.0`.
-Functions not listed in an interface may be added by later minor versions.
+Each interface is the import module `wasm-rtos:kernel/<name>@1.<minor>.0`,
+with the minor version the program was built for. A kernel of 1.M accepts
+every 1.N with N <= M, so a program built for 1.0 imports `…@1.0.0` and
+still runs on a 1.1 kernel; a call added in 1.1 exists only under 1.1 and
+later names. Functions not listed in an interface may be added by later
+minor versions.
 
 ### `handle`
 `close(h)`.
@@ -124,6 +134,31 @@ Mutexes cannot be waited for here.
   nothing (`-WR_EBADH`). Close the handle afterwards.
 - `kill(child)`; `self()` and `parent()` return process ids (0: no parent).
 
+### `gpio` (1.1)
+Pins, named as the device profile names them (`"led"`, `"button-a"`,
+`"gpio5"`), so one program runs on every board that has the pin.
+
+- `open(name, flags)` returns a handle; the pin has one owner at a time
+  (`-WR_EINUSE`), and closing the handle or ending the program gives it back
+  as an input without pulls. Flags: `WR_GPIO_OUTPUT` (else an input),
+  `PULL_UP`, `PULL_DOWN`, `OPEN_DRAIN` (outputs), `ACTIVE_LOW`, `INIT_HIGH`
+  (the level an output starts at, so it never glitches). An unknown name is
+  `-WR_ENOTFOUND`; a mode the pin cannot do, `-WR_EUNSUPPORTED`; a
+  contradictory one, `-WR_EINVAL`.
+- Levels are 0 or 1 as the program sees them: a pin the board wires
+  active-low and a pin opened with `WR_GPIO_ACTIVE_LOW` are inverted for the
+  program, so writing 1 means "on".
+- `set(pin, level)` drives an output; `get(pin)` reads the pin, outputs
+  included. `set-mode(pin, flags)` changes the mode, for pins that turn
+  around (one-wire sensors).
+- `watch(pin, edges)` with `WR_GPIO_RISING` and/or `WR_GPIO_FALLING` (as the
+  program sees levels; 0 stops) makes the handle ready for `wait.any` once
+  such an edge happened. `events(pin)` returns how many happened since the
+  last call and resets the count. Edges before the watch do not count.
+
+Timing finer than the scheduler, such as bit-banged protocols, is not what
+`gpio` is for; buses and pulse interfaces get their own interfaces.
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -153,6 +188,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
+A program for 1.1 states 65537 (1.1); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
@@ -165,8 +201,8 @@ These names are taken; their shape will follow the rules above.
   descriptors.
 - `wasm-rtos:kernel/device`: what the device offers (display size and shape,
   inputs, sensors), so programs ask instead of assuming.
-- `wasm-rtos:kernel/gpio`, `i2c`, `spi`, `uart`, `adc`, `pwm`: buses with
-  whole transactions and explicit errors, the same on every port.
+- `wasm-rtos:kernel/i2c`, `spi`, `uart`, `adc`, `pwm`: buses with whole
+  transactions and explicit errors, the same on every port.
 - `wasm-rtos:kernel/input`: rotary, button and touch events.
 - `wasm-rtos:kernel/display`, `power`, `system`, `ui`: drawing, sleep and
   wake sources, battery and indicators, windows and dialogs.

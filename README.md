@@ -26,6 +26,8 @@ still shares the processor with other programs.
   driver. Files from memory-mapped storage run without a copy.
 - Optional `dylink.0` shared libraries: every process gets its own copy of a
   library's data, as with ELF shared objects.
+- GPIO by pin name from the device profile, one owner per pin, edges from
+  interrupt handlers delivered to waiting programs.
 - Snapshots and swapping: a program between two slices can be saved and
   continued in a new task, also on another device, or moved out of RAM while
   it waits and brought back when it runs.
@@ -50,6 +52,8 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_FS_MAX_FILES` | 16 | open files per process |
 | `OS_MAX_SPAWNED_TASKS` | 16 | processes alive at once |
 | `OS_ABI_MAX_HANDLES` | 32 | handles one program may hold |
+| `OS_HAS_GPIO` | 1 | pins for programs through a GPIO port (without it, `gpio` calls return `-WR_EUNSUPPORTED`) |
+| `OS_GPIO_MAX_PINS` / `OS_GPIO_MAX_NAMES` | 32 / 64 | pins and pin names a platform can register |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
 | `OS_NATIVE_STACK_BUDGET` | 16 KiB | C stack nested Wasm calls may use in one slice before it ends early (0 = unlimited) |
@@ -98,6 +102,28 @@ int run_program(uint8_t* wasm, uint32_t size)
 to let the kernel ask for a wakeup at the next deadline instead of being
 polled (tickless operation).
 
+### GPIO
+
+The kernel lends pins to programs by name and drives them through a GPIO
+port: `configure`, `write` and `read` for one pin number of the chip.
+Register the pins of the device profile once; a program then opens `"led"`
+on every board that has one.
+
+```c
+static const OsGpioPort gpio = { NULL, board_configure, board_write, board_read };
+os_gpio_port_set(&gpio);
+os_gpio_add_pin("led", 2, OS_GPIO_CAN_OUTPUT, OS_GPIO_ACTIVE_LOW);
+os_gpio_add_pin("button-a", 0, OS_GPIO_CAN_INPUT | OS_GPIO_CAN_PULL_UP | OS_GPIO_CAN_EDGES, 0);
+
+void IRAM_ATTR button_isr(void) { os_gpio_edge(0, OS_GPIO_EDGE_FALLING); }
+```
+
+`configure` gets the physical mode and the edges to report; the interrupt
+handler only calls `os_gpio_edge`, which counts and is safe there, and the
+next `os_schedule` wakes the program waiting for that pin. A program owns a
+pin until it closes it or ends, even by a trap; the kernel then configures
+it as an input without pulls.
+
 ### Swapping
 
 To move idle programs out of RAM, give the kernel somewhere to put them: a
@@ -132,7 +158,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-and child processes. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes and GPIO pins. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 
