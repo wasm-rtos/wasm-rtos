@@ -28,6 +28,8 @@ typedef struct OsFsMount
     uint32_t path_length;
     const OsFsDriver* driver;
     void* context;
+    /* Program images still mapped from this mount (os_fs_image_open). */
+    uint32_t image_count;
 } OsFsMount;
 
 typedef struct OsFsOpenFile
@@ -295,6 +297,7 @@ OsStatus os_fs_mount(const char* path, const OsFsDriver* driver, void* context)
     g_mounts[g_mount_count].path_length = (uint32_t)strlen(normalized);
     g_mounts[g_mount_count].driver = driver;
     g_mounts[g_mount_count].context = context;
+    g_mounts[g_mount_count].image_count = 0U;
     ++g_mount_count;
     return OS_STATUS_OK;
 }
@@ -315,6 +318,10 @@ OsStatus os_fs_unmount(const char* path)
         if (strcmp(g_mounts[index].path, normalized) == 0)
         {
             OsFsProcess* process = NULL;
+            if (g_mounts[index].image_count > 0U)
+            {
+                return OS_STATUS_BUSY;
+            }
             for (process = g_processes; process != NULL; process = process->next)
             {
                 uint32_t file_index = 0U;
@@ -478,6 +485,133 @@ OsStatus os_fs_read_dir(const char* path, uint32_t index, OsFsDirEntry* out_entr
         return status;
     }
     return os_fs_read_dir_normalized(normalized, index, out_entry);
+}
+
+OsStatus os_fs_image_open(const char* path, OsFsImage* out_image)
+{
+    char normalized[OS_FS_PATH_MAX];
+    const char* relative = NULL;
+    OsFsMount* mount = NULL;
+    OsFsStat stat;
+    void* handle = NULL;
+    const uint8_t* mapped = NULL;
+    uint64_t mapped_size = 0U;
+    uint8_t* copy = NULL;
+    uint32_t done = 0U;
+    OsStatus status = OS_STATUS_OK;
+
+    if (path == NULL || out_image == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    memset(out_image, 0, sizeof(*out_image));
+
+    status = os_fs_normalize("/", path, (uint32_t)strlen(path), normalized, sizeof(normalized));
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    status = os_fs_stat_normalized(normalized, &stat);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    if (stat.type == OS_FS_TYPE_DIRECTORY)
+    {
+        return OS_STATUS_IS_A_DIRECTORY;
+    }
+    if (stat.size == 0U || stat.size > UINT32_MAX)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    mount = os_fs_find_mount(normalized, &relative);
+    if (mount == NULL)
+    {
+        return OS_STATUS_FILE_NOT_FOUND;
+    }
+    status = mount->driver->open(mount->context, relative, &handle);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
+    /* Run in place when the driver can map the file; keep it open meanwhile. */
+    if (mount->driver->map != NULL)
+    {
+        mapped = mount->driver->map(mount->context, handle, &mapped_size);
+    }
+    if (mapped != NULL && mapped_size == stat.size)
+    {
+        out_image->bytes = mapped;
+        out_image->size = (uint32_t)stat.size;
+        out_image->driver = mount->driver;
+        out_image->context = mount->context;
+        out_image->handle = handle;
+        ++mount->image_count;
+        return OS_STATUS_OK;
+    }
+
+    copy = (uint8_t*)malloc((size_t)stat.size);
+    if (copy == NULL)
+    {
+        status = OS_STATUS_OUT_OF_MEMORY;
+    }
+    while (status == OS_STATUS_OK && done < (uint32_t)stat.size)
+    {
+        uint32_t read = 0U;
+        status = mount->driver->read(mount->context, handle, done, copy + done,
+                                     (uint32_t)stat.size - done, &read);
+        if (status == OS_STATUS_OK && read == 0U)
+        {
+            status = OS_STATUS_FILE_NOT_FOUND;
+        }
+        done += read;
+    }
+    if (mount->driver->close != NULL)
+    {
+        mount->driver->close(mount->context, handle);
+    }
+    if (status != OS_STATUS_OK)
+    {
+        free(copy);
+        return status;
+    }
+
+    out_image->bytes = copy;
+    out_image->size = (uint32_t)stat.size;
+    out_image->copy = copy;
+    return OS_STATUS_OK;
+}
+
+void os_fs_image_close(OsFsImage* image)
+{
+    uint32_t index = 0U;
+
+    if (image == NULL)
+    {
+        return;
+    }
+
+    if (image->driver != NULL)
+    {
+        for (index = 0U; index < g_mount_count; ++index)
+        {
+            if (g_mounts[index].driver == image->driver &&
+                g_mounts[index].context == image->context &&
+                g_mounts[index].image_count > 0U)
+            {
+                --g_mounts[index].image_count;
+                break;
+            }
+        }
+        if (image->driver->close != NULL)
+        {
+            image->driver->close(image->context, image->handle);
+        }
+    }
+    free(image->copy);
+    memset(image, 0, sizeof(*image));
 }
 
 /* ---------------------------------------------------------------------------

@@ -261,6 +261,10 @@ struct OsTask
     uint8_t exit_collected;
     uint8_t reap_pending;
     uint8_t* owned_wasm_bytes;
+#if OS_HAS_FS
+    /* Program started by path; released with the task. */
+    OsFsImage image;
+#endif
     char** argv;
     uint32_t argc;
     const char* default_argv[1];
@@ -390,6 +394,9 @@ static m3ApiRawFunction(os_wasm_import_os_task_notify);
 static m3ApiRawFunction(os_wasm_import_os_task_notify_wait);
 #if OS_HAS_PROCESSES
 static m3ApiRawFunction(os_wasm_import_proc_spawn);
+#if OS_HAS_FS
+static m3ApiRawFunction(os_wasm_import_proc_spawn_path);
+#endif
 static m3ApiRawFunction(os_wasm_import_proc_wait);
 static m3ApiRawFunction(os_wasm_import_proc_kill);
 static m3ApiRawFunction(os_wasm_import_proc_self);
@@ -3958,6 +3965,9 @@ static void os_task_free(OsTaskHandle task)
 #if OS_HAS_PROCESSES
     /* The module was parsed in place, so its bytes outlive the runtime. */
     free(task->owned_wasm_bytes);
+#if OS_HAS_FS
+    os_fs_image_close(&task->image);
+#endif
     free(task->argv);
     if (task->spawned && g_os.spawned_task_count > 0U)
     {
@@ -4947,6 +4957,9 @@ static M3Result os_link_module_host_imports(IM3Module module)
     static const struct OsBuiltinImport proc_imports[] =
     {
         { "spawn", "i(iiiii)", os_wasm_import_proc_spawn },
+#if OS_HAS_FS
+        { "spawn_path", "i(iiii)", os_wasm_import_proc_spawn_path },
+#endif
         { "wait", "i(iii)", os_wasm_import_proc_wait },
         { "kill", "i(i)", os_wasm_import_proc_kill },
         { "self", "i()", os_wasm_import_proc_self },
@@ -6760,11 +6773,32 @@ static const char* os_process_name_from_argv(char** argv, uint32_t argc)
     return name[0] != '\0' ? name : "process";
 }
 
-/* Takes ownership of wasm_bytes and argv on every path. */
+/*
+ * The module a process runs and who owns it: heap bytes from os_task_spawn,
+ * or a file system image from os_task_spawn_path.
+ */
+typedef struct OsProcessImage
+{
+    const uint8_t* bytes;
+    uint32_t size;
+    uint8_t* owned_bytes;
+#if OS_HAS_FS
+    OsFsImage file;
+#endif
+} OsProcessImage;
+
+static void os_process_image_release(OsProcessImage* image)
+{
+    free(image->owned_bytes);
+#if OS_HAS_FS
+    os_fs_image_close(&image->file);
+#endif
+}
+
+/* Takes ownership of image and argv on every path. */
 static OsStatus os_task_spawn_owned(
     OsTaskHandle* out_task,
-    uint8_t* wasm_bytes,
-    uint32_t wasm_size,
+    OsProcessImage* image,
     char** argv,
     uint32_t argc,
     uint32_t priority
@@ -6776,7 +6810,7 @@ static OsStatus os_task_spawn_owned(
 
     if (g_os.spawned_task_count >= OS_MAX_SPAWNED_TASKS)
     {
-        free(wasm_bytes);
+        os_process_image_release(image);
         free(argv);
         os_set_last_error(parent, "spawn", "process limit reached", OS_STATUS_LIMIT_REACHED);
         return OS_STATUS_LIMIT_REACHED;
@@ -6787,10 +6821,11 @@ static OsStatus os_task_spawn_owned(
         priority = parent != NULL ? parent->base_priority : (uint32_t)OS_TASK_PRIORITY_NORMAL;
     }
 
+    /* The module is parsed in place and never written. */
     status = os_task_initialize(
         &task,
-        wasm_bytes,
-        wasm_size,
+        (uint8_t*)image->bytes,
+        image->size,
         NULL,
         NULL,
         0U,
@@ -6800,12 +6835,15 @@ static OsStatus os_task_spawn_owned(
     );
     if (status != OS_STATUS_OK)
     {
-        free(wasm_bytes);
+        os_process_image_release(image);
         free(argv);
         return status;
     }
 
-    task->owned_wasm_bytes = wasm_bytes;
+    task->owned_wasm_bytes = image->owned_bytes;
+#if OS_HAS_FS
+    task->image = image->file;
+#endif
     task->argv = argv;
     task->argc = argc;
     task->parent_id = parent != NULL ? parent->id : 0U;
@@ -6828,6 +6866,7 @@ OsStatus os_task_spawn(
     uint32_t priority
 )
 {
+    OsProcessImage image;
     uint8_t* bytes_copy = NULL;
     char** argv_copy = NULL;
     uint32_t index = 0U;
@@ -6864,8 +6903,61 @@ OsStatus os_task_spawn(
         }
     }
 
-    return os_task_spawn_owned(out_task, bytes_copy, wasm_size, argv_copy, argc, priority);
+    memset(&image, 0, sizeof(image));
+    image.bytes = bytes_copy;
+    image.size = wasm_size;
+    image.owned_bytes = bytes_copy;
+    return os_task_spawn_owned(out_task, &image, argv_copy, argc, priority);
 }
+
+#if OS_HAS_FS
+OsStatus os_task_spawn_path(
+    OsTaskHandle* out_task,
+    const char* path,
+    const char* const* argv,
+    uint32_t argc,
+    uint32_t priority
+)
+{
+    OsProcessImage image;
+    char** argv_copy = NULL;
+    uint32_t index = 0U;
+    OsStatus status = OS_STATUS_OK;
+
+    if (out_task == NULL || path == NULL || path[0] == '\0' ||
+        (argc > 0U && argv == NULL) || argc > OS_PROC_MAX_ARGS)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+
+    for (index = 0U; index < argc; ++index)
+    {
+        if (argv[index] == NULL)
+        {
+            return OS_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    *out_task = NULL;
+    /* Without arguments the program still sees its path as argv[0]. */
+    argv_copy = argc > 0U ? os_pack_argv(argv, argc) : os_pack_argv(&path, 1U);
+    if (argv_copy == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+
+    memset(&image, 0, sizeof(image));
+    status = os_fs_image_open(path, &image.file);
+    if (status != OS_STATUS_OK)
+    {
+        free(argv_copy);
+        return status;
+    }
+    image.bytes = image.file.bytes;
+    image.size = image.file.size;
+    return os_task_spawn_owned(out_task, &image, argv_copy, argc > 0U ? argc : 1U, priority);
+}
+#endif
 
 uint32_t os_task_get_parent_id(OsTaskHandle task)
 {
@@ -7012,6 +7104,59 @@ static OsStatus os_read_guest_string(OsTaskHandle task, uint32_t address, char* 
     return OS_STATUS_BUFFER_TOO_SMALL;
 }
 
+/* Copy argc guest string pointers at argv_address into one packed argv. */
+static OsStatus os_read_guest_argv(OsTaskHandle task, uint32_t argv_address, uint32_t argc, char*** out_argv)
+{
+    char* strings = NULL;
+    OsStatus status = OS_STATUS_OK;
+    uint32_t index = 0U;
+
+    *out_argv = NULL;
+    if (argc == 0U)
+    {
+        return OS_STATUS_OK;
+    }
+
+    /* Copy every argument out of guest memory, then pack them. */
+    strings = (char*)malloc((size_t)argc * OS_PROC_MAX_ARG_LENGTH);
+    if (strings == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    for (index = 0U; status == OS_STATUS_OK && index < argc; ++index)
+    {
+        uint8_t raw[sizeof(uint32_t)];
+        uint32_t string_address = 0U;
+        status = os_task_read_memory(task, argv_address + index * 4U, raw, 4U);
+        if (status == OS_STATUS_OK)
+        {
+            string_address = (uint32_t)raw[0] | ((uint32_t)raw[1] << 8U) |
+                             ((uint32_t)raw[2] << 16U) | ((uint32_t)raw[3] << 24U);
+            status = os_read_guest_string(
+                task,
+                string_address,
+                strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH,
+                OS_PROC_MAX_ARG_LENGTH
+            );
+        }
+    }
+    if (status == OS_STATUS_OK)
+    {
+        const char* pointers[OS_PROC_MAX_ARGS];
+        for (index = 0U; index < argc; ++index)
+        {
+            pointers[index] = strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH;
+        }
+        *out_argv = os_pack_argv(pointers, argc);
+        if (*out_argv == NULL)
+        {
+            status = OS_STATUS_OUT_OF_MEMORY;
+        }
+    }
+    free(strings);
+    return status;
+}
+
 static m3ApiRawFunction(os_wasm_import_proc_spawn)
 {
     m3ApiReturnType(int32_t);
@@ -7022,11 +7167,10 @@ static m3ApiRawFunction(os_wasm_import_proc_spawn)
     m3ApiGetArg(uint32_t, priority);
     OsTaskHandle task = os_task_get_current();
     OsTaskHandle child = NULL;
+    OsProcessImage image;
     uint8_t* bytes = NULL;
     char** argv = NULL;
-    char* strings = NULL;
     OsStatus status = OS_STATUS_OK;
-    uint32_t index = 0U;
     (void)runtime;
     (void)_ctx;
     (void)_mem;
@@ -7042,46 +7186,9 @@ static m3ApiRawFunction(os_wasm_import_proc_spawn)
         m3ApiReturn(-(int32_t)OS_STATUS_OUT_OF_MEMORY);
     }
     status = os_task_read_memory(task, bytes_address, bytes, bytes_length);
-
-    if (status == OS_STATUS_OK && argc > 0U)
+    if (status == OS_STATUS_OK)
     {
-        /* Copy every argument out of guest memory, then pack them. */
-        strings = (char*)malloc((size_t)argc * OS_PROC_MAX_ARG_LENGTH);
-        if (strings == NULL)
-        {
-            status = OS_STATUS_OUT_OF_MEMORY;
-        }
-        for (index = 0U; status == OS_STATUS_OK && index < argc; ++index)
-        {
-            uint8_t raw[sizeof(uint32_t)];
-            uint32_t string_address = 0U;
-            status = os_task_read_memory(task, argv_address + index * 4U, raw, 4U);
-            if (status == OS_STATUS_OK)
-            {
-                string_address = (uint32_t)raw[0] | ((uint32_t)raw[1] << 8U) |
-                                 ((uint32_t)raw[2] << 16U) | ((uint32_t)raw[3] << 24U);
-                status = os_read_guest_string(
-                    task,
-                    string_address,
-                    strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH,
-                    OS_PROC_MAX_ARG_LENGTH
-                );
-            }
-        }
-        if (status == OS_STATUS_OK)
-        {
-            const char* pointers[OS_PROC_MAX_ARGS];
-            for (index = 0U; index < argc; ++index)
-            {
-                pointers[index] = strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH;
-            }
-            argv = os_pack_argv(pointers, argc);
-            if (argv == NULL)
-            {
-                status = OS_STATUS_OUT_OF_MEMORY;
-            }
-        }
-        free(strings);
+        status = os_read_guest_argv(task, argv_address, argc, &argv);
     }
 
     if (status != OS_STATUS_OK)
@@ -7091,7 +7198,11 @@ static m3ApiRawFunction(os_wasm_import_proc_spawn)
         m3ApiReturn(-(int32_t)status);
     }
 
-    status = os_task_spawn_owned(&child, bytes, bytes_length, argv, argc, priority);
+    memset(&image, 0, sizeof(image));
+    image.bytes = bytes;
+    image.size = bytes_length;
+    image.owned_bytes = bytes;
+    status = os_task_spawn_owned(&child, &image, argv, argc, priority);
     if (status != OS_STATUS_OK)
     {
         m3ApiReturn(-(int32_t)status);
@@ -7099,6 +7210,48 @@ static m3ApiRawFunction(os_wasm_import_proc_spawn)
 
     m3ApiReturn((int32_t)child->id);
 }
+
+#if OS_HAS_FS
+static m3ApiRawFunction(os_wasm_import_proc_spawn_path)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, path_address);
+    m3ApiGetArg(uint32_t, argv_address);
+    m3ApiGetArg(uint32_t, argc);
+    m3ApiGetArg(uint32_t, priority);
+    OsTaskHandle task = os_task_get_current();
+    OsTaskHandle child = NULL;
+    char path[OS_FS_PATH_MAX];
+    char** argv = NULL;
+    OsStatus status = OS_STATUS_OK;
+    (void)runtime;
+    (void)_ctx;
+    (void)_mem;
+
+    if (task == NULL || argc > OS_PROC_MAX_ARGS)
+    {
+        m3ApiReturn(-(int32_t)OS_STATUS_INVALID_ARGUMENT);
+    }
+
+    status = os_read_guest_string(task, path_address, path, sizeof(path));
+    if (status == OS_STATUS_OK)
+    {
+        status = os_read_guest_argv(task, argv_address, argc, &argv);
+    }
+    if (status == OS_STATUS_OK)
+    {
+        status = os_task_spawn_path(&child, path, (const char* const*)argv, argc, priority);
+    }
+    /* os_task_spawn_path copies argv. */
+    free(argv);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(-(int32_t)status);
+    }
+
+    m3ApiReturn((int32_t)child->id);
+}
+#endif
 
 static m3ApiRawFunction(os_wasm_import_proc_wait)
 {
