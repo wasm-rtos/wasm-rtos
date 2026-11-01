@@ -11,7 +11,7 @@
 
 /*
  * Build options (define to 0 to leave a feature out of the image):
- *   OS_HAS_PROCESSES  os_task_spawn() and the "wasm-rtos:proc" guest imports
+ *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
  */
@@ -153,16 +153,19 @@ void os_shutdown(void);
  * traps with "stack overflow"; os_task_get_memory_usage reports the most it
  * has used (stack_peak_bytes).
  *
- * "wasm-rtos.app" holds records of a key byte and a little-endian u32 value;
- * unknown keys are ignored and a section that is not whole records fails the
- * load. In C (clang):
- *
- *   __asm__(".section \".custom_section.wasm-rtos.app\",\"\",@\n"
- *           ".int8 1\n.int32 4096\n.text\n");     4 KiB interpreter stack
- *
- * In Rust: #[link_section = "wasm-rtos.app"] static APP: [u8; 5] = [1, 0, 16, 0, 0];
+ * A program describes itself in a "wasm-rtos.app" custom section: records
+ * of a key byte, a LEB128 length and that many bytes. Unknown keys are
+ * skipped; a section that is not whole records fails the load, and so does
+ * an ABI major version other than OS_ABI_VERSION_MAJOR. wasm-rtos.h has
+ * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
-#define OS_APP_KEY_STACK_SIZE 1U
+#define OS_ABI_VERSION_MAJOR 1U
+#define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
+#define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
+#define OS_APP_KEY_NAME 3U          /* UTF-8 */
+#define OS_APP_KEY_ICON 4U          /* reserved: image */
+#define OS_APP_KEY_FILE_TYPES 5U    /* reserved: UTF-8, ';'-separated extensions */
+#define OS_APP_KEY_REQUIRES 6U      /* reserved: device requirements */
 
 /*
  * entry_function_name may be NULL or "" to let the loader pick the entry
@@ -222,6 +225,15 @@ OsStatus os_queue_receive_wait(
 );
 uint32_t os_queue_get_count(OsQueueHandle queue);
 uint32_t os_queue_get_space(OsQueueHandle queue);
+uint32_t os_queue_get_item_size(OsQueueHandle queue);
+/*
+ * A name lets programs open the object (the guest sync interface). Objects
+ * the host creates stay the host's: programs never delete them.
+ */
+OsStatus os_queue_set_name(OsQueueHandle queue, const char* name);
+OsStatus os_mutex_set_name(OsMutexHandle mutex, const char* name);
+OsStatus os_semaphore_set_name(OsSemaphoreHandle semaphore, const char* name);
+OsStatus os_event_group_set_name(OsEventGroupHandle event_group, const char* name);
 
 OsStatus os_mutex_create(OsMutexHandle* out_mutex);
 void os_mutex_delete(OsMutexHandle mutex);
@@ -268,6 +280,16 @@ OsStatus os_host_import_register(
 
 void os_host_import_clear_all(void);
 
+/*
+ * Host imports that block: pass the import's result slot (raw_return) to
+ * os_host_wait_begin before calling a waiting function such as
+ * os_task_notify_wait from inside the import, and return os_host_wait_end()
+ * from it. When the call started a wait the task blocks, and the slot gets
+ * the wait's status (or value) when it wakes.
+ */
+OsStatus os_host_wait_begin(uint32_t* result_slot);
+M3Result os_host_wait_end(void);
+
 #if d_m3HasDylink
 /*
  * Register a dylink.0 side module (a shared library) under the name programs
@@ -311,16 +333,8 @@ OsStatus os_task_delete(OsTaskHandle task);
  * OS_MAX_SPAWNED_TASKS spawned processes exist at once; further spawns
  * return OS_STATUS_LIMIT_REACHED.
  *
- * Guest programs use the "wasm-rtos:proc" import module:
- *   spawn(bytes, len, argv, argc, priority) -> pid, or -OsStatus on failure
- *   wait(pid, out_exit_code, timeout_ms)    -> OsStatus (blocks the caller)
- *   kill(pid)                               -> OsStatus (own children only)
- *   self()                                  -> pid
- *   parent()                                -> parent pid, 0 if none
- *   spawn_path(path, argv, argc, priority)  -> pid, or -OsStatus (OS_HAS_FS)
- * wait returns OS_STATUS_OK for a normal exit, OS_STATUS_WASM_ERROR when the
- * child trapped and OS_STATUS_ABORTED when it was deleted; the exit code is
- * written to out_exit_code when it is not 0.
+ * Programs start processes through the guest ABI's proc interface
+ * (docs/abi.md), which gives them handles to their children.
  */
 OsStatus os_task_spawn(
     OsTaskHandle* out_task,
@@ -426,6 +440,8 @@ uint32_t os_task_get_base_priority(OsTaskHandle task);
 uint32_t os_task_get_id(OsTaskHandle task);
 OsTaskHandle os_task_find_by_id(uint32_t task_id);
 uint32_t os_task_get_id_list(uint32_t* out_task_ids, uint32_t max_task_ids);
+/* The name a program gives itself in its wasm-rtos.app section, or NULL. */
+const char* os_task_get_app_name(OsTaskHandle task);
 OsTaskState os_task_get_state(OsTaskHandle task);
 OsTaskExitReason os_task_get_exit_reason(OsTaskHandle task);
 uint32_t os_task_get_exit_code(OsTaskHandle task);
