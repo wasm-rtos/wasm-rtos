@@ -28,7 +28,6 @@
 #endif
 #if d_m3HasDylink
 #define OS_DYLINK_LINEAR_STACK_SIZE (64U * 1024U)
-#define OS_DYLINK_TASK_NAME_MAX 24U
 #endif
 
 #if defined(d_m3HasWASI) || defined(d_m3HasMetaWASI) || defined(d_m3HasUVWASI)
@@ -159,11 +158,8 @@ typedef struct OsState
     OsHostImportNode* host_import_list;
 #if d_m3HasDylink
     OsWasmLibraryHandle wasm_library_list;
-    IM3Environment dylink_environment;
-    IM3Runtime dylink_runtime;
     uint32_t next_wasm_library_id;
     uint32_t wasm_library_count;
-    uint8_t dylink_sealed;
 #endif
     OsClockPort clock_port;
     uint32_t tick_ms;
@@ -271,8 +267,6 @@ struct OsTask
 #endif
 
 #if d_m3HasDylink
-    IM3DylinkContext wasm_dylink_context;
-    char wasm_dylink_name[OS_DYLINK_TASK_NAME_MAX];
     uint8_t wasm_dylink_task;
 #endif
 
@@ -349,8 +343,6 @@ static M3Result os_dylink_resolve_module(
     IM3Module* out_module
 );
 static M3Result os_dylink_link_host_imports(void* context, IM3Module module);
-static void os_make_dylink_task_name(OsTaskHandle task);
-static OsStatus os_dylink_attach_task(OsTaskHandle task);
 #endif
 static OsStatus os_task_create_wasm(
     OsTaskHandle task,
@@ -529,16 +521,6 @@ void os_shutdown(void)
     }
 
 #if d_m3HasDylink
-    if (g_os.dylink_runtime != NULL)
-    {
-        m3_FreeRuntime(g_os.dylink_runtime);
-        g_os.dylink_runtime = NULL;
-    }
-    if (g_os.dylink_environment != NULL)
-    {
-        m3_FreeEnvironment(g_os.dylink_environment);
-        g_os.dylink_environment = NULL;
-    }
     os_wasm_library_free_all();
 #endif
 
@@ -1589,10 +1571,6 @@ OsStatus os_wasm_library_register(
             return status;
         }
     }
-    if (g_os.dylink_sealed)
-    {
-        return OS_STATUS_BUSY;
-    }
     if (os_wasm_library_find(module_name) != NULL)
     {
         return OS_STATUS_INVALID_ARGUMENT;
@@ -1653,31 +1631,27 @@ uint32_t os_wasm_library_get_count(void)
     return g_os.wasm_library_count;
 }
 
-uint8_t os_wasm_link_group_is_sealed(void)
-{
-    return g_os.dylink_sealed;
-}
-
 static M3Result os_dylink_resolve_module(
     void* context,
     const char* name,
     IM3Module* out_module
 )
 {
+    OsTaskHandle task = (OsTaskHandle)context;
     OsWasmLibraryHandle library = NULL;
-    (void)context;
     if (out_module == NULL)
     {
         return m3Err_dylinkDependencyMissing;
     }
     *out_module = NULL;
     library = os_wasm_library_find(name);
-    if (library == NULL || g_os.dylink_environment == NULL)
+    if (library == NULL || task == NULL)
     {
         return m3Err_dylinkDependencyMissing;
     }
+    /* Each process parses its own instance; only the bytes are shared. */
     return m3_ParseModule(
-        g_os.dylink_environment,
+        task->wasm_environment,
         out_module,
         library->wasm_bytes,
         library->wasm_size
@@ -1688,292 +1662,6 @@ static M3Result os_dylink_link_host_imports(void* context, IM3Module module)
 {
     (void)context;
     return os_link_module_host_imports(module);
-}
-
-static void os_make_dylink_task_name(OsTaskHandle task)
-{
-    static const char prefix[] = "task-";
-    char digits[10];
-    uint32_t value = task != NULL ? task->id : 0U;
-    uint32_t count = 0U;
-    uint32_t cursor = 0U;
-
-    if (task == NULL)
-    {
-        return;
-    }
-    memcpy(task->wasm_dylink_name, prefix, sizeof(prefix) - 1U);
-    cursor = (uint32_t)(sizeof(prefix) - 1U);
-    do
-    {
-        digits[count++] = (char)('0' + (value % 10U));
-        value /= 10U;
-    } while (value != 0U && count < (uint32_t)sizeof(digits));
-    while (count != 0U && cursor + 1U < OS_DYLINK_TASK_NAME_MAX)
-    {
-        task->wasm_dylink_name[cursor++] = digits[--count];
-    }
-    task->wasm_dylink_name[cursor] = '\0';
-}
-
-OsStatus os_wasm_link_group_seal(void)
-{
-    OsTaskHandle task = NULL;
-    OsTaskHandle first_task = NULL;
-    M3DylinkProgram* programs = NULL;
-    IM3DylinkContext* contexts = NULL;
-    uint32_t program_count = 0U;
-    uint32_t program_index = 0U;
-    M3Result result = m3Err_none;
-    OsStatus seal_status = OS_STATUS_OK;
-
-    if (!g_os.initialized)
-    {
-        return OS_STATUS_ERROR;
-    }
-    if (g_os.dylink_sealed)
-    {
-        return OS_STATUS_OK;
-    }
-    for (task = g_os.task_list; task != NULL; task = task->next)
-    {
-        if (task->wasm_dylink_task && task->wasm_module != NULL &&
-            task->state != OS_TASK_DEAD)
-        {
-            if (first_task == NULL)
-            {
-                first_task = task;
-            }
-            ++program_count;
-        }
-    }
-    if (program_count == 0U)
-    {
-        g_os.dylink_sealed = 1U;
-        return OS_STATUS_OK;
-    }
-
-    programs = (M3DylinkProgram*)calloc(program_count, sizeof(M3DylinkProgram));
-    contexts = (IM3DylinkContext*)calloc(program_count, sizeof(IM3DylinkContext));
-    if (programs == NULL || contexts == NULL)
-    {
-        free(programs);
-        free(contexts);
-        return OS_STATUS_OUT_OF_MEMORY;
-    }
-
-    for (task = g_os.task_list; task != NULL; task = task->next)
-    {
-        if (!task->wasm_dylink_task || task->wasm_module == NULL ||
-            task->state == OS_TASK_DEAD)
-        {
-            continue;
-        }
-        programs[program_index].name = task->wasm_dylink_name;
-        programs[program_index].module = task->wasm_module;
-        programs[program_index].nativeStackSize = task->stack_size;
-        programs[program_index].linearStackSize = OS_DYLINK_LINEAR_STACK_SIZE;
-        programs[program_index].userdata = task;
-        ++program_index;
-    }
-
-    g_os.dylink_runtime = m3_NewRuntime(
-        g_os.dylink_environment,
-        first_task->stack_size,
-        first_task
-    );
-    if (g_os.dylink_runtime == NULL)
-    {
-        free(programs);
-        free(contexts);
-        return OS_STATUS_OUT_OF_MEMORY;
-    }
-
-    {
-        M3DylinkOptions options;
-        memset(&options, 0, sizeof(options));
-        options.context = &g_os;
-        options.resolveModule = os_dylink_resolve_module;
-        options.linkHostImports = os_dylink_link_host_imports;
-        options.linearStackSize = OS_DYLINK_LINEAR_STACK_SIZE;
-        result = m3_DylinkLoadGroup(
-            g_os.dylink_runtime,
-            programs,
-            program_count,
-            &options,
-            contexts
-        );
-    }
-    if (result != m3Err_none)
-    {
-        uint8_t owns_program_module = 0U;
-        os_set_last_error(first_task, "dylink_load_group", result,
-                          OS_STATUS_WASM_ERROR);
-        for (task = g_os.task_list; task != NULL; task = task->next)
-        {
-            if (task->wasm_dylink_task && task->wasm_module != NULL &&
-                task->wasm_module->runtime == g_os.dylink_runtime)
-            {
-                task->wasm_module = NULL;
-                owns_program_module = 1U;
-            }
-        }
-        m3_FreeRuntime(g_os.dylink_runtime);
-        g_os.dylink_runtime = NULL;
-        if (owns_program_module)
-        {
-            for (task = g_os.task_list; task != NULL; task = task->next)
-            {
-                if (task->wasm_dylink_task)
-                {
-                    os_record_task_exit(task, OS_TASK_EXIT_WASM_ERROR, 1U);
-                    os_set_task_dead(task);
-                }
-            }
-            os_recalculate_task_counters();
-        }
-        free(programs);
-        free(contexts);
-        return OS_STATUS_WASM_ERROR;
-    }
-
-    program_index = 0U;
-    for (task = g_os.task_list; task != NULL; task = task->next)
-    {
-        if (!task->wasm_dylink_task || task->wasm_module == NULL ||
-            task->state == OS_TASK_DEAD)
-        {
-            continue;
-        }
-        task->wasm_runtime = g_os.dylink_runtime;
-        task->wasm_dylink_context = contexts[program_index++];
-        task->wasm_module_loaded = 1U;
-        result = m3_DylinkActivateContext(task->wasm_dylink_context);
-        if (result == m3Err_none)
-        {
-            result = m3_FindFunctionInModule(
-                &task->wasm_entry_function,
-                task->wasm_module,
-                task->entry_function_name
-            );
-        }
-        if (result != m3Err_none)
-        {
-            os_set_last_error(task, "find_linked_function", result,
-                              OS_STATUS_WASM_ERROR);
-            os_record_task_exit(task, OS_TASK_EXIT_WASM_ERROR, 1U);
-            os_set_task_dead(task);
-            seal_status = OS_STATUS_WASM_ERROR;
-        }
-    }
-
-    g_os.dylink_sealed = 1U;
-    if (seal_status == OS_STATUS_OK)
-    {
-        os_clear_last_error();
-    }
-    free(programs);
-    free(contexts);
-    os_recalculate_task_counters();
-    return seal_status;
-}
-
-static OsStatus os_dylink_attach_task(OsTaskHandle task)
-{
-    M3DylinkProgram program;
-    M3DylinkOptions options;
-    IM3DylinkContext context = NULL;
-    M3Result result = m3Err_none;
-
-    if (task == NULL || task->wasm_module == NULL ||
-        g_os.dylink_environment == NULL)
-    {
-        return OS_STATUS_INVALID_ARGUMENT;
-    }
-
-    memset(&program, 0, sizeof(program));
-    memset(&options, 0, sizeof(options));
-    program.name = task->wasm_dylink_name;
-    program.module = task->wasm_module;
-    program.nativeStackSize = task->stack_size;
-    program.linearStackSize = OS_DYLINK_LINEAR_STACK_SIZE;
-    program.userdata = task;
-    options.context = &g_os;
-    options.resolveModule = os_dylink_resolve_module;
-    options.linkHostImports = os_dylink_link_host_imports;
-    options.linearStackSize = OS_DYLINK_LINEAR_STACK_SIZE;
-
-    if (g_os.dylink_runtime == NULL)
-    {
-        g_os.dylink_runtime = m3_NewRuntime(
-            g_os.dylink_environment,
-            task->stack_size,
-            task
-        );
-        if (g_os.dylink_runtime == NULL)
-        {
-            return OS_STATUS_OUT_OF_MEMORY;
-        }
-        result = m3_DylinkLoadGroup(
-            g_os.dylink_runtime,
-            &program,
-            1U,
-            &options,
-            &context
-        );
-        if (result != m3Err_none)
-        {
-            if (task->wasm_module != NULL &&
-                task->wasm_module->runtime == g_os.dylink_runtime)
-            {
-                task->wasm_module = NULL;
-            }
-            m3_FreeRuntime(g_os.dylink_runtime);
-            g_os.dylink_runtime = NULL;
-        }
-    }
-    else
-    {
-        result = m3_DylinkAddProgram(
-            g_os.dylink_runtime,
-            &program,
-            &options,
-            &context
-        );
-    }
-
-    if (result != m3Err_none || context == NULL)
-    {
-        OsStatus status = result == m3Err_mallocFailed
-            ? OS_STATUS_OUT_OF_MEMORY : OS_STATUS_WASM_ERROR;
-        os_set_last_error(task, "dylink_add_program", result, status);
-        return status;
-    }
-
-    task->wasm_runtime = g_os.dylink_runtime;
-    task->wasm_dylink_context = context;
-    task->wasm_module_loaded = 1U;
-    result = m3_DylinkActivateContext(context);
-    if (result == m3Err_none)
-    {
-        result = m3_FindFunctionInModule(
-            &task->wasm_entry_function,
-            task->wasm_module,
-            task->entry_function_name
-        );
-    }
-    if (result != m3Err_none)
-    {
-        (void)m3_DylinkRemoveProgram(context);
-        task->wasm_module = NULL;
-        task->wasm_runtime = NULL;
-        task->wasm_dylink_context = NULL;
-        task->wasm_module_loaded = 0U;
-        os_set_last_error(task, "find_linked_function", result,
-                          OS_STATUS_WASM_ERROR);
-        return OS_STATUS_WASM_ERROR;
-    }
-    return OS_STATUS_OK;
 }
 #endif
 
@@ -2029,9 +1717,6 @@ static OsStatus os_task_initialize(
     task->entry_function_name = entry_function_name;
     task->stack_size = (stack_size == 0U) ? OS_DEFAULT_STACK_SIZE : stack_size;
     os_copy_task_name(task, task_name);
-#if d_m3HasDylink
-    os_make_dylink_task_name(task);
-#endif
 
     status = os_task_copy_entry_args(task, entry_args, entry_arg_count);
     if (status != OS_STATUS_OK)
@@ -3333,16 +3018,6 @@ OsStatus os_schedule(void)
         return OS_STATUS_NO_READY_TASKS;
     }
 
-#if d_m3HasDylink
-    if (!g_os.dylink_sealed)
-    {
-        schedule_status = os_wasm_link_group_seal();
-        if (schedule_status != OS_STATUS_OK)
-        {
-            return schedule_status;
-        }
-    }
-#endif
 
     if (g_os.clock_port.now_ms != NULL)
     {
@@ -4282,65 +3957,51 @@ static OsStatus os_task_create_wasm(
 #if d_m3HasDylink
     if (task->wasm_module->dylink != NULL)
     {
-        IM3Function entry = NULL;
-        OsStatus status = OS_STATUS_OK;
+        /*
+         * A PIE program: load it and its dylink.0 dependencies into the
+         * task's own runtime. Every process gets private library memory,
+         * globals and table, like shared objects in an ELF process.
+         */
+        M3DylinkOptions options;
+        IM3Module module = task->wasm_module;
 
-        m3_FreeRuntime(task->wasm_runtime);
-        task->wasm_runtime = NULL;
-        task->wasm_stack_base = NULL;
-        m3_FreeModule(task->wasm_module);
-        task->wasm_module = NULL;
-        m3_FreeEnvironment(task->wasm_environment);
-        task->wasm_environment = NULL;
-
-        if (g_os.dylink_environment == NULL)
-        {
-            g_os.dylink_environment = m3_NewEnvironment();
-            if (g_os.dylink_environment == NULL)
-            {
-                return OS_STATUS_OUT_OF_MEMORY;
-            }
-        }
-        result = m3_ParseModule(
-            g_os.dylink_environment,
-            &task->wasm_module,
-            wasm_bytes,
-            wasm_size
-        );
+        memset(&options, 0, sizeof(options));
+        options.context = task;
+        options.resolveModule = os_dylink_resolve_module;
+        options.linkHostImports = os_dylink_link_host_imports;
+        options.linearStackSize = OS_DYLINK_LINEAR_STACK_SIZE;
+        result = m3_DylinkLoad(task->wasm_runtime, module, task->name, &options);
+        /* Once the module joined the runtime, the runtime frees it. */
+        task->wasm_module_loaded = module->runtime == task->wasm_runtime ? 1U : 0U;
         if (result != m3Err_none)
         {
-            status = os_wasm_result_to_status(result);
-            os_set_last_error(task, "parse_linked_module", result, status);
-            return status;
-        }
-
-        if (entry_function_name == NULL || entry_function_name[0] == '\0')
-        {
-            entry_function_name = os_detect_entry_function(task->wasm_module);
-            task->entry_function_name = entry_function_name;
-        }
-        entry = entry_function_name != NULL
-            ? (IM3Function)v_FindFunction(task->wasm_module, (void*)entry_function_name)
-            : NULL;
-        if (entry == NULL)
-        {
-            os_set_last_error(task, "find_linked_function",
-                              m3Err_functionLookupFailed,
-                              OS_STATUS_WASM_ERROR);
-            return OS_STATUS_WASM_ERROR;
-        }
-        task->wasm_entry_function = entry;
-        status = os_validate_entry_function(task);
-        if (status != OS_STATUS_OK)
-        {
+            OsStatus status = os_wasm_result_to_status(result);
+            os_set_last_error(task, "dylink_load", result, status);
             return status;
         }
         task->wasm_dylink_task = 1U;
-        if (g_os.dylink_sealed)
+
+        if (entry_function_name == NULL || entry_function_name[0] == '\0')
         {
-            return os_dylink_attach_task(task);
+            entry_function_name = os_detect_entry_function(module);
+            if (entry_function_name == NULL)
+            {
+                os_set_last_error(task, "find_function",
+                                  "no entry point: export _start, app_main or main",
+                                  OS_STATUS_WASM_ERROR);
+                return OS_STATUS_WASM_ERROR;
+            }
+            task->entry_function_name = entry_function_name;
         }
-        return OS_STATUS_OK;
+        /* Look only in the program: a library may export the same name. */
+        result = m3_FindFunctionInModule(&task->wasm_entry_function, module, entry_function_name);
+        if (result != m3Err_none)
+        {
+            OsStatus status = os_wasm_result_to_status(result);
+            os_set_last_error(task, "find_function", result, status);
+            return status;
+        }
+        return os_validate_entry_function(task);
     }
 #endif
 
@@ -4722,37 +4383,6 @@ static void os_task_cleanup_wasm(OsTaskHandle task)
     task->wasm_needs_resume = 0U;
     task->wasm_entry_function = NULL;
 
-#if d_m3HasDylink
-    if (task->wasm_dylink_task)
-    {
-        if (task->wasm_dylink_context != NULL && task->wasm_module_loaded)
-        {
-            M3Result result =
-                m3_DylinkRemoveProgram(task->wasm_dylink_context);
-            if (result != m3Err_none)
-            {
-                os_set_last_error(task, "dylink_remove_program", result,
-                                  OS_STATUS_WASM_ERROR);
-            }
-            else
-            {
-                task->wasm_module = NULL;
-            }
-        }
-        if (task->wasm_module != NULL && !task->wasm_module_loaded)
-        {
-            m3_FreeModule(task->wasm_module);
-        }
-        task->wasm_module = NULL;
-        task->wasm_module_loaded = 0U;
-        task->wasm_runtime = NULL;
-        task->wasm_stack_base = NULL;
-        task->wasm_dylink_context = NULL;
-        task->wasm_dylink_task = 0U;
-        return;
-    }
-#endif
-
     if (task->wasm_runtime != NULL)
     {
         m3_FreeRuntime(task->wasm_runtime);
@@ -4772,6 +4402,9 @@ static void os_task_cleanup_wasm(OsTaskHandle task)
         m3_FreeEnvironment(task->wasm_environment);
         task->wasm_environment = NULL;
     }
+#if d_m3HasDylink
+    task->wasm_dylink_task = 0U;
+#endif
 }
 
 /*
@@ -6590,18 +6223,6 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
     os_apply_task_wasi_args(task);
 #endif
 
-#if d_m3HasDylink
-    if (task->wasm_dylink_task)
-    {
-        result = m3_DylinkActivateContext(task->wasm_dylink_context);
-        if (result != m3Err_none)
-        {
-            os_set_last_error(task, "activate_dylink_context", result,
-                              OS_STATUS_WASM_ERROR);
-            return OS_TASK_RUN_ERROR;
-        }
-    }
-#endif
 
     task->wasm_stack_base = (uint8_t*)task->wasm_runtime->stack;
     m3_SetFuel(task->wasm_runtime, OS_TASK_SLICE_FUEL);
