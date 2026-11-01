@@ -252,16 +252,14 @@ void os_host_import_clear_all(void);
 
 #if d_m3HasDylink
 /*
- * Register a resident dylink.0 side module. The byte buffer must remain valid
- * until os_shutdown(). PIE tasks created through the normal os_task_create
- * APIs are collected into one link group and share one instance of every
- * dependency, including its memory, globals, and indirect-function table.
- * Standalone Core Wasm tasks keep their existing isolated runtimes.
+ * Register a dylink.0 side module (a shared library) under the name programs
+ * list as needed. The byte buffer must remain valid until os_shutdown().
  *
- * Library registration closes when the group is sealed, either explicitly or
- * by the first os_schedule() call. PIE tasks may still be created and deleted
- * afterwards; newly needed registered libraries are instantiated lazily and
- * stay resident until os_shutdown().
+ * A PIE program is loaded with its dependencies into its own runtime: every
+ * process gets private copies of each library's memory, globals and
+ * indirect-function table, like shared objects in an ELF process. Only the
+ * library bytes are shared. Libraries may be registered at any time; a
+ * program needing one that is missing fails to load.
  */
 OsStatus os_wasm_library_register(
     OsWasmLibraryHandle* out_library,
@@ -273,8 +271,6 @@ OsWasmLibraryHandle os_wasm_library_find(const char* module_name);
 uint32_t os_wasm_library_get_id(OsWasmLibraryHandle library);
 const char* os_wasm_library_get_name(OsWasmLibraryHandle library);
 uint32_t os_wasm_library_get_count(void);
-OsStatus os_wasm_link_group_seal(void);
-uint8_t os_wasm_link_group_is_sealed(void);
 #endif
 
 OsStatus os_task_delete(OsTaskHandle task);
