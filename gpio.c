@@ -236,6 +236,20 @@ void os_gpio_edge(uint32_t pin, uint32_t edges)
     }
 }
 
+uint32_t os_gpio_get_owner(uint32_t pin)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
+    {
+        if (g_gpio.pins[index].used && g_gpio.pins[index].pin == pin)
+        {
+            return g_gpio.pins[index].owner;
+        }
+    }
+    return 0U;
+}
+
 void os_gpio_poll(void)
 {
     uint8_t delivered = 0U;
