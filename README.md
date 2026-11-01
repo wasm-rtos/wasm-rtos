@@ -48,6 +48,7 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_MAX_SPAWNED_TASKS` | 16 | processes alive at once |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `d_m3HasDylink` | 0 | `dylink.0` libraries (`os_wasm_library_register`) |
+| `d_m3HasHeapAccounting` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
 
 The file system needs 32-bit pointers; build 8-bit targets with
 `OS_HAS_FS=0`.

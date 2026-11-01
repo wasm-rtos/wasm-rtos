@@ -416,6 +416,27 @@ OsStatus os_task_get_return_values(
     uint32_t* out_value_count
 );
 /*
+ * RAM a task uses, in bytes. stack, linear memory and code are measured
+ * exactly in every build. interpreter_bytes is everything the interpreter
+ * allocated for the task (those three plus module tables, names, types and
+ * the like) and needs d_m3HasHeapAccounting=1; otherwise it is 0 and
+ * total_bytes leaves that metadata out.
+ */
+typedef struct OsTaskMemoryUsage
+{
+    uint32_t stack_bytes;            /* interpreter value stack */
+    uint32_t linear_memory_bytes;    /* the program's linear memory */
+    uint32_t code_bytes;             /* compiled code pages */
+    uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
+    uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */
+    uint32_t image_bytes;            /* kernel copy of the module; 0 when it runs in place or the host owns it */
+    uint32_t kernel_bytes;           /* task control block */
+    uint32_t total_bytes;
+} OsTaskMemoryUsage;
+
+OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usage);
+
+/*
  * Copy to or from a task's linear memory at a wasm address. The whole range
  * must lie inside the memory (OS_STATUS_OUT_OF_BOUNDS), including addresses
  * near 4 GiB.
