@@ -352,9 +352,8 @@ OsStatus os_task_resume(OsTaskHandle task);
 /*
  * Snapshots contain WASM runtime state, not RTOS wait or timer state.
  * Snapshot operations return OS_STATUS_BUSY while the task is waiting or has
- * an attached software timer. Resident dylink tasks return
- * OS_STATUS_UNSUPPORTED because their library memory and globals belong to the
- * whole link group rather than one task.
+ * an attached software timer. Dynamically linked (dylink.0) tasks return
+ * OS_STATUS_UNSUPPORTED: snapshots of linked programs are not supported yet.
  */
 OsStatus os_task_get_snapshot_size(
     OsTaskHandle task,
