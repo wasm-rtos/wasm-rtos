@@ -301,6 +301,7 @@ OsStatus os_task_delete(OsTaskHandle task);
  *   kill(pid)                               -> OsStatus (own children only)
  *   self()                                  -> pid
  *   parent()                                -> parent pid, 0 if none
+ *   spawn_path(path, argv, argc, priority)  -> pid, or -OsStatus (OS_HAS_FS)
  * wait returns OS_STATUS_OK for a normal exit, OS_STATUS_WASM_ERROR when the
  * child trapped and OS_STATUS_ABORTED when it was deleted; the exit code is
  * written to out_exit_code when it is not 0.
@@ -314,6 +315,23 @@ OsStatus os_task_spawn(
     uint32_t priority
 );
 uint32_t os_task_get_parent_id(OsTaskHandle task);
+#if OS_HAS_FS
+/*
+ * Start the program stored at an absolute file system path. A file whose
+ * driver maps it into memory (the tar driver does) runs in place without a
+ * copy, and its mount stays busy until the process is destroyed; any other
+ * file is read into RAM first. With argc 0 the program gets argv = { path }.
+ * Errors: OS_STATUS_FILE_NOT_FOUND, OS_STATUS_IS_A_DIRECTORY,
+ * OS_STATUS_NOT_A_DIRECTORY, plus everything os_task_spawn returns.
+ */
+OsStatus os_task_spawn_path(
+    OsTaskHandle* out_task,
+    const char* path,
+    const char* const* argv,
+    uint32_t argc,
+    uint32_t priority
+);
+#endif
 #endif
 OsStatus os_task_delay_ms(uint32_t delay_ms);
 /*

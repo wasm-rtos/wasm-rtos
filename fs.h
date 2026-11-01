@@ -89,6 +89,24 @@ OsStatus os_fs_tar_init(OsFsTar* tar, const uint8_t* image, uint32_t size);
 extern const OsFsDriver os_fs_tar_driver;
 #endif
 
+/*
+ * A program image opened by path. When the driver maps the file, bytes point
+ * into the file system itself (no copy) and the mount stays busy until the
+ * image is closed; otherwise the file is read into a heap copy.
+ */
+typedef struct OsFsImage
+{
+    const uint8_t* bytes;
+    uint32_t size;
+    const OsFsDriver* driver;
+    void* context;
+    void* handle;
+    uint8_t* copy;
+} OsFsImage;
+
+OsStatus os_fs_image_open(const char* path, OsFsImage* out_image);
+void os_fs_image_close(OsFsImage* image);
+
 /* Kernel internal. */
 M3Result os_fs_link_wasi(IM3Module module);
 void os_fs_release_task(uint32_t task_id);
