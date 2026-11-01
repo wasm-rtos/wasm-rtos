@@ -134,6 +134,13 @@ with `malloc` does about 17% more work in its allocator while the heap grows
 (wasi-libc asks for memory in small steps); `-Wl,--initial-heap=<bytes>`
 sized for its heap removes that.
 
+1-byte pages need a libc whose `malloc` asks the linker for the page size.
+wasi-libc does that from the release whose `sbrk` uses
+`__wasm_first_page_end` (Homebrew's wasi-libc 34 does; the Ubuntu 26.04
+package, a 2025-07-26 snapshot, still assumes 64 KiB and its `malloc`
+traps once it grows memory). Check a sysroot with
+`llvm-objdump -r libc.a | grep __wasm_first_page_end`.
+
 `os.h` documents every call and its status codes.
 
 ## Tests
