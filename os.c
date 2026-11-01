@@ -225,6 +225,8 @@ typedef struct OsState
     uint32_t timer_count;
     /* Result slot of the import running now, between its begin and end. */
     uint32_t* import_return_slot;
+    OsSwapPort swap_port;
+    uint8_t has_swap_port;
     uint8_t initialized;
     uint8_t time_update_initialized;
     uint8_t preempt_requested;
@@ -318,6 +320,19 @@ struct OsTask
     uint32_t argc;
     const char* default_argv[1];
 #endif
+
+    /* Swapped out: the interpreter state is in swap storage, not RAM. */
+    uint8_t swapped;
+    /* 0 when it was swapped out before it started: it starts afresh. */
+    uint8_t swap_has_image;
+    uint32_t swap_bytes;
+    /* What a wait delivered while swapped out, applied when it comes back. */
+    uint8_t swap_return_pending;
+    uint32_t swap_return_offset;
+    uint32_t swap_return_value;
+    uint8_t* swap_item;
+    uint32_t swap_item_address;
+    uint32_t swap_item_size;
 
 #if d_m3HasDylink
     uint8_t wasm_dylink_task;
@@ -2187,59 +2202,207 @@ OsStatus os_task_resume(OsTaskHandle task)
     return OS_STATUS_OK;
 }
 
-OsStatus os_task_get_snapshot_size(OsTaskHandle task, uint32_t* out_size)
+/* Carries an OsSnapshotWrite/Read callback through wasm3's stream calls. */
+typedef struct OsSnapshotStream
 {
-    M3Result result = m3Err_none;
-    OsStatus status = OS_STATUS_OK;
+    OsSnapshotWrite write;
+    OsSnapshotRead read;
+    void* context;
+    OsStatus status;
+} OsSnapshotStream;
 
-    if (task == NULL || out_size == NULL)
-    {
-        return OS_STATUS_INVALID_ARGUMENT;
-    }
+static const char os_snapshot_stream_failed[] = "snapshot stream failed";
 
+static M3Result os_snapshot_stream_write(void* context, const void* data, uint32_t size)
+{
+    OsSnapshotStream* stream = (OsSnapshotStream*)context;
+    stream->status = stream->write(stream->context, data, size);
+    return stream->status == OS_STATUS_OK ? m3Err_none : os_snapshot_stream_failed;
+}
+
+static M3Result os_snapshot_stream_read(void* context, void* data, uint32_t size)
+{
+    OsSnapshotStream* stream = (OsSnapshotStream*)context;
+    stream->status = stream->read(stream->context, data, size);
+    return stream->status == OS_STATUS_OK ? m3Err_none : os_snapshot_stream_failed;
+}
+
+static OsStatus os_snapshot_stream_status(const OsSnapshotStream* stream, M3Result result)
+{
+    return result == os_snapshot_stream_failed ? stream->status : os_wasm_snapshot_result_to_status(result);
+}
+
+/* Whether a task's runtime may be saved to or loaded from a snapshot now. */
+static OsStatus os_task_check_snapshot(OsTaskHandle task)
+{
     if (!os_task_is_in_list(task))
     {
         return OS_STATUS_TASK_NOT_FOUND;
     }
-
     if (os_task_is_dead(task))
     {
         return OS_STATUS_TASK_DEAD;
     }
-
 #if d_m3HasDylink
     if (task->wasm_dylink_task)
     {
         return OS_STATUS_UNSUPPORTED;
     }
 #endif
-
+    if (task->swapped)
+    {
+        return OS_STATUS_BUSY;
+    }
     if (task->wasm_runtime == NULL)
     {
         return OS_STATUS_TASK_DEAD;
     }
-
     if (g_os.current_task == task)
     {
         return OS_STATUS_ERROR;
     }
+    return os_task_snapshot_is_busy(task) ? OS_STATUS_BUSY : OS_STATUS_OK;
+}
 
-    if (os_task_snapshot_is_busy(task))
+OsStatus os_task_write_snapshot(OsTaskHandle task, OsSnapshotWrite write, void* context)
+{
+    OsSnapshotStream stream = { write, NULL, context, OS_STATUS_OK };
+    OsStatus status = OS_STATUS_OK;
+    M3Result result = m3Err_none;
+
+    if (task == NULL || write == NULL)
     {
-        return OS_STATUS_BUSY;
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    status = os_task_check_snapshot(task);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
     }
 
-    result = m3_GetRuntimeSnapshotSize(task->wasm_runtime, out_size);
-    status = os_wasm_snapshot_result_to_status(result);
+    result = m3_WriteRuntimeSnapshot(task->wasm_runtime, os_snapshot_stream_write, &stream);
+    status = os_snapshot_stream_status(&stream, result);
     if (status == OS_STATUS_OK)
     {
         os_clear_last_error();
     }
     else
     {
-        os_set_last_error(task, "snapshot_size", result, status);
+        os_set_last_error(task, "snapshot_save", result, status);
+    }
+    return status;
+}
+
+/* The task continues from a loaded snapshot at its next slice. */
+static void os_task_continue_from_snapshot(OsTaskHandle task)
+{
+    task->wasm_started = 1U;
+    task->wasm_needs_resume = 1U;
+    task->entry_return_code = 0U;
+}
+
+OsStatus os_task_read_snapshot(OsTaskHandle task, OsSnapshotRead read, void* context)
+{
+    OsSnapshotStream stream = { NULL, read, context, OS_STATUS_OK };
+    OsStatus status = OS_STATUS_OK;
+    M3Result result = m3Err_none;
+
+    if (task == NULL || read == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    status = os_task_check_snapshot(task);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    if (task->wasm_started)
+    {
+        return OS_STATUS_BUSY;
     }
 
+    {
+        OS_HEAP_ENTER(task);
+        result = m3_ReadRuntimeSnapshot(task->wasm_runtime, os_snapshot_stream_read, &stream);
+        OS_HEAP_LEAVE();
+    }
+    status = os_snapshot_stream_status(&stream, result);
+    if (status == OS_STATUS_OK)
+    {
+        os_clear_last_error();
+        os_task_continue_from_snapshot(task);
+        os_set_task_ready(task);
+        os_recalculate_task_counters();
+        return OS_STATUS_OK;
+    }
+
+    os_set_last_error(task, "snapshot_load", result, status);
+    /* A load that failed partway may have written some memory: start over. */
+    {
+        OsLastError error = g_os.last_error;
+        OsStatus recreated = OS_STATUS_OK;
+        os_task_cleanup_wasm(task);
+        {
+            OS_HEAP_ENTER(task);
+            recreated = os_task_create_wasm(task, task->wasm_bytes, task->wasm_size, task->entry_function_name,
+                                            task->stack_size);
+            OS_HEAP_LEAVE();
+        }
+        g_os.last_error = error;
+        if (recreated != OS_STATUS_OK)
+        {
+            os_task_cleanup_wasm(task);
+        }
+    }
+    return status;
+}
+
+/* A snapshot in a caller's buffer; with no buffer it only counts. */
+typedef struct OsSnapshotBuffer
+{
+    uint8_t* data;
+    uint32_t size;
+    uint32_t used;
+} OsSnapshotBuffer;
+
+static OsStatus os_snapshot_buffer_write(void* context, const void* data, uint32_t size)
+{
+    OsSnapshotBuffer* buffer = (OsSnapshotBuffer*)context;
+    if (buffer->data != NULL)
+    {
+        if (size > buffer->size - buffer->used)
+        {
+            return OS_STATUS_BUFFER_TOO_SMALL;
+        }
+        memcpy(buffer->data + buffer->used, data, size);
+    }
+    buffer->used += size;
+    return OS_STATUS_OK;
+}
+
+static OsStatus os_snapshot_buffer_read(void* context, void* data, uint32_t size)
+{
+    OsSnapshotBuffer* buffer = (OsSnapshotBuffer*)context;
+    if (size > buffer->size - buffer->used)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    memcpy(data, buffer->data + buffer->used, size);
+    buffer->used += size;
+    return OS_STATUS_OK;
+}
+
+OsStatus os_task_get_snapshot_size(OsTaskHandle task, uint32_t* out_size)
+{
+    OsSnapshotBuffer counter = { NULL, 0U, 0U };
+    OsStatus status = OS_STATUS_OK;
+
+    if (task == NULL || out_size == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    status = os_task_write_snapshot(task, os_snapshot_buffer_write, &counter);
+    *out_size = counter.used;
     return status;
 }
 
@@ -2250,123 +2413,228 @@ OsStatus os_task_save_snapshot(
     uint32_t* out_size
 )
 {
-    M3Result result = m3Err_none;
+    OsSnapshotBuffer target = { buffer, buffer_size, 0U };
     OsStatus status = OS_STATUS_OK;
 
     if (task == NULL || buffer == NULL || buffer_size == 0U || out_size == NULL)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
-
-    if (!os_task_is_in_list(task))
+    status = os_task_get_snapshot_size(task, out_size);
+    if (status != OS_STATUS_OK)
     {
-        return OS_STATUS_TASK_NOT_FOUND;
+        return status;
     }
-
-    if (os_task_is_dead(task))
+    if (buffer_size < *out_size)
     {
-        return OS_STATUS_TASK_DEAD;
+        return OS_STATUS_BUFFER_TOO_SMALL;
     }
-
-#if d_m3HasDylink
-    if (task->wasm_dylink_task)
-    {
-        return OS_STATUS_UNSUPPORTED;
-    }
-#endif
-
-    if (task->wasm_runtime == NULL)
-    {
-        return OS_STATUS_TASK_DEAD;
-    }
-
-    if (g_os.current_task == task)
-    {
-        return OS_STATUS_ERROR;
-    }
-
-    if (os_task_snapshot_is_busy(task))
-    {
-        return OS_STATUS_BUSY;
-    }
-
-    result = m3_SaveRuntimeSnapshot(task->wasm_runtime, buffer, buffer_size, out_size);
-    status = os_wasm_snapshot_result_to_status(result);
-    if (status == OS_STATUS_OK)
-    {
-        os_clear_last_error();
-    }
-    else
-    {
-        os_set_last_error(task, "snapshot_save", result, status);
-    }
-
-    return status;
+    return os_task_write_snapshot(task, os_snapshot_buffer_write, &target);
 }
 
 OsStatus os_task_load_snapshot(OsTaskHandle task, const uint8_t* buffer, uint32_t buffer_size)
 {
-    M3Result result = m3Err_none;
-    OsStatus status = OS_STATUS_OK;
+    OsSnapshotBuffer source = { (uint8_t*)buffer, buffer_size, 0U };
 
     if (task == NULL || buffer == NULL || buffer_size == 0U)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
+    return os_task_read_snapshot(task, os_snapshot_buffer_read, &source);
+}
 
+/* ---- Swapping ------------------------------------------------------------ */
+
+/* Where the next piece of a task's swap image goes or comes from. */
+typedef struct OsSwapCursor
+{
+    uint32_t task_id;
+    uint32_t offset;
+} OsSwapCursor;
+
+static OsStatus os_swap_write(void* context, const void* data, uint32_t size)
+{
+    OsSwapCursor* cursor = (OsSwapCursor*)context;
+    OsStatus status = g_os.swap_port.write(g_os.swap_port.context, cursor->task_id, cursor->offset, data, size);
+    cursor->offset += size;
+    return status;
+}
+
+static OsStatus os_swap_read(void* context, void* data, uint32_t size)
+{
+    OsSwapCursor* cursor = (OsSwapCursor*)context;
+    OsStatus status = g_os.swap_port.read(g_os.swap_port.context, cursor->task_id, cursor->offset, data, size);
+    cursor->offset += size;
+    return status;
+}
+
+static void os_swap_discard(OsTaskHandle task)
+{
+    if (task->swap_has_image && g_os.has_swap_port && g_os.swap_port.discard != NULL)
+    {
+        g_os.swap_port.discard(g_os.swap_port.context, task->id);
+    }
+    task->swap_has_image = 0U;
+    task->swap_bytes = 0U;
+}
+
+static void os_swap_forget_deliveries(OsTaskHandle task)
+{
+    free(task->swap_item);
+    task->swap_item = NULL;
+    task->swap_item_size = 0U;
+    task->swap_return_pending = 0U;
+}
+
+OsStatus os_swap_port_set(const OsSwapPort* port)
+{
+    if (port == NULL)
+    {
+        g_os.has_swap_port = 0U;
+        memset(&g_os.swap_port, 0, sizeof(g_os.swap_port));
+        return OS_STATUS_OK;
+    }
+    if (port->write == NULL || port->read == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    g_os.swap_port = *port;
+    g_os.has_swap_port = 1U;
+    return OS_STATUS_OK;
+}
+
+uint8_t os_task_is_swapped(OsTaskHandle task)
+{
+    return task != NULL && os_task_is_in_list(task) && task->swapped ? 1U : 0U;
+}
+
+OsStatus os_task_swap_out(OsTaskHandle task)
+{
+    OsSwapCursor cursor;
+    OsSnapshotStream stream = { os_swap_write, NULL, &cursor, OS_STATUS_OK };
+    M3Result result = m3Err_none;
+    OsStatus status = OS_STATUS_OK;
+
+    if (task == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
     if (!os_task_is_in_list(task))
     {
         return OS_STATUS_TASK_NOT_FOUND;
     }
-
     if (os_task_is_dead(task))
     {
         return OS_STATUS_TASK_DEAD;
     }
-
+    if (task->swapped)
+    {
+        return OS_STATUS_OK;
+    }
+    if (!g_os.has_swap_port)
+    {
+        return OS_STATUS_UNSUPPORTED;
+    }
 #if d_m3HasDylink
     if (task->wasm_dylink_task)
     {
         return OS_STATUS_UNSUPPORTED;
     }
 #endif
-
+    if (g_os.current_task == task)
+    {
+        return OS_STATUS_ERROR;
+    }
     if (task->wasm_runtime == NULL)
     {
         return OS_STATUS_TASK_DEAD;
     }
 
-    if (g_os.current_task == task)
+    if (task->wasm_started)
     {
-        return OS_STATUS_ERROR;
+        cursor.task_id = task->id;
+        cursor.offset = 0U;
+        task->swap_has_image = 1U;
+        result = m3_WriteRuntimeSnapshot(task->wasm_runtime, os_snapshot_stream_write, &stream);
+        status = os_snapshot_stream_status(&stream, result);
+        if (status != OS_STATUS_OK)
+        {
+            os_swap_discard(task);
+            os_set_last_error(task, "swap_out", result, status);
+            return status;
+        }
+        task->swap_bytes = cursor.offset;
     }
 
-    if (os_task_snapshot_is_busy(task))
+    os_task_cleanup_wasm(task);
+    task->swapped = 1U;
+    os_clear_last_error();
+    return OS_STATUS_OK;
+}
+
+OsStatus os_task_swap_in(OsTaskHandle task)
+{
+    OsSwapCursor cursor;
+    OsSnapshotStream stream = { NULL, os_swap_read, &cursor, OS_STATUS_OK };
+    M3Result result = m3Err_none;
+    OsStatus status = OS_STATUS_OK;
+
+    if (task == NULL)
     {
-        return OS_STATUS_BUSY;
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    if (!os_task_is_in_list(task))
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+    if (!task->swapped)
+    {
+        return OS_STATUS_OK;
+    }
+    if (task->swap_has_image && !g_os.has_swap_port)
+    {
+        return OS_STATUS_UNSUPPORTED;
     }
 
     {
         OS_HEAP_ENTER(task);
-        result = m3_LoadRuntimeSnapshot(task->wasm_runtime, buffer, buffer_size);
+        status = os_task_create_wasm(task, task->wasm_bytes, task->wasm_size, task->entry_function_name,
+                                     task->stack_size);
+        if (status == OS_STATUS_OK && task->swap_has_image)
+        {
+            cursor.task_id = task->id;
+            cursor.offset = 0U;
+            result = m3_ReadRuntimeSnapshot(task->wasm_runtime, os_snapshot_stream_read, &stream);
+            status = os_snapshot_stream_status(&stream, result);
+        }
         OS_HEAP_LEAVE();
     }
-    status = os_wasm_snapshot_result_to_status(result);
-    if (status == OS_STATUS_OK)
+    if (status != OS_STATUS_OK)
     {
-        os_clear_last_error();
-        task->wasm_started = 1U;
-        task->wasm_needs_resume = 1U;
-        task->entry_return_code = 0U;
-        os_set_task_ready(task);
-        os_recalculate_task_counters();
-    }
-    else
-    {
-        os_set_last_error(task, "snapshot_load", result, status);
+        /* The image stays; the task can be brought back later. */
+        os_task_cleanup_wasm(task);
+        os_set_last_error(task, "swap_in", result != m3Err_none ? result : "cannot recreate the runtime", status);
+        return status;
     }
 
-    return status;
+    if (task->swap_has_image)
+    {
+        os_task_continue_from_snapshot(task);
+    }
+    task->swapped = 0U;
+    task->wasm_stack_base = (uint8_t*)task->wasm_runtime->stack;
+    if (task->swap_return_pending && task->swap_return_offset <= task->wasm_runtime->stackSize - sizeof(uint32_t))
+    {
+        memcpy(task->wasm_stack_base + task->swap_return_offset, &task->swap_return_value, sizeof(uint32_t));
+    }
+    if (task->swap_item != NULL)
+    {
+        (void)os_task_write_memory(task, task->swap_item_address, task->swap_item, task->swap_item_size);
+    }
+    os_swap_forget_deliveries(task);
+    os_swap_discard(task);
+    os_clear_last_error();
+    return OS_STATUS_OK;
 }
 
 OsStatus os_task_set_priority(OsTaskHandle task, uint32_t priority)
@@ -3023,6 +3291,7 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
     }
 #endif
 #endif
+    out_usage->swap_bytes = task->swapped ? task->swap_bytes : 0U;
     out_usage->kernel_bytes = (uint32_t)sizeof(struct OsTask);
     out_usage->total_bytes = out_usage->image_bytes + out_usage->kernel_bytes +
         (out_usage->interpreter_bytes != 0U
@@ -3927,6 +4196,8 @@ static void os_task_free(OsTaskHandle task)
     }
 
     os_task_cleanup_wasm(task);
+    os_swap_discard(task);
+    os_swap_forget_deliveries(task);
     os_abi_release_task(task);
 #if d_m3HasHeapAccounting
     m3_ReleaseHeapAccount(task->heap_account);
@@ -4594,6 +4865,11 @@ static OsStatus os_task_get_memory_pointer(
         return OS_STATUS_TASK_NOT_FOUND;
     }
 
+    if (task->swapped)
+    {
+        return OS_STATUS_BUSY;
+    }
+
     if (task->wasm_runtime == NULL)
     {
         return OS_STATUS_TASK_DEAD;
@@ -5064,12 +5340,28 @@ static OsStatus os_queue_deliver_to_waiting_receiver(
         return OS_STATUS_INVALID_ARGUMENT;
     }
 
-    status = os_task_write_memory(
-        task,
-        task->wait_queue_wasm_output_address,
-        (const uint8_t*)item,
-        queue->item_size
-    );
+    if (task->swapped)
+    {
+        /* Kept until the task comes back and has its memory again. */
+        free(task->swap_item);
+        task->swap_item = (uint8_t*)malloc(queue->item_size);
+        status = task->swap_item != NULL ? OS_STATUS_OK : OS_STATUS_OUT_OF_MEMORY;
+        if (status == OS_STATUS_OK)
+        {
+            memcpy(task->swap_item, item, queue->item_size);
+            task->swap_item_address = task->wait_queue_wasm_output_address;
+            task->swap_item_size = queue->item_size;
+        }
+    }
+    else
+    {
+        status = os_task_write_memory(
+            task,
+            task->wait_queue_wasm_output_address,
+            (const uint8_t*)item,
+            queue->item_size
+        );
+    }
     os_complete_task_wait(task, status, 0U);
     return status;
 }
@@ -5297,6 +5589,15 @@ static void os_write_wait_return(OsTaskHandle task, uint32_t value)
 {
     uint8_t* stack_start = NULL;
     uint32_t* return_slot = NULL;
+
+    if (task != NULL && task->swapped && task->wait_has_return_slot)
+    {
+        /* Written into the stack when the task comes back. */
+        task->swap_return_pending = 1U;
+        task->swap_return_offset = task->wait_return_offset;
+        task->swap_return_value = value;
+        return;
+    }
 
     if (task == NULL || !task->wait_has_return_slot ||
         task->wasm_runtime == NULL || task->wasm_stack_base == NULL)
@@ -5648,6 +5949,11 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
 {
     M3Result result = m3Err_none;
     const char* phase = "call";
+
+    if (task != NULL && task->swapped && os_task_swap_in(task) != OS_STATUS_OK)
+    {
+        return OS_TASK_RUN_ERROR;
+    }
 
     if (task == NULL || task->wasm_runtime == NULL || task->wasm_entry_function == NULL)
     {

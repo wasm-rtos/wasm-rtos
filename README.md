@@ -14,8 +14,8 @@ still shares the processor with other programs.
 
 - Priority scheduler with fuel preemption, delays, suspend/resume and
   software timers.
-- Queues, mutexes (with priority inheritance), semaphores, event groups and
-  task notifications, for the host and for guest programs.
+- Queues, mutexes (with priority inheritance), semaphores and event groups,
+  for the host and for guest programs; task notifications for the host.
 - Loader: detects the entry point (`_start`, `app_main`, `main`) and checks
   every function import when the program is loaded, not when it is first
   called.
@@ -26,6 +26,9 @@ still shares the processor with other programs.
   driver. Files from memory-mapped storage run without a copy.
 - Optional `dylink.0` shared libraries: every process gets its own copy of a
   library's data, as with ELF shared objects.
+- Snapshots and swapping: a program between two slices can be saved and
+  continued in a new task, also on another device, or moved out of RAM while
+  it waits and brought back when it runs.
 
 ## Building
 
@@ -94,6 +97,34 @@ int run_program(uint8_t* wasm, uint32_t size)
 `arm_wakeup` and `cancel_wakeup` in the clock port are optional: supply both
 to let the kernel ask for a wakeup at the next deadline instead of being
 polled (tickless operation).
+
+### Swapping
+
+To move idle programs out of RAM, give the kernel somewhere to put them: a
+swap port with `write`, `read` and `discard` for one image per task, backed
+by a file on an SD card, a flash partition, PSRAM or IndexedDB. Then
+`os_task_swap_out(task)` frees the task's linear memory, interpreter stack and
+compiled code, leaving the task control block. The task keeps waiting, its
+timers and handles keep working, and what its wait delivers meanwhile (a
+queue item, a result) is applied when it returns. The scheduler brings it
+back before its next slice. When and what to swap out is the platform's
+choice; a program playing music should stay, a menu waiting for a button can
+go.
+
+```c
+static const OsSwapPort swap = { sd_card, swap_write, swap_read, swap_discard };
+os_swap_port_set(&swap);
+os_task_swap_out(menu_task);   /* RAM back, until the menu has work to do */
+```
+
+### Snapshots
+
+`os_task_write_snapshot` saves a program that is between two slices and
+neither waiting nor timed; `os_task_read_snapshot` continues it in a new task
+created from the same module. A snapshot names positions by wasm bytecode
+offsets and holds no host addresses, so it moves between devices running the
+same kernel version, whatever their pointer size. Kernel state (waits,
+handles, open files) stays behind.
 
 ## Guest programs
 

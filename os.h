@@ -80,7 +80,6 @@ typedef enum OsTaskState
     OS_TASK_RUNNING,
     OS_TASK_WAITING,
     OS_TASK_SUSPENDED,
-    OS_TASK_SWAPPED,
     OS_TASK_DEAD
 } OsTaskState;
 
@@ -402,11 +401,27 @@ OsStatus os_task_suspend(OsTaskHandle task);
 OsStatus os_task_resume(OsTaskHandle task);
 
 /*
- * Snapshots contain WASM runtime state, not RTOS wait or timer state.
- * Snapshot operations return OS_STATUS_BUSY while the task is waiting or has
- * an attached software timer. Dynamically linked (dylink.0) tasks return
- * OS_STATUS_UNSUPPORTED: snapshots of linked programs are not supported yet.
+ * A snapshot is a program's state between two slices: its position, stack,
+ * linear memory and globals, without host addresses, so it loads into a task
+ * running the same module on this or another device with the same kernel
+ * version, whatever the pointer size. Load it into a new task created from
+ * the same module; it continues where the snapshot was taken.
+ *
+ * Kernel state is not part of it: waits, timers, handles and open files stay
+ * with the task they belong to. So saving needs a task that is neither
+ * waiting nor the target of a timer (OS_STATUS_BUSY), and loading needs one
+ * that has not run yet (OS_STATUS_BUSY). A load that fails leaves the task
+ * as it was created. Linked (dylink.0) tasks return OS_STATUS_UNSUPPORTED.
+ *
+ * The stream calls write or read the snapshot in pieces through a callback;
+ * a callback error stops the call and is returned as it is.
  */
+typedef OsStatus (*OsSnapshotWrite)(void* context, const void* data, uint32_t size);
+typedef OsStatus (*OsSnapshotRead)(void* context, void* data, uint32_t size);
+
+OsStatus os_task_write_snapshot(OsTaskHandle task, OsSnapshotWrite write, void* context);
+OsStatus os_task_read_snapshot(OsTaskHandle task, OsSnapshotRead read, void* context);
+
 OsStatus os_task_get_snapshot_size(
     OsTaskHandle task,
     uint32_t* out_size
@@ -424,6 +439,46 @@ OsStatus os_task_load_snapshot(
     const uint8_t* buffer,
     uint32_t buffer_size
 );
+
+/*
+ * Swapping moves a task's interpreter state (stack, linear memory, compiled
+ * code) out of RAM into storage the platform provides, and brings it back
+ * when the task runs again. Unlike a snapshot, the task stays where it is:
+ * it keeps waiting, its timers and handles keep working, and whatever its
+ * wait delivers meanwhile is applied when it comes back.
+ *
+ * The port stores one image per task id. write appends: offsets start at 0
+ * and grow with each call. read returns bytes written earlier; discard
+ * forgets the image. Calls happen from os_task_swap_out, os_task_swap_in and
+ * the scheduler, never at the same time.
+ */
+typedef struct OsSwapPort
+{
+    void* context;
+    OsStatus (*write)(void* context, uint32_t task_id, uint32_t offset, const void* data, uint32_t size);
+    OsStatus (*read)(void* context, uint32_t task_id, uint32_t offset, void* data, uint32_t size);
+    void (*discard)(void* context, uint32_t task_id);
+} OsSwapPort;
+
+/* NULL turns swapping off; tasks already swapped out keep their images. */
+OsStatus os_swap_port_set(const OsSwapPort* port);
+
+/*
+ * Write the task out and free its interpreter state. Any task but the one
+ * running can be swapped out, waiting or not; a task that has not started
+ * frees its state without writing anything. OS_STATUS_UNSUPPORTED without a
+ * port or for linked tasks; errors from the port leave the task as it was.
+ */
+OsStatus os_task_swap_out(OsTaskHandle task);
+
+/*
+ * Bring a swapped-out task back now. The scheduler does this by itself before
+ * the task's next slice; if that fails, the task ends with
+ * OS_TASK_EXIT_WASM_ERROR and the error phase "swap_in".
+ */
+OsStatus os_task_swap_in(OsTaskHandle task);
+
+uint8_t os_task_is_swapped(OsTaskHandle task);
 
 /*
  * Sets the base priority; the scheduler always runs the highest priority
@@ -469,6 +524,7 @@ typedef struct OsTaskMemoryUsage
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
     uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */
     uint32_t image_bytes;            /* kernel copy of the module; 0 when it runs in place or the host owns it */
+    uint32_t swap_bytes;             /* size of the image in swap storage while swapped out, else 0 */
     uint32_t kernel_bytes;           /* task control block */
     uint32_t total_bytes;
 } OsTaskMemoryUsage;
@@ -478,7 +534,7 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
 /*
  * Copy to or from a task's linear memory at a wasm address. The whole range
  * must lie inside the memory (OS_STATUS_OUT_OF_BOUNDS), including addresses
- * near 4 GiB.
+ * near 4 GiB. A swapped-out task has no memory to reach (OS_STATUS_BUSY).
  */
 OsStatus os_task_read_memory(
     OsTaskHandle task,
