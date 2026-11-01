@@ -344,8 +344,24 @@ OsStatus os_task_delay_until(
  * that return a status resume with OS_STATUS_ABORTED.
  */
 OsStatus os_task_abort_wait(OsTaskHandle task);
+/*
+ * Called from a host import: end the calling task's slice and keep it READY.
+ * OS_STATUS_TASK_NOT_FOUND when no task is running.
+ */
 OsStatus os_task_yield(void);
+/*
+ * Safe from a host import or between slices (an interrupt handler's deferred
+ * work): the running task stops at its next check, or else the next slice
+ * stops at once. One request ends one slice.
+ */
 void os_request_preempt(void);
+/*
+ * A suspended task gets no slices until os_task_resume. Suspending a waiting
+ * task cancels its wait: when resumed it continues at once, a delay ends
+ * early and a blocking import returns OS_STATUS_BUSY. Resuming a task that is
+ * not suspended changes nothing. Both return OS_STATUS_TASK_DEAD for a dead
+ * task.
+ */
 OsStatus os_task_suspend(OsTaskHandle task);
 OsStatus os_task_resume(OsTaskHandle task);
 
@@ -373,6 +389,11 @@ OsStatus os_task_load_snapshot(
     uint32_t buffer_size
 );
 
+/*
+ * Sets the base priority; the scheduler always runs the highest priority
+ * READY task and rotates tasks of equal priority. A mutex owner may run
+ * higher while it inherits a waiter's priority (os_task_get_priority).
+ */
 OsStatus os_task_set_priority(
     OsTaskHandle task,
     uint32_t priority
@@ -394,6 +415,11 @@ OsStatus os_task_get_return_values(
     uint32_t max_values,
     uint32_t* out_value_count
 );
+/*
+ * Copy to or from a task's linear memory at a wasm address. The whole range
+ * must lie inside the memory (OS_STATUS_OUT_OF_BOUNDS), including addresses
+ * near 4 GiB.
+ */
 OsStatus os_task_read_memory(
     OsTaskHandle task,
     uint32_t wasm_address,
@@ -469,7 +495,12 @@ const char* os_get_last_error_result(void);
 const char* os_get_last_error_task_name(void);
 OsStatus os_get_last_error_status(void);
 
+/* Advance kernel time by milliseconds; the next os_update_time_ms only re-baselines. */
 void os_tick(uint32_t milliseconds);
+/*
+ * Feed an absolute monotonic clock: time advances by the difference from the
+ * previous call, wrapping at 32 bits. The first call only sets the baseline.
+ */
 OsStatus os_update_time_ms(uint32_t now_ms);
 uint32_t os_get_tick_ms(void);
 uint32_t os_get_next_wakeup_ms(void);
