@@ -614,6 +614,13 @@ uint8_t os_clock_is_tickless(void);
 const char* os_get_last_error_phase(void);
 const char* os_get_last_error_result(void);
 const char* os_get_last_error_task_name(void);
+/*
+ * Why a task ended with OS_TASK_EXIT_WASM_ERROR, kept until it is deleted:
+ * "phase: result", and with d_m3RecordBacktraces the functions it was in,
+ * innermost first ("call: [trap] unreachable executed in parse < main").
+ * NULL for tasks that did not fail.
+ */
+const char* os_task_get_error(OsTaskHandle task);
 OsStatus os_get_last_error_status(void);
 
 /* Advance kernel time by milliseconds; the next os_update_time_ms only re-baselines. */
@@ -692,6 +699,9 @@ OsStatus os_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, 
  * os_schedule delivers them to the program watching the pin.
  */
 void os_gpio_edge(uint32_t pin, uint32_t edges);
+
+/* The id of the task that owns a pin, 0 when it is free or unknown. */
+uint32_t os_gpio_get_owner(uint32_t pin);
 #endif
 
 uint32_t os_get_task_count(void);

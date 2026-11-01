@@ -286,6 +286,8 @@ struct OsTask
     uint32_t stack_peak_bytes;
     /* The program's name from its wasm-rtos.app section, or NULL. */
     char* app_name;
+    /* Why the task failed (OS_TASK_EXIT_WASM_ERROR), or NULL. */
+    char* error_text;
     OsValue* entry_args;
     uint32_t entry_arg_count;
 
@@ -517,6 +519,7 @@ static void os_destroy_task(OsTaskHandle task);
 static uint8_t os_time_reached(uint32_t now, uint32_t target);
 static void os_clear_last_error(void);
 static void os_set_last_error(OsTaskHandle task, const char* phase, M3Result result, OsStatus status);
+static void os_task_record_error(OsTaskHandle task);
 
 OsStatus os_init(void)
 {
@@ -3371,6 +3374,65 @@ const char* os_get_last_error_result(void)
     return g_os.last_error.result;
 }
 
+/* Longest failure text a task keeps. */
+#define OS_TASK_ERROR_MAX 192U
+
+static void os_text_append(char* text, size_t* used, const char* part)
+{
+    while (part != NULL && *part != '\0' && *used + 1U < OS_TASK_ERROR_MAX)
+    {
+        text[(*used)++] = *part++;
+    }
+    text[*used] = '\0';
+}
+
+/*
+ * Keep why a task failed: the phase and result of the last error and, when
+ * wasm3 records backtraces, the functions it was in, innermost first.
+ */
+static void os_task_record_error(OsTaskHandle task)
+{
+    char text[OS_TASK_ERROR_MAX];
+    size_t used = 0U;
+    char* copy = NULL;
+
+    text[0] = '\0';
+    os_text_append(text, &used, g_os.last_error.phase);
+    os_text_append(text, &used, ": ");
+    os_text_append(text, &used, g_os.last_error.result != NULL ? g_os.last_error.result : "failed");
+#if d_m3RecordBacktraces
+    {
+        IM3BacktraceInfo backtrace = task->wasm_runtime != NULL ? m3_GetBacktrace(task->wasm_runtime) : NULL;
+        IM3BacktraceFrame frame = backtrace != NULL ? backtrace->frames : NULL;
+        const char* separator = " in ";
+
+        for (; frame != NULL && frame != M3_BACKTRACE_TRUNCATED; frame = frame->next)
+        {
+            const char* name = frame->function != NULL ? m3_GetFunctionName(frame->function) : NULL;
+            os_text_append(text, &used, separator);
+            os_text_append(text, &used, name != NULL ? name : "?");
+            separator = " < ";
+        }
+        if (backtrace != NULL && backtrace->lastFrame == M3_BACKTRACE_TRUNCATED)
+        {
+            os_text_append(text, &used, " < ...");
+        }
+    }
+#endif
+    copy = (char*)malloc(used + 1U);
+    if (copy != NULL)
+    {
+        memcpy(copy, text, used + 1U);
+    }
+    free(task->error_text);
+    task->error_text = copy;
+}
+
+const char* os_task_get_error(OsTaskHandle task)
+{
+    return task != NULL && os_task_is_in_list(task) ? task->error_text : NULL;
+}
+
 const char* os_get_last_error_task_name(void)
 {
     return g_os.last_error.has_task_name ? g_os.last_error.task_name : NULL;
@@ -3649,6 +3711,7 @@ OsStatus os_schedule(void)
 
         case OS_TASK_RUN_ERROR:
         default:
+            os_task_record_error(task);
             os_record_task_exit(task, OS_TASK_EXIT_WASM_ERROR, 1U);
             os_set_task_dead(task);
             schedule_status = OS_STATUS_WASM_ERROR;
@@ -4213,6 +4276,7 @@ static void os_task_free(OsTaskHandle task)
     os_task_free_entry_args(task);
     os_task_free_return_values(task);
     free(task->app_name);
+    free(task->error_text);
 #if OS_HAS_PROCESSES
     /* The module was parsed in place, so its bytes outlive the runtime. */
     free(task->owned_wasm_bytes);
