@@ -14,6 +14,7 @@
  *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
+ *   OS_HAS_GPIO       pins for programs through a platform GPIO port
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -23,6 +24,9 @@
 #endif
 #ifndef OS_FS_TAR
 #define OS_FS_TAR OS_HAS_FS
+#endif
+#ifndef OS_HAS_GPIO
+#define OS_HAS_GPIO 1
 #endif
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
@@ -159,6 +163,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
+#define OS_ABI_VERSION_MINOR 1U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -622,6 +627,72 @@ uint32_t os_get_tick_ms(void);
 uint32_t os_get_next_wakeup_ms(void);
 
 OsStatus os_schedule(void);
+
+#if OS_HAS_GPIO
+/*
+ * GPIO. The platform drives the pins through a port; the kernel lends them
+ * to programs by name. Register every pin a program may use, under the names
+ * of the device profile ("led", "button-a", "gpio5"); a pin may have several
+ * names. A program owns a pin from open until it closes it or ends; then the
+ * kernel configures the pin as an input without pulls.
+ *
+ * Port flags describe the physical pin: OS_GPIO_INIT_HIGH is the level an
+ * output starts at, the edge flags enable edge reports through os_gpio_edge.
+ */
+#define OS_GPIO_OUTPUT       0x01U
+#define OS_GPIO_PULL_UP      0x02U
+#define OS_GPIO_PULL_DOWN    0x04U
+#define OS_GPIO_OPEN_DRAIN   0x08U
+#define OS_GPIO_INIT_HIGH    0x20U
+#define OS_GPIO_EDGE_RISING  0x40U
+#define OS_GPIO_EDGE_FALLING 0x80U
+
+/* What a pin can do (os_gpio_add_pin capabilities). */
+#define OS_GPIO_CAN_INPUT      0x01U
+#define OS_GPIO_CAN_OUTPUT     0x02U
+#define OS_GPIO_CAN_PULL_UP    0x04U
+#define OS_GPIO_CAN_PULL_DOWN  0x08U
+#define OS_GPIO_CAN_OPEN_DRAIN 0x10U
+#define OS_GPIO_CAN_EDGES      0x20U
+#define OS_GPIO_CAN_ALL        0x3FU
+
+/* os_gpio_add_pin options: the board inverts the pin, so programs see 1 for "on". */
+#define OS_GPIO_ACTIVE_LOW 0x01U
+
+#define OS_GPIO_NAME_MAX 32U
+#ifndef OS_GPIO_MAX_PINS
+#define OS_GPIO_MAX_PINS 32U
+#endif
+#ifndef OS_GPIO_MAX_NAMES
+#define OS_GPIO_MAX_NAMES 64U
+#endif
+
+typedef struct OsGpioPort
+{
+    void* context;
+    OsStatus (*configure)(void* context, uint32_t pin, uint32_t flags);
+    OsStatus (*write)(void* context, uint32_t pin, uint8_t level);
+    OsStatus (*read)(void* context, uint32_t pin, uint8_t* out_level);
+} OsGpioPort;
+
+/* NULL removes the port; programs then get -WR_EUNSUPPORTED. */
+OsStatus os_gpio_port_set(const OsGpioPort* port);
+
+/*
+ * Make a pin available to programs under name. Registering another name for
+ * the same pin needs the same capabilities and options. OS_STATUS_BUSY when
+ * the name is taken, OS_STATUS_LIMIT_REACHED past OS_GPIO_MAX_PINS or
+ * OS_GPIO_MAX_NAMES.
+ */
+OsStatus os_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, uint32_t options);
+
+/*
+ * Report edges on a pin (OS_GPIO_EDGE_RISING and/or OS_GPIO_EDGE_FALLING).
+ * Safe to call from an interrupt handler: it only counts them; the next
+ * os_schedule delivers them to the program watching the pin.
+ */
+void os_gpio_edge(uint32_t pin, uint32_t edges);
+#endif
 
 uint32_t os_get_task_count(void);
 uint32_t os_get_ready_task_count(void);

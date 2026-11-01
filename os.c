@@ -570,6 +570,9 @@ void os_shutdown(void)
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
+#if OS_HAS_GPIO
+    os_gpio_shutdown();
+#endif
 
     memset(&g_os, 0, sizeof(g_os));
 }
@@ -3558,6 +3561,10 @@ OsStatus os_schedule(void)
         return OS_STATUS_NO_READY_TASKS;
     }
 
+#if OS_HAS_GPIO
+    /* Edges reported since the last call, also from interrupt handlers. */
+    os_gpio_poll();
+#endif
 
     if (g_os.clock_port.now_ms != NULL)
     {
@@ -6863,6 +6870,10 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target)
             OsTaskHandle task = os_task_find_by_id(target->id);
             return task != NULL && task->state == OS_TASK_DEAD;
         }
+#if OS_HAS_GPIO
+        case OS_OBJECT_GPIO:
+            return os_gpio_ready(target->id);
+#endif
         default:
             return 0U;
     }
@@ -6920,6 +6931,11 @@ OsStatus os_wait_any(const OsWaitTarget* targets, uint32_t count, uint32_t timeo
 }
 
 /* Wake tasks waiting for any of several objects once one of them is ready. */
+void os_wait_any_recheck(void)
+{
+    os_wake_any_waiters();
+}
+
 static void os_wake_any_waiters(void)
 {
     OsTaskHandle task = NULL;

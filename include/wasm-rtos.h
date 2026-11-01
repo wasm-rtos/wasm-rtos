@@ -2,7 +2,7 @@
 #define WASM_RTOS_H_GUEST
 
 /*
- * wasm-rtos ABI 1.0 for programs written in C or C++ (wasm32).
+ * wasm-rtos ABI 1.1 for programs written in C or C++ (wasm32).
  *
  * Every call returns an int32_t: zero or a value on success, a negative WR_E*
  * error otherwise. Handles belong to the calling program and close when it
@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define WR_ABI_VERSION_MAJOR 1
-#define WR_ABI_VERSION_MINOR 0
+#define WR_ABI_VERSION_MINOR 1
 
 /* Errors; calls return their negatives. */
 #define WR_EFAULT       1   /* a pointer or range lies outside the program's memory */
@@ -42,6 +42,7 @@ extern "C" {
 #define WR_EMISMATCH    19  /* a named object exists with other parameters */
 #define WR_ETRAPPED     20  /* proc wait: the child trapped */
 #define WR_EKILLED      21  /* proc wait: the child was killed */
+#define WR_EINUSE       22  /* another program uses it (1.1) */
 
 #define WR_WAIT_FOREVER 0xFFFFFFFFu
 
@@ -51,6 +52,17 @@ extern "C" {
 
 #define WR_TIMER_PERIODIC 1u
 
+/* gpio-open and gpio-set-mode flags (1.1). */
+#define WR_GPIO_OUTPUT     0x01u  /* an output; without it an input */
+#define WR_GPIO_PULL_UP    0x02u
+#define WR_GPIO_PULL_DOWN  0x04u
+#define WR_GPIO_OPEN_DRAIN 0x08u  /* outputs only */
+#define WR_GPIO_ACTIVE_LOW 0x10u  /* the program's 1 is the pin's low */
+#define WR_GPIO_INIT_HIGH  0x20u  /* an output starts at 1 */
+/* gpio-watch edges, as the program sees levels. */
+#define WR_GPIO_RISING     0x01u
+#define WR_GPIO_FALLING    0x02u
+
 /* One string argument for spawn: matches the ABI's (pointer, length) pair. */
 typedef struct wr_str
 {
@@ -59,7 +71,7 @@ typedef struct wr_str
 } wr_str;
 
 #define WR_IMPORT(interface, name) \
-    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.0.0"), import_name(name)))
+    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.1.0"), import_name(name)))
 
 /* handle */
 WR_IMPORT("handle", "close") int32_t wr_close(int32_t handle);
@@ -104,6 +116,17 @@ WR_IMPORT("proc", "wait") int32_t wr_wait(int32_t child, uint32_t timeout_ms);
 WR_IMPORT("proc", "kill") int32_t wr_kill(int32_t child);
 WR_IMPORT("proc", "self") int32_t wr_self(void);
 WR_IMPORT("proc", "parent") int32_t wr_parent(void);
+
+/* gpio (1.1): pins by the device profile's names; a pin has one owner at a
+ * time (-WR_EINUSE). Levels are 0 or 1 as the program sees them. A watched
+ * pin is ready for wait.any once an edge happened; gpio-events returns and
+ * resets their count. */
+WR_IMPORT("gpio", "open") int32_t wr_gpio_open(const char* name, uint32_t name_length, uint32_t flags);
+WR_IMPORT("gpio", "set") int32_t wr_gpio_set(int32_t pin, uint32_t level);
+WR_IMPORT("gpio", "get") int32_t wr_gpio_get(int32_t pin);
+WR_IMPORT("gpio", "set-mode") int32_t wr_gpio_set_mode(int32_t pin, uint32_t flags);
+WR_IMPORT("gpio", "watch") int32_t wr_gpio_watch(int32_t pin, uint32_t edges);
+WR_IMPORT("gpio", "events") int32_t wr_gpio_events(int32_t pin);
 
 /* Time, sleep and yield through WASI, for programs without a C library. */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
@@ -155,6 +178,7 @@ static inline wr_str wr_cstr(const char* text)
 #define wr_semaphore_open(name, max, initial) wr_semaphore_create((name), wr_strlen(name), (max), (initial))
 #define wr_event_open(name) wr_event_create((name), wr_strlen(name))
 #define wr_queue_open(name, item_size, capacity) wr_queue_create((name), wr_strlen(name), (item_size), (capacity))
+#define wr_gpio_open_cstr(name, flags) wr_gpio_open((name), wr_strlen(name), (flags))
 #define wr_spawn_path_cstr(path, args, argc, priority, stack) \
     wr_spawn_path((path), wr_strlen(path), (args), (argc), (priority), (stack))
 
@@ -168,7 +192,7 @@ static inline wr_str wr_cstr(const char* text)
     __asm__(WR_APP_SECTION_ ".int8 " #key "\n.uleb128 2f-1f\n1:\n.ascii \"" text "\"\n2:\n.text\n")
 
 /* The ABI version the program was written for (major << 16 | minor). */
-#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65536)
+#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65537)
 /* Interpreter stack in bytes, unless whoever starts the program picks one. */
 #define WR_APP_STACK_SIZE(bytes) WR_APP_U32_(2, bytes)
 /* Name shown for the program. */
