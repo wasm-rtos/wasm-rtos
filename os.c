@@ -269,6 +269,10 @@ struct OsTask
 #if d_m3HasDylink
     uint8_t wasm_dylink_task;
 #endif
+#if d_m3HasHeapAccounting
+    /* Interpreter memory allocated while working on this task. */
+    M3HeapAccount* heap_account;
+#endif
 
     struct OsTask* previous;
     struct OsTask* next;
@@ -421,6 +425,14 @@ static void os_advance_tick_ms(uint32_t milliseconds);
 static OsStatus os_sync_clock_before_deadline(void);
 static void os_clock_rearm(void);
 static OsTaskRunResult os_run_task_slice(OsTaskHandle task);
+#if d_m3HasHeapAccounting
+/* Charge interpreter allocations to task until the returned account is restored. */
+#define OS_HEAP_ENTER(task) M3HeapAccount* os_previous_heap_account = m3_SetHeapAccount((task)->heap_account)
+#define OS_HEAP_LEAVE() (void)m3_SetHeapAccount(os_previous_heap_account)
+#else
+#define OS_HEAP_ENTER(task) (void)(task)
+#define OS_HEAP_LEAVE() ((void)0)
+#endif
 static OsStatus os_validate_entry_function(OsTaskHandle task);
 static OsStatus os_capture_entry_return_value(OsTaskHandle task);
 static OsStatus os_call_entry_function(OsTaskHandle task, M3Result* out_result);
@@ -1725,13 +1737,26 @@ static OsStatus os_task_initialize(
         return status;
     }
 
-    status = os_task_create_wasm(
-        task,
-        wasm_bytes,
-        wasm_size,
-        entry_function_name,
-        task->stack_size
-    );
+#if d_m3HasHeapAccounting
+    task->heap_account = m3_NewHeapAccount();
+    if (task->heap_account == NULL)
+    {
+        os_task_free(task);
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+#endif
+
+    {
+        OS_HEAP_ENTER(task);
+        status = os_task_create_wasm(
+            task,
+            wasm_bytes,
+            wasm_size,
+            entry_function_name,
+            task->stack_size
+        );
+        OS_HEAP_LEAVE();
+    }
 
     if (status != OS_STATUS_OK)
     {
@@ -2146,7 +2171,11 @@ OsStatus os_task_load_snapshot(OsTaskHandle task, const uint8_t* buffer, uint32_
         return OS_STATUS_BUSY;
     }
 
-    result = m3_LoadRuntimeSnapshot(task->wasm_runtime, buffer, buffer_size);
+    {
+        OS_HEAP_ENTER(task);
+        result = m3_LoadRuntimeSnapshot(task->wasm_runtime, buffer, buffer_size);
+        OS_HEAP_LEAVE();
+    }
     status = os_wasm_snapshot_result_to_status(result);
     if (status == OS_STATUS_OK)
     {
@@ -2760,6 +2789,66 @@ OsStatus os_task_get_return_values(
 }
 
 
+static uint32_t os_code_page_list_bytes(IM3CodePage page)
+{
+    uint32_t bytes = 0U;
+
+    for (; page != NULL; page = page->info.next)
+    {
+        bytes += (uint32_t)(sizeof(M3CodePageHeader) + (size_t)page->info.numLines * sizeof(code_t));
+    }
+    return bytes;
+}
+
+OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usage)
+{
+    IM3Runtime runtime = NULL;
+
+    if (task == NULL || out_usage == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    if (!os_task_is_in_list(task))
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+
+    memset(out_usage, 0, sizeof(*out_usage));
+    runtime = task->wasm_runtime;
+    if (runtime != NULL)
+    {
+        /* m3_NewRuntime allocates four guard slots past the stack. */
+        out_usage->stack_bytes = runtime->originStack != NULL
+            ? runtime->stackSize + 4U * (uint32_t)sizeof(m3slot_t) : 0U;
+        out_usage->linear_memory_bytes = runtime->memory.mallocated != NULL
+            ? (uint32_t)(sizeof(M3MemoryHeader) + runtime->memory.mallocated->length) : 0U;
+        out_usage->code_bytes = os_code_page_list_bytes(runtime->pagesOpen) +
+                                os_code_page_list_bytes(runtime->pagesFull);
+    }
+#if d_m3HasHeapAccounting
+    out_usage->interpreter_bytes = (uint32_t)m3_GetHeapAccountBytes(task->heap_account);
+    out_usage->interpreter_peak_bytes = (uint32_t)m3_GetHeapAccountPeakBytes(task->heap_account);
+#endif
+#if OS_HAS_PROCESSES
+    if (task->owned_wasm_bytes != NULL)
+    {
+        out_usage->image_bytes = task->wasm_size;
+    }
+#if OS_HAS_FS
+    if (task->image.copy != NULL)
+    {
+        out_usage->image_bytes = task->image.size;
+    }
+#endif
+#endif
+    out_usage->kernel_bytes = (uint32_t)sizeof(struct OsTask);
+    out_usage->total_bytes = out_usage->image_bytes + out_usage->kernel_bytes +
+        (out_usage->interpreter_bytes != 0U
+            ? out_usage->interpreter_bytes
+            : out_usage->stack_bytes + out_usage->linear_memory_bytes + out_usage->code_bytes);
+    return OS_STATUS_OK;
+}
+
 OsStatus os_task_read_memory(
     OsTaskHandle task,
     uint32_t wasm_address,
@@ -3044,7 +3133,12 @@ OsStatus os_schedule(void)
     task->state = OS_TASK_RUNNING;
     os_recalculate_task_counters();
 
-    run_result = os_run_task_slice(task);
+    {
+        /* Lazy compilation and memory.grow happen while the task runs. */
+        OS_HEAP_ENTER(task);
+        run_result = os_run_task_slice(task);
+        OS_HEAP_LEAVE();
+    }
     ++task->run_count;
 
     if (g_os.current_task == task)
@@ -3634,6 +3728,9 @@ static void os_task_free(OsTaskHandle task)
     }
 
     os_task_cleanup_wasm(task);
+#if d_m3HasHeapAccounting
+    m3_ReleaseHeapAccount(task->heap_account);
+#endif
     os_clear_queue_wait(task);
     os_task_free_entry_args(task);
     os_task_free_return_values(task);
