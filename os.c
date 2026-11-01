@@ -21,7 +21,16 @@
 #define OS_PROC_MAX_ARGS 32U
 #define OS_PROC_MAX_ARG_LENGTH 256U
 #endif
-#define OS_DEFAULT_STACK_SIZE (64U * 1024U)
+/*
+ * Interpreter stack for a program that neither asks for a size nor gets one
+ * from its creator. Measured needs: 16 B for a trivial program, 0.5 KiB for a
+ * printf hello world, 2 KiB for CoreMark; overflow traps cleanly.
+ */
+#ifndef OS_DEFAULT_STACK_SIZE
+#define OS_DEFAULT_STACK_SIZE (8U * 1024U)
+#endif
+/* Fill for unused interpreter stack, so the high-water mark can be found. */
+#define OS_STACK_PAINT 0xA5U
 /* Interpreter work units per scheduler slice; override at build time. */
 #ifndef OS_TASK_SLICE_FUEL
 #define OS_TASK_SLICE_FUEL 10000ULL
@@ -231,6 +240,8 @@ struct OsTask
     uint32_t wasm_size;
     const char* entry_function_name;
     uint32_t stack_size;
+    /* Most interpreter stack used, kept after the runtime is released. */
+    uint32_t stack_peak_bytes;
     OsValue* entry_args;
     uint32_t entry_arg_count;
 
@@ -1677,6 +1688,107 @@ static M3Result os_dylink_link_host_imports(void* context, IM3Module module)
 }
 #endif
 
+/* Settings a program declares about itself in its wasm-rtos.app section. */
+typedef struct OsAppMetadata
+{
+    uint32_t stack_size;
+} OsAppMetadata;
+
+static uint8_t os_read_leb_u32(const uint8_t** cursor, const uint8_t* end, uint32_t* out_value)
+{
+    uint32_t value = 0U;
+    uint32_t shift = 0U;
+
+    while (*cursor < end && shift < 35U)
+    {
+        uint8_t byte = *(*cursor)++;
+        value |= (uint32_t)(byte & 0x7FU) << shift;
+        if ((byte & 0x80U) == 0U)
+        {
+            *out_value = value;
+            return 1U;
+        }
+        shift += 7U;
+    }
+    return 0U;
+}
+
+/*
+ * Find the custom section "wasm-rtos.app": records of a key byte and a
+ * little-endian u32 value. Unknown keys are skipped. A module the parser
+ * cannot walk is left to wasm3 to reject; a malformed section is an error.
+ */
+static OsStatus os_read_app_metadata(const uint8_t* bytes, uint32_t size, OsAppMetadata* out_metadata)
+{
+    static const char name[] = "wasm-rtos.app";
+    const uint8_t* cursor = bytes + 8U;
+    const uint8_t* end = bytes + size;
+
+    memset(out_metadata, 0, sizeof(*out_metadata));
+    if (size < 8U)
+    {
+        return OS_STATUS_OK;
+    }
+
+    while (cursor < end)
+    {
+        uint8_t id = *cursor++;
+        uint32_t section_size = 0U;
+        const uint8_t* section_end = NULL;
+        uint32_t name_length = 0U;
+
+        if (!os_read_leb_u32(&cursor, end, &section_size) || section_size > (uint32_t)(end - cursor))
+        {
+            return OS_STATUS_OK;
+        }
+        section_end = cursor + section_size;
+        if (id == 0U && os_read_leb_u32(&cursor, section_end, &name_length) &&
+            name_length == sizeof(name) - 1U && name_length <= (uint32_t)(section_end - cursor) &&
+            memcmp(cursor, name, name_length) == 0)
+        {
+            cursor += name_length;
+            if ((uint32_t)(section_end - cursor) % 5U != 0U)
+            {
+                return OS_STATUS_INVALID_ARGUMENT;
+            }
+            for (; cursor < section_end; cursor += 5U)
+            {
+                uint32_t value = (uint32_t)cursor[1] | ((uint32_t)cursor[2] << 8U) |
+                                 ((uint32_t)cursor[3] << 16U) | ((uint32_t)cursor[4] << 24U);
+                if (cursor[0] == OS_APP_KEY_STACK_SIZE)
+                {
+                    out_metadata->stack_size = value;
+                }
+            }
+        }
+        cursor = section_end;
+    }
+    return OS_STATUS_OK;
+}
+
+/* Highest byte of the interpreter stack the task has written. */
+static uint32_t os_task_stack_peak(OsTaskHandle task)
+{
+    const uint8_t* stack = NULL;
+    uint32_t top = 0U;
+
+    if (task->wasm_runtime == NULL || task->wasm_runtime->originStack == NULL)
+    {
+        return task->stack_peak_bytes;
+    }
+    stack = (const uint8_t*)task->wasm_runtime->stack;
+    top = task->wasm_runtime->stackSize;
+    while (top > task->stack_peak_bytes && stack[top - 1U] == OS_STACK_PAINT)
+    {
+        --top;
+    }
+    if (top > task->stack_peak_bytes)
+    {
+        task->stack_peak_bytes = top;
+    }
+    return task->stack_peak_bytes;
+}
+
 static OsStatus os_task_initialize(
     OsTaskHandle* out_task,
     uint8_t* wasm_bytes,
@@ -1727,8 +1839,21 @@ static OsStatus os_task_initialize(
     task->wasm_bytes = wasm_bytes;
     task->wasm_size = wasm_size;
     task->entry_function_name = entry_function_name;
-    task->stack_size = (stack_size == 0U) ? OS_DEFAULT_STACK_SIZE : stack_size;
     os_copy_task_name(task, task_name);
+
+    /* The creator's size wins, then the program's own request, then the default. */
+    {
+        OsAppMetadata metadata;
+        status = os_read_app_metadata(wasm_bytes, wasm_size, &metadata);
+        if (status != OS_STATUS_OK)
+        {
+            os_set_last_error(task, "app_metadata", "malformed wasm-rtos.app section", OS_STATUS_WASM_ERROR);
+            os_task_free(task);
+            return OS_STATUS_WASM_ERROR;
+        }
+        task->stack_size = stack_size != 0U ? stack_size
+            : metadata.stack_size != 0U ? metadata.stack_size : OS_DEFAULT_STACK_SIZE;
+    }
 
     status = os_task_copy_entry_args(task, entry_args, entry_arg_count);
     if (status != OS_STATUS_OK)
@@ -2825,6 +2950,7 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
         out_usage->code_bytes = os_code_page_list_bytes(runtime->pagesOpen) +
                                 os_code_page_list_bytes(runtime->pagesFull);
     }
+    out_usage->stack_peak_bytes = os_task_stack_peak(task);
 #if d_m3HasHeapAccounting
     out_usage->interpreter_bytes = (uint32_t)m3_GetHeapAccountBytes(task->heap_account);
     out_usage->interpreter_peak_bytes = (uint32_t)m3_GetHeapAccountPeakBytes(task->heap_account);
@@ -4036,6 +4162,7 @@ static OsStatus os_task_create_wasm(
     {
         return OS_STATUS_OUT_OF_MEMORY;
     }
+    memset(task->wasm_runtime->stack, OS_STACK_PAINT, task->wasm_runtime->stackSize);
     task->wasm_stack_base = (uint8_t*)task->wasm_runtime->stack;
 
     result = m3_ParseModule(
@@ -4482,6 +4609,7 @@ static void os_task_cleanup_wasm(OsTaskHandle task)
 
     if (task->wasm_runtime != NULL)
     {
+        (void)os_task_stack_peak(task);
         m3_FreeRuntime(task->wasm_runtime);
         task->wasm_runtime = NULL;
     }
@@ -6519,7 +6647,8 @@ static OsStatus os_task_spawn_owned(
     OsProcessImage* image,
     char** argv,
     uint32_t argc,
-    uint32_t priority
+    uint32_t priority,
+    uint32_t stack_size
 )
 {
     OsTaskHandle parent = g_os.current_task;
@@ -6548,7 +6677,7 @@ static OsStatus os_task_spawn_owned(
         NULL,
         0U,
         os_process_name_from_argv(argv, argc),
-        0U,
+        stack_size,
         priority
     );
     if (status != OS_STATUS_OK)
@@ -6581,7 +6710,8 @@ OsStatus os_task_spawn(
     uint32_t wasm_size,
     const char* const* argv,
     uint32_t argc,
-    uint32_t priority
+    uint32_t priority,
+    uint32_t stack_size
 )
 {
     OsProcessImage image;
@@ -6625,7 +6755,7 @@ OsStatus os_task_spawn(
     image.bytes = bytes_copy;
     image.size = wasm_size;
     image.owned_bytes = bytes_copy;
-    return os_task_spawn_owned(out_task, &image, argv_copy, argc, priority);
+    return os_task_spawn_owned(out_task, &image, argv_copy, argc, priority, stack_size);
 }
 
 #if OS_HAS_FS
@@ -6634,7 +6764,8 @@ OsStatus os_task_spawn_path(
     const char* path,
     const char* const* argv,
     uint32_t argc,
-    uint32_t priority
+    uint32_t priority,
+    uint32_t stack_size
 )
 {
     OsProcessImage image;
@@ -6673,7 +6804,7 @@ OsStatus os_task_spawn_path(
     }
     image.bytes = image.file.bytes;
     image.size = image.file.size;
-    return os_task_spawn_owned(out_task, &image, argv_copy, argc > 0U ? argc : 1U, priority);
+    return os_task_spawn_owned(out_task, &image, argv_copy, argc > 0U ? argc : 1U, priority, stack_size);
 }
 #endif
 
@@ -6920,7 +7051,8 @@ static m3ApiRawFunction(os_wasm_import_proc_spawn)
     image.bytes = bytes;
     image.size = bytes_length;
     image.owned_bytes = bytes;
-    status = os_task_spawn_owned(&child, &image, argv, argc, priority);
+    /* Guests do not pick a stack: the program's own request or the default applies. */
+    status = os_task_spawn_owned(&child, &image, argv, argc, priority, 0U);
     if (status != OS_STATUS_OK)
     {
         m3ApiReturn(-(int32_t)status);
@@ -6958,7 +7090,7 @@ static m3ApiRawFunction(os_wasm_import_proc_spawn_path)
     }
     if (status == OS_STATUS_OK)
     {
-        status = os_task_spawn_path(&child, path, (const char* const*)argv, argc, priority);
+        status = os_task_spawn_path(&child, path, (const char* const*)argv, argc, priority, 0U);
     }
     /* os_task_spawn_path copies argv. */
     free(argv);
