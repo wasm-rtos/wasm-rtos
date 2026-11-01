@@ -47,6 +47,7 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_FS_MAX_FILES` | 16 | open files per process |
 | `OS_MAX_SPAWNED_TASKS` | 16 | processes alive at once |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
+| `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
 | `d_m3HasDylink` | 0 | `dylink.0` libraries (`os_wasm_library_register`) |
 | `d_m3HasHeapAccounting` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
 
@@ -101,6 +102,19 @@ services are imported from two modules:
   queues (`os_queue_*`), mutexes, semaphores, event groups, task
   notifications and timers, with the same names as the host API.
 - `wasm-rtos:proc`: `spawn`, `spawn_path`, `wait`, `kill`, `self`, `parent`.
+
+A program can state the interpreter stack it needs in a `wasm-rtos.app`
+custom section (records of a key byte and a little-endian u32; key 1 is the
+stack size). The creator's `stack_size` argument wins over it, and without
+either the task gets `OS_DEFAULT_STACK_SIZE`. In C:
+
+```c
+__asm__(".section \".custom_section.wasm-rtos.app\",\"\",@\n"
+        ".int8 1\n.int32 4096\n.text\n");
+```
+
+Overflowing the stack traps; `os_task_get_memory_usage` reports the most a
+task has used, so the size can be set from a measurement.
 
 `os.h` documents every call and its status codes.
 

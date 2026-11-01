@@ -147,6 +147,24 @@ OsStatus os_init(void);
 void os_shutdown(void);
 
 /*
+ * Interpreter stack size. Whoever creates a task may pass stack_size; 0 takes
+ * the size the program asks for in its "wasm-rtos.app" custom section, and
+ * without one OS_DEFAULT_STACK_SIZE (8 KiB). A program overflowing its stack
+ * traps with "stack overflow"; os_task_get_memory_usage reports the most it
+ * has used (stack_peak_bytes).
+ *
+ * "wasm-rtos.app" holds records of a key byte and a little-endian u32 value;
+ * unknown keys are ignored and a section that is not whole records fails the
+ * load. In C (clang):
+ *
+ *   __asm__(".section \".custom_section.wasm-rtos.app\",\"\",@\n"
+ *           ".int8 1\n.int32 4096\n.text\n");     4 KiB interpreter stack
+ *
+ * In Rust: #[link_section = "wasm-rtos.app"] static APP: [u8; 5] = [1, 0, 16, 0, 0];
+ */
+#define OS_APP_KEY_STACK_SIZE 1U
+
+/*
  * entry_function_name may be NULL or "" to let the loader pick the entry
  * point: _start (WASI command), then app_main, then main. Every function
  * import must resolve when the task is created; otherwise creation fails
@@ -282,6 +300,8 @@ OsStatus os_task_delete(OsTaskHandle task);
  * afterwards. The entry point is detected (_start, app_main, main); a WASI
  * program receives argv through args_get. priority 0 inherits the calling
  * task's base priority, or OS_TASK_PRIORITY_NORMAL when called from the host.
+ * stack_size 0 lets the program choose (see "Interpreter stack size"); guest
+ * spawn calls always pass 0.
  *
  * A process spawned from inside a task becomes that task's child. A dead
  * child is reclaimed after its parent collects it (the guest proc wait
@@ -308,7 +328,8 @@ OsStatus os_task_spawn(
     uint32_t wasm_size,
     const char* const* argv,
     uint32_t argc,
-    uint32_t priority
+    uint32_t priority,
+    uint32_t stack_size
 );
 uint32_t os_task_get_parent_id(OsTaskHandle task);
 #if OS_HAS_FS
@@ -325,7 +346,8 @@ OsStatus os_task_spawn_path(
     const char* path,
     const char* const* argv,
     uint32_t argc,
-    uint32_t priority
+    uint32_t priority,
+    uint32_t stack_size
 );
 #endif
 #endif
@@ -425,6 +447,7 @@ OsStatus os_task_get_return_values(
 typedef struct OsTaskMemoryUsage
 {
     uint32_t stack_bytes;            /* interpreter value stack */
+    uint32_t stack_peak_bytes;       /* the most of it the task has used, also after it ends */
     uint32_t linear_memory_bytes;    /* the program's linear memory */
     uint32_t code_bytes;             /* compiled code pages */
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
