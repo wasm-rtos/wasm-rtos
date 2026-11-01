@@ -448,7 +448,7 @@ typedef struct OsTaskMemoryUsage
 {
     uint32_t stack_bytes;            /* interpreter value stack */
     uint32_t stack_peak_bytes;       /* the most of it the task has used, also after it ends */
-    uint32_t linear_memory_bytes;    /* the program's linear memory */
+    uint32_t linear_memory_bytes;    /* the program's linear memory, with spare room from memory.grow */
     uint32_t code_bytes;             /* compiled code pages */
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
     uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */

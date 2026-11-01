@@ -117,6 +117,23 @@ __asm__(".section \".custom_section.wasm-rtos.app\",\"\",@\n"
 Overflowing the stack traps; `os_task_get_memory_usage` reports the most a
 task has used, so the size can be set from a measurement.
 
+### Small programs
+
+How much linear memory a program gets is decided when it is linked. By
+default `wasm-ld` uses 64 KiB pages and puts a 64 KiB C stack in that
+memory, so even "hello world" takes 128 KiB. Link with 1-byte pages
+(custom page sizes) and a small C stack instead:
+
+```sh
+clang --target=wasm32-wasip1 -O2 -Wl,--page-size=1 -Wl,-z,stack-size=4096 app.c -o app.wasm
+```
+
+Measured linear memory: printf hello world 128 KiB → 5.3 KiB, CoreMark
+128 KiB → 10.4 KiB, with the same speed. A program that grows a large heap
+with `malloc` does about 17% more work in its allocator while the heap grows
+(wasi-libc asks for memory in small steps); `-Wl,--initial-heap=<bytes>`
+sized for its heap removes that.
+
 `os.h` documents every call and its status codes.
 
 ## Tests
