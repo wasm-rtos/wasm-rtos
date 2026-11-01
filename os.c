@@ -1,5 +1,6 @@
 #include "os.h"
 #include "fs.h"
+#include "os_internal.h"
 
 #include "wasm3/source/wasm3.h"
 #include "wasm3/source/m3_env.h"
@@ -71,13 +72,16 @@ typedef enum OsTaskWaitType
     OS_TASK_WAIT_EVENT_GROUP,
     OS_TASK_WAIT_NOTIFICATION,
     OS_TASK_WAIT_NOTIFICATION_TAKE,
-    OS_TASK_WAIT_CHILD
+    OS_TASK_WAIT_CHILD,
+    OS_TASK_WAIT_ANY
 } OsTaskWaitType;
 
 typedef enum OsWaitReturnKind
 {
     OS_WAIT_RETURN_STATUS = 0,
-    OS_WAIT_RETURN_VALUE
+    OS_WAIT_RETURN_VALUE,
+    /* Guest ABI call: the value on success, a negative ABI error otherwise. */
+    OS_WAIT_RETURN_ABI
 } OsWaitReturnKind;
 
 typedef struct OsLastError
@@ -119,6 +123,10 @@ struct OsQueue
     uint32_t head;
     uint32_t tail;
     uint8_t* storage;
+    /* Set for objects created through the guest ABI (os_internal.h). */
+    char* name;
+    uint32_t guest_refs;
+    uint8_t guest_owned;
     struct OsQueue* previous;
     struct OsQueue* next;
 };
@@ -127,6 +135,10 @@ struct OsMutex
 {
     uint32_t id;
     OsTaskHandle owner;
+    /* Set for objects created through the guest ABI (os_internal.h). */
+    char* name;
+    uint32_t guest_refs;
+    uint8_t guest_owned;
     struct OsMutex* previous;
     struct OsMutex* next;
 };
@@ -136,6 +148,10 @@ struct OsSemaphore
     uint32_t id;
     uint32_t max_count;
     uint32_t count;
+    /* Set for objects created through the guest ABI (os_internal.h). */
+    char* name;
+    uint32_t guest_refs;
+    uint8_t guest_owned;
     struct OsSemaphore* previous;
     struct OsSemaphore* next;
 };
@@ -144,6 +160,10 @@ struct OsEventGroup
 {
     uint32_t id;
     uint32_t bits;
+    /* Set for objects created through the guest ABI (os_internal.h). */
+    char* name;
+    uint32_t guest_refs;
+    uint8_t guest_owned;
     struct OsEventGroup* previous;
     struct OsEventGroup* next;
 };
@@ -158,6 +178,13 @@ struct OsTimer
     OsNotifyAction notify_action;
     uint8_t auto_reload;
     uint8_t active;
+    /* Counting timers have no target task: they count expirations. */
+    uint8_t counting;
+    uint32_t expirations;
+    /* Set for objects created through the guest ABI (os_internal.h). */
+    char* name;
+    uint32_t guest_refs;
+    uint8_t guest_owned;
     struct OsTimer* previous;
     struct OsTimer* next;
 };
@@ -196,6 +223,8 @@ typedef struct OsState
     uint32_t ready_task_count;
     uint32_t waiting_task_count;
     uint32_t timer_count;
+    /* Result slot of the import running now, between its begin and end. */
+    uint32_t* import_return_slot;
     uint8_t initialized;
     uint8_t time_update_initialized;
     uint8_t preempt_requested;
@@ -234,10 +263,13 @@ struct OsTask
     uint8_t wait_has_return_slot;
     uint32_t wait_return_offset;
     OsWaitReturnKind wait_return_kind;
-    uint8_t wait_has_wasm_output;
-    uint32_t wait_wasm_output_address;
     uint32_t last_wait_value;
     OsStatus last_wait_status;
+    /* OS_TASK_WAIT_ANY: the objects waited for. */
+    OsWaitTarget* wait_targets;
+    uint32_t wait_target_count;
+    /* Owned by the guest ABI layer (handle table). */
+    void* abi_state;
 
     uint32_t notification_value;
     uint32_t notification_clear_on_exit;
@@ -250,6 +282,8 @@ struct OsTask
     uint32_t stack_size;
     /* Most interpreter stack used, kept after the runtime is released. */
     uint32_t stack_peak_bytes;
+    /* The program's name from its wasm-rtos.app section, or NULL. */
+    char* app_name;
     OsValue* entry_args;
     uint32_t entry_arg_count;
 
@@ -382,49 +416,6 @@ static OsStatus os_check_module_imports(OsTaskHandle task, IM3Module module);
 static const char* os_detect_entry_function(IM3Module module);
 static M3Result os_link_module_host_imports(IM3Module module);
 static M3Result os_link_registered_host_imports(IM3Module module);
-static m3ApiRawFunction(os_wasm_import_os_yield);
-static m3ApiRawFunction(os_wasm_import_os_delay_ms);
-static m3ApiRawFunction(os_wasm_import_os_task_delay_until);
-static m3ApiRawFunction(os_wasm_import_os_task_abort_wait);
-static m3ApiRawFunction(os_wasm_import_os_get_time_ms);
-static m3ApiRawFunction(os_wasm_import_os_queue_send);
-static m3ApiRawFunction(os_wasm_import_os_queue_receive);
-static m3ApiRawFunction(os_wasm_import_os_queue_send_wait);
-static m3ApiRawFunction(os_wasm_import_os_queue_receive_wait);
-static m3ApiRawFunction(os_wasm_import_os_mutex_create);
-static m3ApiRawFunction(os_wasm_import_os_mutex_delete);
-static m3ApiRawFunction(os_wasm_import_os_mutex_lock);
-static m3ApiRawFunction(os_wasm_import_os_mutex_unlock);
-static m3ApiRawFunction(os_wasm_import_os_semaphore_create);
-static m3ApiRawFunction(os_wasm_import_os_semaphore_delete);
-static m3ApiRawFunction(os_wasm_import_os_semaphore_take);
-static m3ApiRawFunction(os_wasm_import_os_semaphore_give);
-static m3ApiRawFunction(os_wasm_import_os_event_group_create);
-static m3ApiRawFunction(os_wasm_import_os_event_group_delete);
-static m3ApiRawFunction(os_wasm_import_os_event_group_get_bits);
-static m3ApiRawFunction(os_wasm_import_os_event_group_set_bits);
-static m3ApiRawFunction(os_wasm_import_os_event_group_clear_bits);
-static m3ApiRawFunction(os_wasm_import_os_event_group_wait_bits);
-static m3ApiRawFunction(os_wasm_import_os_task_notify);
-static m3ApiRawFunction(os_wasm_import_os_task_notify_wait);
-#if OS_HAS_PROCESSES
-static m3ApiRawFunction(os_wasm_import_proc_spawn);
-#if OS_HAS_FS
-static m3ApiRawFunction(os_wasm_import_proc_spawn_path);
-#endif
-static m3ApiRawFunction(os_wasm_import_proc_wait);
-static m3ApiRawFunction(os_wasm_import_proc_kill);
-static m3ApiRawFunction(os_wasm_import_proc_self);
-static m3ApiRawFunction(os_wasm_import_proc_parent);
-#endif
-static m3ApiRawFunction(os_wasm_import_os_task_notify_take);
-static m3ApiRawFunction(os_wasm_import_os_timer_create);
-static m3ApiRawFunction(os_wasm_import_os_timer_delete);
-static m3ApiRawFunction(os_wasm_import_os_timer_start);
-static m3ApiRawFunction(os_wasm_import_os_timer_stop);
-static m3ApiRawFunction(os_wasm_import_os_timer_reset);
-static m3ApiRawFunction(os_wasm_import_os_timer_change_period);
-static m3ApiRawFunction(os_wasm_import_os_timer_is_active);
 static OsTaskHandle os_select_next_ready_task(void);
 static void os_preempt_for_higher_priority_ready_task(void);
 static OsTaskHandle os_select_queue_waiter(
@@ -494,7 +485,6 @@ static void os_clear_queue_wait(OsTaskHandle task);
 static OsStatus os_prepare_wait_return(OsTaskHandle task, uint32_t* raw_return);
 static void os_clear_wait_return(OsTaskHandle task);
 static void os_write_wait_return(OsTaskHandle task, uint32_t value);
-static void os_write_wait_output(OsTaskHandle task, uint32_t value);
 static void os_recompute_task_priorities(void);
 static void os_release_task_mutexes(OsTaskHandle task);
 static uint8_t os_event_group_condition_met(
@@ -505,6 +495,7 @@ static uint8_t os_event_group_condition_met(
 static void os_event_group_wake_waiters(OsEventGroupHandle event_group);
 static void os_complete_notification_wait(OsTaskHandle task);
 static void os_record_task_exit(OsTaskHandle task, OsTaskExitReason reason, uint32_t code);
+static void os_wake_any_waiters(void);
 static void os_request_task_stop(OsTaskHandle task);
 static void os_request_task_delete(OsTaskHandle task);
 static void os_destroy_task(OsTaskHandle task);
@@ -759,6 +750,7 @@ OsStatus os_queue_send(OsQueueHandle queue, const void* item)
     memcpy(destination, item, queue->item_size);
     queue->tail = (queue->tail + 1U) % queue->item_count;
     ++queue->count;
+    os_wake_any_waiters();
 
     return OS_STATUS_OK;
 }
@@ -928,6 +920,11 @@ uint32_t os_queue_get_count(OsQueueHandle queue)
     }
 
     return queue->count;
+}
+
+uint32_t os_queue_get_item_size(OsQueueHandle queue)
+{
+    return queue != NULL && os_queue_is_in_list(queue) ? queue->item_size : 0U;
 }
 
 uint32_t os_queue_get_space(OsQueueHandle queue)
@@ -1304,6 +1301,7 @@ OsStatus os_semaphore_give(OsSemaphoreHandle semaphore)
     }
 
     ++semaphore->count;
+    os_wake_any_waiters();
     return OS_STATUS_OK;
 }
 
@@ -1433,6 +1431,7 @@ uint32_t os_event_group_set_bits(OsEventGroupHandle event_group, uint32_t bits)
 
     event_group->bits |= bits;
     os_event_group_wake_waiters(event_group);
+    os_wake_any_waiters();
     os_recalculate_task_counters();
     os_preempt_for_higher_priority_ready_task();
     return event_group->bits;
@@ -1699,7 +1698,10 @@ static M3Result os_dylink_link_host_imports(void* context, IM3Module module)
 /* Settings a program declares about itself in its wasm-rtos.app section. */
 typedef struct OsAppMetadata
 {
+    uint32_t abi_version;
     uint32_t stack_size;
+    const uint8_t* name;
+    uint32_t name_length;
 } OsAppMetadata;
 
 static uint8_t os_read_leb_u32(const uint8_t** cursor, const uint8_t* end, uint32_t* out_value)
@@ -1721,9 +1723,15 @@ static uint8_t os_read_leb_u32(const uint8_t** cursor, const uint8_t* end, uint3
     return 0U;
 }
 
+static uint32_t os_read_le_u32(const uint8_t* bytes)
+{
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) |
+           ((uint32_t)bytes[2] << 16U) | ((uint32_t)bytes[3] << 24U);
+}
+
 /*
- * Find the custom section "wasm-rtos.app": records of a key byte and a
- * little-endian u32 value. Unknown keys are skipped. A module the parser
+ * Find the custom section "wasm-rtos.app": records of a key byte, a LEB128
+ * length and that many bytes. Unknown keys are skipped. A module the parser
  * cannot walk is left to wasm3 to reject; a malformed section is an error.
  */
 static OsStatus os_read_app_metadata(const uint8_t* bytes, uint32_t size, OsAppMetadata* out_metadata)
@@ -1755,18 +1763,36 @@ static OsStatus os_read_app_metadata(const uint8_t* bytes, uint32_t size, OsAppM
             memcmp(cursor, name, name_length) == 0)
         {
             cursor += name_length;
-            if ((uint32_t)(section_end - cursor) % 5U != 0U)
+            while (cursor < section_end)
             {
-                return OS_STATUS_INVALID_ARGUMENT;
-            }
-            for (; cursor < section_end; cursor += 5U)
-            {
-                uint32_t value = (uint32_t)cursor[1] | ((uint32_t)cursor[2] << 8U) |
-                                 ((uint32_t)cursor[3] << 16U) | ((uint32_t)cursor[4] << 24U);
-                if (cursor[0] == OS_APP_KEY_STACK_SIZE)
+                uint8_t key = *cursor++;
+                uint32_t length = 0U;
+
+                if (!os_read_leb_u32(&cursor, section_end, &length) || length > (uint32_t)(section_end - cursor))
                 {
-                    out_metadata->stack_size = value;
+                    return OS_STATUS_INVALID_ARGUMENT;
                 }
+                if (key == OS_APP_KEY_ABI_VERSION || key == OS_APP_KEY_STACK_SIZE)
+                {
+                    if (length != 4U)
+                    {
+                        return OS_STATUS_INVALID_ARGUMENT;
+                    }
+                    if (key == OS_APP_KEY_ABI_VERSION)
+                    {
+                        out_metadata->abi_version = os_read_le_u32(cursor);
+                    }
+                    else
+                    {
+                        out_metadata->stack_size = os_read_le_u32(cursor);
+                    }
+                }
+                else if (key == OS_APP_KEY_NAME)
+                {
+                    out_metadata->name = cursor;
+                    out_metadata->name_length = length;
+                }
+                cursor += length;
             }
         }
         cursor = section_end;
@@ -1858,6 +1884,22 @@ static OsStatus os_task_initialize(
             os_set_last_error(task, "app_metadata", "malformed wasm-rtos.app section", OS_STATUS_WASM_ERROR);
             os_task_free(task);
             return OS_STATUS_WASM_ERROR;
+        }
+        /* The ABI's major version is in the high 16 bits; 0 means not stated. */
+        if (metadata.abi_version != 0U && (metadata.abi_version >> 16U) != OS_ABI_VERSION_MAJOR)
+        {
+            os_set_last_error(task, "app_metadata", "program needs another ABI version", OS_STATUS_UNSUPPORTED);
+            os_task_free(task);
+            return OS_STATUS_UNSUPPORTED;
+        }
+        if (metadata.name_length > 0U)
+        {
+            task->app_name = (char*)malloc((size_t)metadata.name_length + 1U);
+            if (task->app_name != NULL)
+            {
+                memcpy(task->app_name, metadata.name, metadata.name_length);
+                task->app_name[metadata.name_length] = '\0';
+            }
         }
         task->stack_size = stack_size != 0U ? stack_size
             : metadata.stack_size != 0U ? metadata.stack_size : OS_DEFAULT_STACK_SIZE;
@@ -2420,6 +2462,11 @@ uint32_t os_task_get_id_list(uint32_t* out_task_ids, uint32_t max_task_ids)
     }
 
     return written;
+}
+
+const char* os_task_get_app_name(OsTaskHandle task)
+{
+    return os_task_is_in_list(task) ? task->app_name : NULL;
 }
 
 OsTaskState os_task_get_state(OsTaskHandle task)
@@ -3371,6 +3418,7 @@ static void os_queue_free(OsQueueHandle queue)
 
     free(queue->storage);
     queue->storage = NULL;
+    free(queue->name);
     free(queue);
 }
 
@@ -3466,6 +3514,10 @@ static OsMutexHandle os_mutex_allocate(void)
 
 static void os_mutex_free(OsMutexHandle mutex)
 {
+    if (mutex != NULL)
+    {
+        free(mutex->name);
+    }
     free(mutex);
 }
 
@@ -3556,6 +3608,10 @@ static OsSemaphoreHandle os_semaphore_allocate(void)
 
 static void os_semaphore_free(OsSemaphoreHandle semaphore)
 {
+    if (semaphore != NULL)
+    {
+        free(semaphore->name);
+    }
     free(semaphore);
 }
 
@@ -3648,6 +3704,10 @@ static OsEventGroupHandle os_event_group_allocate(void)
 
 static void os_event_group_free(OsEventGroupHandle event_group)
 {
+    if (event_group != NULL)
+    {
+        free(event_group->name);
+    }
     free(event_group);
 }
 
@@ -3742,6 +3802,10 @@ static OsTimerHandle os_timer_allocate(void)
 
 static void os_timer_free(OsTimerHandle timer)
 {
+    if (timer != NULL)
+    {
+        free(timer->name);
+    }
     free(timer);
 }
 
@@ -3863,12 +3927,14 @@ static void os_task_free(OsTaskHandle task)
     }
 
     os_task_cleanup_wasm(task);
+    os_abi_release_task(task);
 #if d_m3HasHeapAccounting
     m3_ReleaseHeapAccount(task->heap_account);
 #endif
-    os_clear_queue_wait(task);
+    os_clear_task_wait(task);
     os_task_free_entry_args(task);
     os_task_free_return_values(task);
+    free(task->app_name);
 #if OS_HAS_PROCESSES
     /* The module was parsed in place, so its bytes outlive the runtime. */
     free(task->owned_wasm_bytes);
@@ -4780,61 +4846,6 @@ static M3Result os_link_task_host_imports(OsTaskHandle task)
 
 static M3Result os_link_module_host_imports(IM3Module module)
 {
-    static const struct OsBuiltinImport
-    {
-        const char* name;
-        const char* signature;
-        M3RawCall function;
-    } imports[] =
-    {
-        { "os_yield", "v()", os_wasm_import_os_yield },
-        { "os_delay_ms", "v(i)", os_wasm_import_os_delay_ms },
-        { "os_task_delay_until", "i(ii)", os_wasm_import_os_task_delay_until },
-        { "os_task_abort_wait", "i(i)", os_wasm_import_os_task_abort_wait },
-        { "os_get_time_ms", "i()", os_wasm_import_os_get_time_ms },
-        { "os_queue_send", "i(ii)", os_wasm_import_os_queue_send },
-        { "os_queue_receive", "i(ii)", os_wasm_import_os_queue_receive },
-        { "os_queue_send_wait", "i(iii)", os_wasm_import_os_queue_send_wait },
-        { "os_queue_receive_wait", "i(iii)", os_wasm_import_os_queue_receive_wait },
-        { "os_mutex_create", "i()", os_wasm_import_os_mutex_create },
-        { "os_mutex_delete", "i(i)", os_wasm_import_os_mutex_delete },
-        { "os_mutex_lock", "i(ii)", os_wasm_import_os_mutex_lock },
-        { "os_mutex_unlock", "i(i)", os_wasm_import_os_mutex_unlock },
-        { "os_semaphore_create", "i(ii)", os_wasm_import_os_semaphore_create },
-        { "os_semaphore_delete", "i(i)", os_wasm_import_os_semaphore_delete },
-        { "os_semaphore_take", "i(ii)", os_wasm_import_os_semaphore_take },
-        { "os_semaphore_give", "i(i)", os_wasm_import_os_semaphore_give },
-        { "os_event_group_create", "i()", os_wasm_import_os_event_group_create },
-        { "os_event_group_delete", "i(i)", os_wasm_import_os_event_group_delete },
-        { "os_event_group_get_bits", "i(i)", os_wasm_import_os_event_group_get_bits },
-        { "os_event_group_set_bits", "i(ii)", os_wasm_import_os_event_group_set_bits },
-        { "os_event_group_clear_bits", "i(ii)", os_wasm_import_os_event_group_clear_bits },
-        { "os_event_group_wait_bits", "i(iiiii)", os_wasm_import_os_event_group_wait_bits },
-        { "os_task_notify", "i(iii)", os_wasm_import_os_task_notify },
-        { "os_task_notify_wait", "i(iiii)", os_wasm_import_os_task_notify_wait },
-        { "os_task_notify_take", "i(ii)", os_wasm_import_os_task_notify_take },
-        { "os_timer_create", "i(iiiii)", os_wasm_import_os_timer_create },
-        { "os_timer_delete", "i(i)", os_wasm_import_os_timer_delete },
-        { "os_timer_start", "i(i)", os_wasm_import_os_timer_start },
-        { "os_timer_stop", "i(i)", os_wasm_import_os_timer_stop },
-        { "os_timer_reset", "i(i)", os_wasm_import_os_timer_reset },
-        { "os_timer_change_period", "i(ii)", os_wasm_import_os_timer_change_period },
-        { "os_timer_is_active", "i(i)", os_wasm_import_os_timer_is_active }
-    };
-#if OS_HAS_PROCESSES
-    static const struct OsBuiltinImport proc_imports[] =
-    {
-        { "spawn", "i(iiiii)", os_wasm_import_proc_spawn },
-#if OS_HAS_FS
-        { "spawn_path", "i(iiii)", os_wasm_import_proc_spawn_path },
-#endif
-        { "wait", "i(iii)", os_wasm_import_proc_wait },
-        { "kill", "i(i)", os_wasm_import_proc_kill },
-        { "self", "i()", os_wasm_import_proc_self },
-        { "parent", "i()", os_wasm_import_proc_parent }
-    };
-#endif
-    uint32_t import_index = 0U;
     M3Result result = m3Err_none;
 
     if (module == NULL)
@@ -4842,44 +4853,6 @@ static M3Result os_link_module_host_imports(IM3Module module)
         return m3Err_moduleNotLinked;
     }
 
-    for (import_index = 0U;
-         import_index < (uint32_t)(sizeof(imports) / sizeof(imports[0]));
-         ++import_index)
-    {
-        result = m3_LinkRawFunction(
-            module,
-            "env",
-            imports[import_index].name,
-            imports[import_index].signature,
-            imports[import_index].function
-        );
-
-        if (result != m3Err_none && result != m3Err_functionLookupFailed)
-        {
-            return result;
-        }
-    }
-
-#if OS_HAS_PROCESSES
-    for (import_index = 0U;
-         import_index < (uint32_t)(sizeof(proc_imports) / sizeof(proc_imports[0]));
-         ++import_index)
-    {
-        result = m3_LinkRawFunction(
-            module,
-            "wasm-rtos:proc",
-            proc_imports[import_index].name,
-            proc_imports[import_index].signature,
-            proc_imports[import_index].function
-        );
-
-        if (result != m3Err_none && result != m3Err_functionLookupFailed)
-        {
-            return result;
-        }
-    }
-
-#endif
     result = os_link_registered_host_imports(module);
     if (result != m3Err_none)
     {
@@ -4901,6 +4874,12 @@ static M3Result os_link_module_host_imports(IM3Module module)
     }
 #endif
 #endif
+    /* The guest ABI, and the WASI calls the kernel answers itself. */
+    result = os_abi_link(module);
+    if (result != m3Err_none)
+    {
+        return result;
+    }
 
     return m3Err_none;
 }
@@ -4934,784 +4913,8 @@ static M3Result os_link_registered_host_imports(IM3Module module)
     return m3Err_none;
 }
 
-static m3ApiRawFunction(os_wasm_import_os_yield)
-{
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_sp;
-    (void)_mem;
 
-    status = os_task_yield();
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiTrap(m3Err_trapAbort);
-    }
 
-    return m3_Yield();
-}
-
-static m3ApiRawFunction(os_wasm_import_os_delay_ms)
-{
-    OsStatus status = OS_STATUS_OK;
-    m3ApiGetArg(uint32_t, delay_ms);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    status = os_task_delay_ms(delay_ms);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiTrap(m3Err_trapAbort);
-    }
-
-    return m3_Yield();
-}
-
-static m3ApiRawFunction(os_wasm_import_os_task_delay_until)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, previous_wake_time_address);
-    m3ApiGetArg(uint32_t, period_ms);
-    OsTaskHandle task = os_task_get_current();
-    uint8_t* previous_wake_time_memory = NULL;
-    uint32_t previous_wake_time_ms = 0U;
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    status = os_task_get_memory_pointer(
-        task,
-        previous_wake_time_address,
-        (uint32_t)sizeof(uint32_t),
-        &previous_wake_time_memory
-    );
-    if (status == OS_STATUS_OK)
-    {
-        memcpy(
-            &previous_wake_time_ms,
-            previous_wake_time_memory,
-            sizeof(previous_wake_time_ms)
-        );
-        status = os_task_delay_until(&previous_wake_time_ms, period_ms);
-        memcpy(
-            previous_wake_time_memory,
-            &previous_wake_time_ms,
-            sizeof(previous_wake_time_ms)
-        );
-    }
-
-    *raw_return = (uint32_t)status;
-    if (task != NULL && task->wait_type == OS_TASK_WAIT_DELAY)
-    {
-        status = os_prepare_wait_return(task, raw_return);
-        if (status != OS_STATUS_OK)
-        {
-            os_cancel_task_wait(task, status);
-            m3ApiReturn((uint32_t)status);
-        }
-        return m3_Yield();
-    }
-
-    os_clear_wait_return(task);
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_task_abort_wait)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, task_id);
-    OsTaskHandle task = os_task_find_by_id(task_id);
-    OsStatus status = task != NULL
-        ? os_task_abort_wait(task)
-        : OS_STATUS_TASK_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_get_time_ms)
-{
-    m3ApiReturnType(uint32_t);
-    (void)runtime;
-    (void)_ctx;
-    (void)_sp;
-    (void)_mem;
-
-    m3ApiReturn(os_get_tick_ms());
-}
-
-
-
-
-static m3ApiRawFunction(os_wasm_import_os_queue_send)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, queue_id);
-    m3ApiGetArg(uint32_t, item_ptr);
-    OsQueueHandle queue = os_queue_find_by_id(queue_id);
-    OsTaskHandle task = os_task_get_current();
-    uint8_t* item = NULL;
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (queue == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
-    }
-
-    item = (uint8_t*)malloc(queue->item_size);
-    if (item == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_OUT_OF_MEMORY);
-    }
-
-    status = os_task_read_memory(task, item_ptr, item, queue->item_size);
-    if (status == OS_STATUS_OK)
-    {
-        status = os_queue_send(queue, item);
-    }
-
-    free(item);
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_queue_receive)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, queue_id);
-    m3ApiGetArg(uint32_t, item_ptr);
-    OsQueueHandle queue = os_queue_find_by_id(queue_id);
-    OsTaskHandle task = os_task_get_current();
-    uint8_t* item = NULL;
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (queue == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
-    }
-
-    item = (uint8_t*)malloc(queue->item_size);
-    if (item == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_OUT_OF_MEMORY);
-    }
-
-    status = os_queue_receive(queue, item);
-    if (status == OS_STATUS_OK)
-    {
-        status = os_task_write_memory(task, item_ptr, item, queue->item_size);
-    }
-
-    free(item);
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_queue_send_wait)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, queue_id);
-    m3ApiGetArg(uint32_t, item_ptr);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsQueueHandle queue = os_queue_find_by_id(queue_id);
-    OsTaskHandle task = os_task_get_current();
-    uint8_t* item = NULL;
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (queue == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
-    }
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn((uint32_t)status);
-    }
-
-    item = (uint8_t*)malloc(queue->item_size);
-    if (item == NULL)
-    {
-        os_clear_wait_return(task);
-        m3ApiReturn((uint32_t)OS_STATUS_OUT_OF_MEMORY);
-    }
-
-    status = os_task_read_memory(task, item_ptr, item, queue->item_size);
-    if (status == OS_STATUS_OK)
-    {
-        status = os_queue_send_wait(queue, item, timeout_ms);
-    }
-    free(item);
-
-    *raw_return = (uint32_t)status;
-    if (task != NULL && task->wait_type == OS_TASK_WAIT_QUEUE_SEND)
-    {
-        return m3_Yield();
-    }
-
-    os_clear_wait_return(task);
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_queue_receive_wait)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, queue_id);
-    m3ApiGetArg(uint32_t, item_ptr);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsQueueHandle queue = os_queue_find_by_id(queue_id);
-    OsTaskHandle task = os_task_get_current();
-    uint8_t* item = NULL;
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (queue == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_QUEUE_NOT_FOUND);
-    }
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn((uint32_t)status);
-    }
-
-    status = os_task_get_memory_pointer(
-        task,
-        item_ptr,
-        queue->item_size,
-        &item
-    );
-    if (status == OS_STATUS_OK)
-    {
-        status = os_queue_receive_wait(queue, item, timeout_ms);
-    }
-
-    *raw_return = (uint32_t)status;
-    if (task != NULL && task->wait_type == OS_TASK_WAIT_QUEUE_RECEIVE)
-    {
-        return m3_Yield();
-    }
-
-    os_clear_wait_return(task);
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_mutex_create)
-{
-    m3ApiReturnType(uint32_t);
-    OsMutexHandle mutex = NULL;
-    OsStatus status = os_mutex_create(&mutex);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn(status == OS_STATUS_OK ? os_mutex_get_id(mutex) : 0U);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_mutex_delete)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, mutex_id);
-    OsMutexHandle mutex = os_mutex_find_by_id(mutex_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (mutex == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_MUTEX_NOT_FOUND);
-    }
-
-    os_mutex_delete(mutex);
-    m3ApiReturn((uint32_t)OS_STATUS_OK);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_mutex_lock)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, mutex_id);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsTaskHandle task = os_task_get_current();
-    OsMutexHandle mutex = os_mutex_find_by_id(mutex_id);
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (mutex == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_MUTEX_NOT_FOUND);
-    }
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn((uint32_t)status);
-    }
-
-    status = os_mutex_lock(mutex, timeout_ms);
-    *raw_return = (uint32_t)status;
-    if (task != NULL && task->wait_type == OS_TASK_WAIT_MUTEX)
-    {
-        return m3_Yield();
-    }
-
-    os_clear_wait_return(task);
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_mutex_unlock)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, mutex_id);
-    OsMutexHandle mutex = os_mutex_find_by_id(mutex_id);
-    OsStatus status = mutex != NULL
-        ? os_mutex_unlock(mutex)
-        : OS_STATUS_MUTEX_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_semaphore_create)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, max_count);
-    m3ApiGetArg(uint32_t, initial_count);
-    OsSemaphoreHandle semaphore = NULL;
-    OsStatus status = os_semaphore_create(
-        &semaphore,
-        max_count,
-        initial_count
-    );
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn(status == OS_STATUS_OK
-        ? os_semaphore_get_id(semaphore)
-        : 0U);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_semaphore_delete)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, semaphore_id);
-    OsSemaphoreHandle semaphore = os_semaphore_find_by_id(semaphore_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (semaphore == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_SEMAPHORE_NOT_FOUND);
-    }
-
-    os_semaphore_delete(semaphore);
-    m3ApiReturn((uint32_t)OS_STATUS_OK);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_semaphore_take)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, semaphore_id);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsTaskHandle task = os_task_get_current();
-    OsSemaphoreHandle semaphore = os_semaphore_find_by_id(semaphore_id);
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (semaphore == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_SEMAPHORE_NOT_FOUND);
-    }
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn((uint32_t)status);
-    }
-
-    status = os_semaphore_take(semaphore, timeout_ms);
-    *raw_return = (uint32_t)status;
-    if (task != NULL && task->wait_type == OS_TASK_WAIT_SEMAPHORE)
-    {
-        return m3_Yield();
-    }
-
-    os_clear_wait_return(task);
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_semaphore_give)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, semaphore_id);
-    OsSemaphoreHandle semaphore = os_semaphore_find_by_id(semaphore_id);
-    OsStatus status = semaphore != NULL
-        ? os_semaphore_give(semaphore)
-        : OS_STATUS_SEMAPHORE_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_event_group_create)
-{
-    m3ApiReturnType(uint32_t);
-    OsEventGroupHandle event_group = NULL;
-    OsStatus status = os_event_group_create(&event_group);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn(status == OS_STATUS_OK
-        ? os_event_group_get_id(event_group)
-        : 0U);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_event_group_delete)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, event_group_id);
-    OsEventGroupHandle event_group =
-        os_event_group_find_by_id(event_group_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (event_group == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_EVENT_GROUP_NOT_FOUND);
-    }
-
-    os_event_group_delete(event_group);
-    m3ApiReturn((uint32_t)OS_STATUS_OK);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_event_group_get_bits)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, event_group_id);
-    OsEventGroupHandle event_group =
-        os_event_group_find_by_id(event_group_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn(os_event_group_get_bits(event_group));
-}
-
-static m3ApiRawFunction(os_wasm_import_os_event_group_set_bits)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, event_group_id);
-    m3ApiGetArg(uint32_t, bits);
-    OsEventGroupHandle event_group =
-        os_event_group_find_by_id(event_group_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn(os_event_group_set_bits(event_group, bits));
-}
-
-static m3ApiRawFunction(os_wasm_import_os_event_group_clear_bits)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, event_group_id);
-    m3ApiGetArg(uint32_t, bits);
-    OsEventGroupHandle event_group =
-        os_event_group_find_by_id(event_group_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn(os_event_group_clear_bits(event_group, bits));
-}
-
-static m3ApiRawFunction(os_wasm_import_os_event_group_wait_bits)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, event_group_id);
-    m3ApiGetArg(uint32_t, bits_to_wait_for);
-    m3ApiGetArg(uint32_t, clear_on_exit);
-    m3ApiGetArg(uint32_t, wait_for_all);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsTaskHandle task = os_task_get_current();
-    OsEventGroupHandle event_group =
-        os_event_group_find_by_id(event_group_id);
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (event_group == NULL)
-    {
-        m3ApiReturn(0U);
-    }
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn(0U);
-    }
-
-    status = os_event_group_wait_bits(
-        event_group,
-        bits_to_wait_for,
-        clear_on_exit ? 1U : 0U,
-        wait_for_all ? 1U : 0U,
-        timeout_ms
-    );
-    if (task != NULL && task->wait_type == OS_TASK_WAIT_EVENT_GROUP)
-    {
-        *raw_return = 0U;
-        return m3_Yield();
-    }
-
-    *raw_return = task != NULL ? task->last_wait_value : 0U;
-    os_clear_wait_return(task);
-    (void)status;
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_task_notify)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, task_id);
-    m3ApiGetArg(uint32_t, value);
-    m3ApiGetArg(uint32_t, action);
-    OsTaskHandle task = os_task_find_by_id(task_id);
-    OsStatus status = task != NULL
-        ? os_task_notify(task, value, (OsNotifyAction)action)
-        : OS_STATUS_TASK_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_task_notify_wait)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, clear_on_entry);
-    m3ApiGetArg(uint32_t, clear_on_exit);
-    m3ApiGetArg(uint32_t, out_value_address);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsTaskHandle task = os_task_get_current();
-    uint8_t zero[sizeof(uint32_t)] = { 0U, 0U, 0U, 0U };
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    status = os_task_write_memory(
-        task,
-        out_value_address,
-        zero,
-        (uint32_t)sizeof(zero)
-    );
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn((uint32_t)status);
-    }
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn((uint32_t)status);
-    }
-
-    task->wait_has_wasm_output = 1U;
-    task->wait_wasm_output_address = out_value_address;
-    status = os_task_notify_wait(clear_on_entry, clear_on_exit, timeout_ms);
-    *raw_return = (uint32_t)status;
-    if (task->wait_type == OS_TASK_WAIT_NOTIFICATION)
-    {
-        return m3_Yield();
-    }
-
-    os_write_wait_output(task, task->last_wait_value);
-    os_clear_wait_return(task);
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_task_notify_take)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, clear_count_on_exit);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsTaskHandle task = os_task_get_current();
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn(0U);
-    }
-
-    status = os_task_notify_take(
-        clear_count_on_exit ? 1U : 0U,
-        timeout_ms
-    );
-    if (task->wait_type == OS_TASK_WAIT_NOTIFICATION_TAKE)
-    {
-        *raw_return = 0U;
-        return m3_Yield();
-    }
-
-    *raw_return = status == OS_STATUS_OK ? task->last_wait_value : 0U;
-    os_clear_wait_return(task);
-    return m3Err_none;
-}
-
-static m3ApiRawFunction(os_wasm_import_os_timer_create)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, period_ms);
-    m3ApiGetArg(uint32_t, auto_reload);
-    m3ApiGetArg(uint32_t, target_task_id);
-    m3ApiGetArg(uint32_t, notify_value);
-    m3ApiGetArg(uint32_t, notify_action);
-    OsTaskHandle target_task = target_task_id == 0U
-        ? os_task_get_current()
-        : os_task_find_by_id(target_task_id);
-    OsTimerHandle timer = NULL;
-    OsStatus status = OS_STATUS_TASK_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (target_task != NULL)
-    {
-        status = os_timer_create(
-            &timer,
-            period_ms,
-            auto_reload ? 1U : 0U,
-            target_task,
-            notify_value,
-            (OsNotifyAction)notify_action
-        );
-    }
-
-    m3ApiReturn(status == OS_STATUS_OK ? os_timer_get_id(timer) : 0U);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_timer_delete)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, timer_id);
-    OsTimerHandle timer = os_timer_find_by_id(timer_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (timer == NULL)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_TIMER_NOT_FOUND);
-    }
-
-    os_timer_delete(timer);
-    m3ApiReturn((uint32_t)OS_STATUS_OK);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_timer_start)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, timer_id);
-    OsTimerHandle timer = os_timer_find_by_id(timer_id);
-    OsStatus status = timer != NULL
-        ? os_timer_start(timer)
-        : OS_STATUS_TIMER_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_timer_stop)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, timer_id);
-    OsTimerHandle timer = os_timer_find_by_id(timer_id);
-    OsStatus status = timer != NULL
-        ? os_timer_stop(timer)
-        : OS_STATUS_TIMER_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_timer_reset)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, timer_id);
-    OsTimerHandle timer = os_timer_find_by_id(timer_id);
-    OsStatus status = timer != NULL
-        ? os_timer_reset(timer)
-        : OS_STATUS_TIMER_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_timer_change_period)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, timer_id);
-    m3ApiGetArg(uint32_t, period_ms);
-    OsTimerHandle timer = os_timer_find_by_id(timer_id);
-    OsStatus status = timer != NULL
-        ? os_timer_change_period(timer, period_ms)
-        : OS_STATUS_TIMER_NOT_FOUND;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)status);
-}
-
-static m3ApiRawFunction(os_wasm_import_os_timer_is_active)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, timer_id);
-    OsTimerHandle timer = os_timer_find_by_id(timer_id);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    m3ApiReturn((uint32_t)os_timer_is_active(timer));
-}
 
 static OsStatus os_wasm_result_to_status(M3Result result)
 {
@@ -5989,11 +5192,17 @@ static void os_complete_task_wait(
 
     task->last_wait_status = status;
     task->last_wait_value = value;
-    return_value = task->wait_return_kind == OS_WAIT_RETURN_VALUE
-        ? value
-        : (uint32_t)status;
+    if (task->wait_return_kind == OS_WAIT_RETURN_ABI)
+    {
+        return_value = status == OS_STATUS_OK ? value : (uint32_t)os_abi_error(status);
+    }
+    else
+    {
+        return_value = task->wait_return_kind == OS_WAIT_RETURN_VALUE
+            ? value
+            : (uint32_t)status;
+    }
 
-    os_write_wait_output(task, value);
     os_write_wait_return(task, return_value);
     os_clear_task_wait(task);
     os_set_task_ready(task);
@@ -6018,6 +5227,9 @@ static void os_clear_task_wait(OsTaskHandle task)
     }
 
     os_clear_queue_wait(task);
+    free(task->wait_targets);
+    task->wait_targets = NULL;
+    task->wait_target_count = 0U;
     task->wait_type = OS_TASK_WAIT_NONE;
     task->wait_object.mutex = NULL;
     task->wait_sequence = 0U;
@@ -6079,8 +5291,6 @@ static void os_clear_wait_return(OsTaskHandle task)
 
     task->wait_has_return_slot = 0U;
     task->wait_return_offset = 0U;
-    task->wait_has_wasm_output = 0U;
-    task->wait_wasm_output_address = 0U;
 }
 
 static void os_write_wait_return(OsTaskHandle task, uint32_t value)
@@ -6104,27 +5314,6 @@ static void os_write_wait_return(OsTaskHandle task, uint32_t value)
     stack_start = task->wasm_stack_base;
     return_slot = (uint32_t*)(stack_start + task->wait_return_offset);
     *return_slot = value;
-}
-
-static void os_write_wait_output(OsTaskHandle task, uint32_t value)
-{
-    uint8_t bytes[sizeof(uint32_t)];
-
-    if (task == NULL || !task->wait_has_wasm_output)
-    {
-        return;
-    }
-
-    bytes[0] = (uint8_t)(value & 0xffU);
-    bytes[1] = (uint8_t)((value >> 8U) & 0xffU);
-    bytes[2] = (uint8_t)((value >> 16U) & 0xffU);
-    bytes[3] = (uint8_t)((value >> 24U) & 0xffU);
-    (void)os_task_write_memory(
-        task,
-        task->wait_wasm_output_address,
-        bytes,
-        (uint32_t)sizeof(bytes)
-    );
 }
 
 static void os_recompute_task_priorities(void)
@@ -6289,8 +5478,8 @@ static void os_process_timers(void)
     {
         OsTimerHandle next = timer->next;
 
-        if (!os_task_is_in_list(timer->target_task) ||
-            os_task_is_dead(timer->target_task))
+        if (!timer->counting &&
+            (!os_task_is_in_list(timer->target_task) || os_task_is_dead(timer->target_task)))
         {
             os_timer_list_remove(timer);
             os_timer_free(timer);
@@ -6317,11 +5506,22 @@ static void os_process_timers(void)
                 timer->expiry_tick_ms = 0U;
             }
 
-            (void)os_task_notify(
-                timer->target_task,
-                timer->notify_value,
-                timer->notify_action
-            );
+            if (timer->counting)
+            {
+                if (timer->expirations < UINT32_MAX)
+                {
+                    ++timer->expirations;
+                }
+                os_wake_any_waiters();
+            }
+            else
+            {
+                (void)os_task_notify(
+                    timer->target_task,
+                    timer->notify_value,
+                    timer->notify_action
+                );
+            }
         }
 
         timer = next;
@@ -6890,7 +6090,15 @@ static void os_process_on_task_dead(OsTaskHandle task)
     {
         task->exit_collected = 1U;
         task->reap_pending = task->auto_reap;
-        os_complete_task_wait(parent, os_process_exit_status(task), task->exit_code);
+        if (parent->wait_return_kind == OS_WAIT_RETURN_ABI)
+        {
+            os_complete_task_wait(parent, OS_STATUS_OK,
+                                  (uint32_t)os_abi_child_result(task->exit_reason, task->exit_code));
+        }
+        else
+        {
+            os_complete_task_wait(parent, os_process_exit_status(task), task->exit_code);
+        }
         os_recalculate_task_counters();
         os_preempt_for_higher_priority_ready_task();
     }
@@ -6941,301 +6149,7 @@ static void os_apply_task_wasi_args(OsTaskHandle task)
 }
 #endif
 
-static OsStatus os_read_guest_string(OsTaskHandle task, uint32_t address, char* out, uint32_t out_size)
-{
-    uint32_t length = 0U;
 
-    for (length = 0U; length + 1U < out_size; ++length)
-    {
-        uint8_t byte = 0U;
-        OsStatus status = os_task_read_memory(task, address + length, &byte, 1U);
-        if (status != OS_STATUS_OK)
-        {
-            return status;
-        }
-        out[length] = (char)byte;
-        if (byte == 0U)
-        {
-            return OS_STATUS_OK;
-        }
-    }
-
-    return OS_STATUS_BUFFER_TOO_SMALL;
-}
-
-/* Copy argc guest string pointers at argv_address into one packed argv. */
-static OsStatus os_read_guest_argv(OsTaskHandle task, uint32_t argv_address, uint32_t argc, char*** out_argv)
-{
-    char* strings = NULL;
-    OsStatus status = OS_STATUS_OK;
-    uint32_t index = 0U;
-
-    *out_argv = NULL;
-    if (argc == 0U)
-    {
-        return OS_STATUS_OK;
-    }
-
-    /* Copy every argument out of guest memory, then pack them. */
-    strings = (char*)malloc((size_t)argc * OS_PROC_MAX_ARG_LENGTH);
-    if (strings == NULL)
-    {
-        return OS_STATUS_OUT_OF_MEMORY;
-    }
-    for (index = 0U; status == OS_STATUS_OK && index < argc; ++index)
-    {
-        uint8_t raw[sizeof(uint32_t)];
-        uint32_t string_address = 0U;
-        status = os_task_read_memory(task, argv_address + index * 4U, raw, 4U);
-        if (status == OS_STATUS_OK)
-        {
-            string_address = (uint32_t)raw[0] | ((uint32_t)raw[1] << 8U) |
-                             ((uint32_t)raw[2] << 16U) | ((uint32_t)raw[3] << 24U);
-            status = os_read_guest_string(
-                task,
-                string_address,
-                strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH,
-                OS_PROC_MAX_ARG_LENGTH
-            );
-        }
-    }
-    if (status == OS_STATUS_OK)
-    {
-        const char* pointers[OS_PROC_MAX_ARGS];
-        for (index = 0U; index < argc; ++index)
-        {
-            pointers[index] = strings + (size_t)index * OS_PROC_MAX_ARG_LENGTH;
-        }
-        *out_argv = os_pack_argv(pointers, argc);
-        if (*out_argv == NULL)
-        {
-            status = OS_STATUS_OUT_OF_MEMORY;
-        }
-    }
-    free(strings);
-    return status;
-}
-
-static m3ApiRawFunction(os_wasm_import_proc_spawn)
-{
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, bytes_address);
-    m3ApiGetArg(uint32_t, bytes_length);
-    m3ApiGetArg(uint32_t, argv_address);
-    m3ApiGetArg(uint32_t, argc);
-    m3ApiGetArg(uint32_t, priority);
-    OsTaskHandle task = os_task_get_current();
-    OsTaskHandle child = NULL;
-    OsProcessImage image;
-    uint8_t* bytes = NULL;
-    char** argv = NULL;
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (task == NULL || bytes_length == 0U || argc > OS_PROC_MAX_ARGS)
-    {
-        m3ApiReturn(-(int32_t)OS_STATUS_INVALID_ARGUMENT);
-    }
-
-    bytes = (uint8_t*)malloc(bytes_length);
-    if (bytes == NULL)
-    {
-        m3ApiReturn(-(int32_t)OS_STATUS_OUT_OF_MEMORY);
-    }
-    status = os_task_read_memory(task, bytes_address, bytes, bytes_length);
-    if (status == OS_STATUS_OK)
-    {
-        status = os_read_guest_argv(task, argv_address, argc, &argv);
-    }
-
-    if (status != OS_STATUS_OK)
-    {
-        free(bytes);
-        free(argv);
-        m3ApiReturn(-(int32_t)status);
-    }
-
-    memset(&image, 0, sizeof(image));
-    image.bytes = bytes;
-    image.size = bytes_length;
-    image.owned_bytes = bytes;
-    /* Guests do not pick a stack: the program's own request or the default applies. */
-    status = os_task_spawn_owned(&child, &image, argv, argc, priority, 0U);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn(-(int32_t)status);
-    }
-
-    m3ApiReturn((int32_t)child->id);
-}
-
-#if OS_HAS_FS
-static m3ApiRawFunction(os_wasm_import_proc_spawn_path)
-{
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, path_address);
-    m3ApiGetArg(uint32_t, argv_address);
-    m3ApiGetArg(uint32_t, argc);
-    m3ApiGetArg(uint32_t, priority);
-    OsTaskHandle task = os_task_get_current();
-    OsTaskHandle child = NULL;
-    char path[OS_FS_PATH_MAX];
-    char** argv = NULL;
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (task == NULL || argc > OS_PROC_MAX_ARGS)
-    {
-        m3ApiReturn(-(int32_t)OS_STATUS_INVALID_ARGUMENT);
-    }
-
-    status = os_read_guest_string(task, path_address, path, sizeof(path));
-    if (status == OS_STATUS_OK)
-    {
-        status = os_read_guest_argv(task, argv_address, argc, &argv);
-    }
-    if (status == OS_STATUS_OK)
-    {
-        status = os_task_spawn_path(&child, path, (const char* const*)argv, argc, priority, 0U);
-    }
-    /* os_task_spawn_path copies argv. */
-    free(argv);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn(-(int32_t)status);
-    }
-
-    m3ApiReturn((int32_t)child->id);
-}
-#endif
-
-static m3ApiRawFunction(os_wasm_import_proc_wait)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, pid);
-    m3ApiGetArg(uint32_t, out_code_address);
-    m3ApiGetArg(uint32_t, timeout_ms);
-    OsTaskHandle task = os_task_get_current();
-    OsTaskHandle child = os_task_find_by_id(pid);
-    OsStatus status = OS_STATUS_OK;
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (task == NULL || child == NULL || child->parent_id != task->id || child->exit_collected)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_TASK_NOT_FOUND);
-    }
-
-    if (out_code_address != 0U)
-    {
-        uint8_t zero[sizeof(uint32_t)] = { 0U, 0U, 0U, 0U };
-        status = os_task_write_memory(task, out_code_address, zero, (uint32_t)sizeof(zero));
-        if (status != OS_STATUS_OK)
-        {
-            m3ApiReturn((uint32_t)status);
-        }
-    }
-
-    if (child->state == OS_TASK_DEAD)
-    {
-        uint32_t code = child->exit_code;
-        status = os_process_exit_status(child);
-        child->exit_collected = 1U;
-        child->reap_pending = child->auto_reap;
-        if (out_code_address != 0U)
-        {
-            uint8_t bytes[sizeof(uint32_t)];
-            bytes[0] = (uint8_t)(code & 0xffU);
-            bytes[1] = (uint8_t)((code >> 8U) & 0xffU);
-            bytes[2] = (uint8_t)((code >> 16U) & 0xffU);
-            bytes[3] = (uint8_t)((code >> 24U) & 0xffU);
-            (void)os_task_write_memory(task, out_code_address, bytes, (uint32_t)sizeof(bytes));
-        }
-        m3ApiReturn((uint32_t)status);
-    }
-
-    if (timeout_ms == 0U)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_TIMEOUT);
-    }
-
-    status = os_prepare_wait_return(task, raw_return);
-    if (status != OS_STATUS_OK)
-    {
-        m3ApiReturn((uint32_t)status);
-    }
-
-    task->wait_has_wasm_output = out_code_address != 0U ? 1U : 0U;
-    task->wait_wasm_output_address = out_code_address;
-    task->wait_return_kind = OS_WAIT_RETURN_STATUS;
-    task->wait_child_id = child->id;
-    status = os_begin_task_wait(task, OS_TASK_WAIT_CHILD, timeout_ms);
-    *raw_return = (uint32_t)status;
-    if (status != OS_STATUS_OK)
-    {
-        os_clear_wait_return(task);
-        task->wait_child_id = 0U;
-        return m3Err_none;
-    }
-
-    return m3_Yield();
-}
-
-static m3ApiRawFunction(os_wasm_import_proc_kill)
-{
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, pid);
-    OsTaskHandle task = os_task_get_current();
-    OsTaskHandle child = os_task_find_by_id(pid);
-    (void)runtime;
-    (void)_ctx;
-    (void)_mem;
-
-    if (task == NULL || child == NULL || child->parent_id != task->id)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_TASK_NOT_FOUND);
-    }
-
-    if (child->state == OS_TASK_DEAD)
-    {
-        m3ApiReturn((uint32_t)OS_STATUS_TASK_DEAD);
-    }
-
-    /* Keep the dead child until the parent collects it with wait. */
-    os_record_task_exit(child, OS_TASK_EXIT_DELETED, 0U);
-    os_set_task_dead(child);
-    os_recalculate_task_counters();
-    m3ApiReturn((uint32_t)OS_STATUS_OK);
-}
-
-static m3ApiRawFunction(os_wasm_import_proc_self)
-{
-    m3ApiReturnType(uint32_t);
-    OsTaskHandle task = os_task_get_current();
-    (void)runtime;
-    (void)_ctx;
-    (void)_sp;
-    (void)_mem;
-
-    m3ApiReturn(task != NULL ? task->id : 0U);
-}
-
-static m3ApiRawFunction(os_wasm_import_proc_parent)
-{
-    m3ApiReturnType(uint32_t);
-    OsTaskHandle task = os_task_get_current();
-    (void)runtime;
-    (void)_ctx;
-    (void)_sp;
-    (void)_mem;
-
-    m3ApiReturn(task != NULL ? task->parent_id : 0U);
-}
 #endif /* OS_HAS_PROCESSES */
 
 static void os_set_task_dead(OsTaskHandle task)
@@ -7256,9 +6170,12 @@ static void os_set_task_dead(OsTaskHandle task)
     task->state = OS_TASK_DEAD;
     task->wake_tick_ms = 0U;
     os_task_cleanup_wasm(task);
+    /* A dead program's handles go now, so the objects it held do too. */
+    os_abi_release_task(task);
 #if OS_HAS_PROCESSES
     os_process_on_task_dead(task);
 #endif
+    os_wake_any_waiters();
     os_clock_rearm();
 }
 
@@ -7363,4 +6280,492 @@ static void os_set_last_error(OsTaskHandle task, const char* phase, M3Result res
         g_os.last_error.task_name[OS_TASK_NAME_MAX - 1U] = '\0';
         g_os.last_error.has_task_name = 1U;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Support for the guest ABI layer (abi.c): guest calls, object names and
+ * references, counting timers and waiting for any of several objects.
+ * ------------------------------------------------------------------------ */
+
+/*
+ * An import that may block names its result slot first. Some waits clear the
+ * previous wait state when they start, so the slot is attached again once
+ * the import knows whether the task blocks.
+ */
+static OsStatus os_import_wait_begin(uint32_t* raw_return)
+{
+    OsStatus status = os_prepare_wait_return(g_os.current_task, raw_return);
+
+    g_os.import_return_slot = status == OS_STATUS_OK ? raw_return : NULL;
+    return status;
+}
+
+static M3Result os_import_wait_end(uint8_t abi)
+{
+    OsTaskHandle task = g_os.current_task;
+    uint32_t* slot = g_os.import_return_slot;
+
+    g_os.import_return_slot = NULL;
+    if (task != NULL && task->state == OS_TASK_WAITING && task->wait_type != OS_TASK_WAIT_NONE && slot != NULL &&
+        os_prepare_wait_return(task, slot) == OS_STATUS_OK)
+    {
+        if (abi)
+        {
+            /* The wakeup writes the value or a negative ABI error. */
+            task->wait_return_kind = OS_WAIT_RETURN_ABI;
+        }
+        return m3_Yield();
+    }
+    os_clear_wait_return(task);
+    return m3Err_none;
+}
+
+OsStatus os_guest_begin(uint32_t* raw_return)
+{
+    return os_import_wait_begin(raw_return);
+}
+
+M3Result os_guest_end(void)
+{
+    return os_import_wait_end(1U);
+}
+
+OsStatus os_guest_memory(uint32_t address, uint32_t length, uint8_t** out_memory)
+{
+    return os_task_get_memory_pointer(g_os.current_task, address, length, out_memory);
+}
+
+void** os_task_abi_state(OsTaskHandle task)
+{
+    return task != NULL ? &task->abi_state : NULL;
+}
+
+typedef struct OsObjectFields
+{
+    char** name;
+    uint32_t* guest_refs;
+    uint8_t* guest_owned;
+} OsObjectFields;
+
+#define OS_OBJECT_FIELDS_OF(object, out) \
+    do { (out)->name = &(object)->name; (out)->guest_refs = &(object)->guest_refs; \
+         (out)->guest_owned = &(object)->guest_owned; } while (0)
+
+static uint8_t os_object_fields(OsObjectType type, uint32_t id, OsObjectFields* out)
+{
+    switch (type)
+    {
+        case OS_OBJECT_QUEUE:
+        {
+            OsQueueHandle object = os_queue_find_by_id(id);
+            if (object == NULL) return 0U;
+            OS_OBJECT_FIELDS_OF(object, out);
+            return 1U;
+        }
+        case OS_OBJECT_MUTEX:
+        {
+            OsMutexHandle object = os_mutex_find_by_id(id);
+            if (object == NULL) return 0U;
+            OS_OBJECT_FIELDS_OF(object, out);
+            return 1U;
+        }
+        case OS_OBJECT_SEMAPHORE:
+        {
+            OsSemaphoreHandle object = os_semaphore_find_by_id(id);
+            if (object == NULL) return 0U;
+            OS_OBJECT_FIELDS_OF(object, out);
+            return 1U;
+        }
+        case OS_OBJECT_EVENT_GROUP:
+        {
+            OsEventGroupHandle object = os_event_group_find_by_id(id);
+            if (object == NULL) return 0U;
+            OS_OBJECT_FIELDS_OF(object, out);
+            return 1U;
+        }
+        case OS_OBJECT_TIMER:
+        {
+            OsTimerHandle object = os_timer_find_by_id(id);
+            if (object == NULL) return 0U;
+            OS_OBJECT_FIELDS_OF(object, out);
+            return 1U;
+        }
+        default:
+            return 0U;
+    }
+}
+
+static uint8_t os_object_name_matches(const char* object_name, const char* name, uint32_t name_length)
+{
+    return object_name != NULL && strlen(object_name) == name_length &&
+           memcmp(object_name, name, name_length) == 0;
+}
+
+OsStatus os_object_adopt(OsObjectType type, uint32_t id, const char* name, uint32_t name_length)
+{
+    OsObjectFields fields;
+
+    if (!os_object_fields(type, id, &fields))
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    if (name_length > 0U)
+    {
+        char* copy = (char*)malloc((size_t)name_length + 1U);
+        if (copy == NULL)
+        {
+            return OS_STATUS_OUT_OF_MEMORY;
+        }
+        memcpy(copy, name, name_length);
+        copy[name_length] = '\0';
+        free(*fields.name);
+        *fields.name = copy;
+    }
+    *fields.guest_owned = 1U;
+    *fields.guest_refs = 1U;
+    return OS_STATUS_OK;
+}
+
+#define OS_FIND_NAMED(list_head, type_name)                                         \
+    do {                                                                            \
+        type_name object = NULL;                                                    \
+        for (object = (list_head); object != NULL; object = object->next)           \
+        {                                                                           \
+            if (os_object_name_matches(object->name, name, name_length))            \
+            {                                                                       \
+                return object->id;                                                  \
+            }                                                                       \
+        }                                                                           \
+        return 0U;                                                                  \
+    } while (0)
+
+uint32_t os_object_find_by_name(OsObjectType type, const char* name, uint32_t name_length)
+{
+    if (name == NULL || name_length == 0U)
+    {
+        return 0U;
+    }
+    switch (type)
+    {
+        case OS_OBJECT_QUEUE: OS_FIND_NAMED(g_os.queue_list, OsQueueHandle);
+        case OS_OBJECT_MUTEX: OS_FIND_NAMED(g_os.mutex_list, OsMutexHandle);
+        case OS_OBJECT_SEMAPHORE: OS_FIND_NAMED(g_os.semaphore_list, OsSemaphoreHandle);
+        case OS_OBJECT_EVENT_GROUP: OS_FIND_NAMED(g_os.event_group_list, OsEventGroupHandle);
+        case OS_OBJECT_TIMER: OS_FIND_NAMED(g_os.timer_list, OsTimerHandle);
+        default: return 0U;
+    }
+}
+
+void os_object_retain(OsObjectType type, uint32_t id)
+{
+    OsObjectFields fields;
+
+    if (os_object_fields(type, id, &fields) && *fields.guest_owned)
+    {
+        ++*fields.guest_refs;
+    }
+}
+
+void os_object_release(OsObjectType type, uint32_t id)
+{
+    OsObjectFields fields;
+
+    if (!os_object_fields(type, id, &fields) || !*fields.guest_owned)
+    {
+        return;
+    }
+    if (*fields.guest_refs > 1U)
+    {
+        --*fields.guest_refs;
+        return;
+    }
+    switch (type)
+    {
+        case OS_OBJECT_QUEUE: os_queue_delete(os_queue_find_by_id(id)); break;
+        case OS_OBJECT_MUTEX: os_mutex_delete(os_mutex_find_by_id(id)); break;
+        case OS_OBJECT_SEMAPHORE: os_semaphore_delete(os_semaphore_find_by_id(id)); break;
+        case OS_OBJECT_EVENT_GROUP: os_event_group_delete(os_event_group_find_by_id(id)); break;
+        case OS_OBJECT_TIMER: os_timer_delete(os_timer_find_by_id(id)); break;
+        default: break;
+    }
+}
+
+OsStatus os_timer_create_counting(OsTimerHandle* out_timer, uint32_t period_ms, uint8_t auto_reload)
+{
+    OsTimerHandle timer = NULL;
+
+    if (out_timer == NULL || period_ms == 0U || period_ms > (uint32_t)INT32_MAX)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    *out_timer = NULL;
+
+    timer = os_timer_allocate();
+    if (timer == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    timer->id = g_os.next_timer_id++;
+    timer->period_ms = period_ms;
+    timer->auto_reload = auto_reload ? 1U : 0U;
+    timer->counting = 1U;
+    os_timer_list_insert(timer);
+    ++g_os.timer_count;
+    *out_timer = timer;
+    return OS_STATUS_OK;
+}
+
+uint32_t os_timer_take_expirations(OsTimerHandle timer)
+{
+    uint32_t expirations = 0U;
+
+    if (!os_timer_is_in_list(timer))
+    {
+        return 0U;
+    }
+    expirations = timer->expirations;
+    timer->expirations = 0U;
+    return expirations;
+}
+
+uint8_t os_wait_target_ready(const OsWaitTarget* target)
+{
+    switch (target->type)
+    {
+        case OS_OBJECT_QUEUE:
+        {
+            OsQueueHandle queue = os_queue_find_by_id(target->id);
+            return queue != NULL && queue->count > 0U;
+        }
+        case OS_OBJECT_SEMAPHORE:
+        {
+            OsSemaphoreHandle semaphore = os_semaphore_find_by_id(target->id);
+            return semaphore != NULL && semaphore->count > 0U;
+        }
+        case OS_OBJECT_EVENT_GROUP:
+        {
+            OsEventGroupHandle event_group = os_event_group_find_by_id(target->id);
+            return event_group != NULL && event_group->bits != 0U;
+        }
+        case OS_OBJECT_TIMER:
+        {
+            OsTimerHandle timer = os_timer_find_by_id(target->id);
+            return timer != NULL && timer->expirations > 0U;
+        }
+        case OS_OBJECT_TASK:
+        {
+            OsTaskHandle task = os_task_find_by_id(target->id);
+            return task != NULL && task->state == OS_TASK_DEAD;
+        }
+        default:
+            return 0U;
+    }
+}
+
+OsStatus os_wait_any(const OsWaitTarget* targets, uint32_t count, uint32_t timeout_ms, uint32_t* out_index)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsWaitTarget* copy = NULL;
+    OsStatus status = OS_STATUS_OK;
+    uint32_t index = 0U;
+
+    if (targets == NULL || count == 0U || out_index == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        if (os_wait_target_ready(&targets[index]))
+        {
+            *out_index = index;
+            return OS_STATUS_OK;
+        }
+    }
+    if (timeout_ms == 0U)
+    {
+        return OS_STATUS_TIMEOUT;
+    }
+    if (task == NULL || task->state != OS_TASK_RUNNING)
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+    status = os_sync_clock_before_deadline();
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
+    copy = (OsWaitTarget*)malloc((size_t)count * sizeof(OsWaitTarget));
+    if (copy == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    memcpy(copy, targets, (size_t)count * sizeof(OsWaitTarget));
+    status = os_begin_task_wait(task, OS_TASK_WAIT_ANY, timeout_ms);
+    if (status != OS_STATUS_OK)
+    {
+        free(copy);
+        return status;
+    }
+    task->wait_targets = copy;
+    task->wait_target_count = count;
+    task->wait_return_kind = OS_WAIT_RETURN_VALUE;
+    return OS_STATUS_OK;
+}
+
+/* Wake tasks waiting for any of several objects once one of them is ready. */
+static void os_wake_any_waiters(void)
+{
+    OsTaskHandle task = NULL;
+    uint8_t woke = 0U;
+
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        uint32_t index = 0U;
+
+        if (task->state != OS_TASK_WAITING || task->wait_type != OS_TASK_WAIT_ANY)
+        {
+            continue;
+        }
+        for (index = 0U; index < task->wait_target_count; ++index)
+        {
+            if (os_wait_target_ready(&task->wait_targets[index]))
+            {
+                os_complete_task_wait(task, OS_STATUS_OK, index);
+                woke = 1U;
+                break;
+            }
+        }
+    }
+    if (woke)
+    {
+        os_recalculate_task_counters();
+    }
+}
+
+uint32_t os_guest_last_wait_value(void)
+{
+    return g_os.current_task != NULL ? g_os.current_task->last_wait_value : 0U;
+}
+
+uint64_t os_time_ms64(void)
+{
+    return g_os.tick_ms_extended;
+}
+
+#if OS_HAS_PROCESSES
+uint8_t os_child_is_mine(uint32_t child_id)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsTaskHandle child = os_task_find_by_id(child_id);
+
+    return task != NULL && child != NULL && child->parent_id == task->id && !child->exit_collected;
+}
+
+OsStatus os_child_wait(uint32_t child_id, uint32_t timeout_ms, int32_t* out_result)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsTaskHandle child = os_task_find_by_id(child_id);
+
+    if (!os_child_is_mine(child_id) || out_result == NULL)
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+    if (child->state == OS_TASK_DEAD)
+    {
+        *out_result = os_abi_child_result(child->exit_reason, child->exit_code);
+        child->exit_collected = 1U;
+        child->reap_pending = child->auto_reap;
+        return OS_STATUS_OK;
+    }
+    if (timeout_ms == 0U)
+    {
+        return OS_STATUS_TIMEOUT;
+    }
+    task->wait_child_id = child->id;
+    task->wait_return_kind = OS_WAIT_RETURN_VALUE;
+    return os_begin_task_wait(task, OS_TASK_WAIT_CHILD, timeout_ms);
+}
+
+OsStatus os_child_kill(uint32_t child_id)
+{
+    OsTaskHandle child = os_task_find_by_id(child_id);
+
+    if (!os_child_is_mine(child_id))
+    {
+        return OS_STATUS_TASK_NOT_FOUND;
+    }
+    if (child->state == OS_TASK_DEAD)
+    {
+        return OS_STATUS_TASK_DEAD;
+    }
+    /* Keep the dead child until the parent collects it with wait. */
+    os_record_task_exit(child, OS_TASK_EXIT_DELETED, 0U);
+    os_set_task_dead(child);
+    os_recalculate_task_counters();
+    return OS_STATUS_OK;
+}
+
+uint32_t os_current_parent_id(void)
+{
+    return g_os.current_task != NULL ? g_os.current_task->parent_id : 0U;
+}
+#endif
+
+OsStatus os_host_wait_begin(uint32_t* result_slot)
+{
+    return os_import_wait_begin(result_slot);
+}
+
+M3Result os_host_wait_end(void)
+{
+    return os_import_wait_end(0U);
+}
+
+static OsStatus os_object_set_name(OsObjectType type, uint32_t id, const char* name)
+{
+    OsObjectFields fields;
+    size_t length = name != NULL ? strlen(name) : 0U;
+    char* copy = NULL;
+
+    if (id == 0U || !os_object_fields(type, id, &fields))
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    if (length > 0U)
+    {
+        if (os_object_find_by_name(type, name, (uint32_t)length) != 0U)
+        {
+            return OS_STATUS_BUSY;
+        }
+        copy = (char*)malloc(length + 1U);
+        if (copy == NULL)
+        {
+            return OS_STATUS_OUT_OF_MEMORY;
+        }
+        memcpy(copy, name, length + 1U);
+    }
+    free(*fields.name);
+    *fields.name = copy;
+    return OS_STATUS_OK;
+}
+
+OsStatus os_queue_set_name(OsQueueHandle queue, const char* name)
+{
+    return os_object_set_name(OS_OBJECT_QUEUE, os_queue_get_id(queue), name);
+}
+
+OsStatus os_mutex_set_name(OsMutexHandle mutex, const char* name)
+{
+    return os_object_set_name(OS_OBJECT_MUTEX, os_mutex_get_id(mutex), name);
+}
+
+OsStatus os_semaphore_set_name(OsSemaphoreHandle semaphore, const char* name)
+{
+    return os_object_set_name(OS_OBJECT_SEMAPHORE, os_semaphore_get_id(semaphore), name);
+}
+
+OsStatus os_event_group_set_name(OsEventGroupHandle event_group, const char* name)
+{
+    return os_object_set_name(OS_OBJECT_EVENT_GROUP, os_event_group_get_id(event_group), name);
 }

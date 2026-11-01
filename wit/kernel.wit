@@ -1,0 +1,93 @@
+// wasm-rtos ABI 1.0: what a program imports from the kernel.
+//
+// Lowered to core wasm imports by hand ("canonical ABI lite"): every function
+// returns s32, zero or a value on success and a negative `error` otherwise;
+// a string is passed as (pointer, length) in UTF-8; a list<string> as a
+// pointer to (pointer, length) pairs and a count. The import module of an
+// interface is "wasm-rtos:kernel/<interface>@1.0.0". docs/abi.md has the rules.
+
+package wasm-rtos:kernel@1.0.0;
+
+interface types {
+    // A handle to a kernel object; it belongs to the calling program.
+    type handle = s32;
+    type timeout-ms = u32;          // 0xffffffff waits forever
+
+    // Negated in every return value.
+    enum error {
+        ok, fault, inval, badh, nomem, limit, notfound, timeout, aborted, busy,
+        notowner, full, empty, unsupported, toolong, badprogram, isdir, notdir,
+        dead, mismatch, trapped, killed,
+    }
+}
+
+interface handle {
+    use types.{handle};
+    close: func(h: handle) -> s32;
+}
+
+// A name of length 0 makes a private object. A name opens the existing
+// object of that type and name, or creates it; parameters must then match.
+interface sync {
+    use types.{handle, timeout-ms};
+
+    mutex-create: func(name: string) -> handle;
+    mutex-lock: func(mutex: handle, timeout: timeout-ms) -> s32;
+    mutex-unlock: func(mutex: handle) -> s32;
+
+    semaphore-create: func(name: string, max-count: u32, initial-count: u32) -> handle;
+    semaphore-take: func(semaphore: handle, timeout: timeout-ms) -> s32;
+    semaphore-give: func(semaphore: handle) -> s32;
+
+    // 24 event bits.
+    flags event-wait-flags { all, clear }
+    event-create: func(name: string) -> handle;
+    event-set: func(event: handle, bits: u32) -> s32;       // bits after
+    event-clear: func(event: handle, bits: u32) -> s32;     // bits before
+    event-get: func(event: handle) -> s32;
+    event-wait: func(event: handle, bits: u32, %flags: event-wait-flags, timeout: timeout-ms) -> s32;
+
+    // item is a pointer to item-size bytes of the program's memory.
+    queue-create: func(name: string, item-size: u32, capacity: u32) -> handle;
+    queue-send: func(queue: handle, item: u32, timeout: timeout-ms) -> s32;
+    queue-receive: func(queue: handle, item: u32, timeout: timeout-ms) -> s32;
+}
+
+// Timers count expirations; wait for the handle, then read and reset the count.
+interface timer {
+    use types.{handle};
+    flags timer-flags { periodic }
+    create: func(period-ms: u32, %flags: timer-flags) -> handle;
+    start: func(timer: handle) -> s32;
+    stop: func(timer: handle) -> s32;
+    set-period: func(timer: handle, period-ms: u32) -> s32;
+    read: func(timer: handle) -> s32;
+}
+
+interface wait {
+    use types.{handle, timeout-ms};
+    // Index of the first ready handle: a queue holding an item, a semaphore
+    // that can be taken, an event with a bit set, an expired timer, an ended
+    // child. Mutexes cannot be waited for here.
+    any: func(handles: list<handle>, timeout: timeout-ms) -> s32;
+}
+
+interface proc {
+    use types.{handle, timeout-ms};
+    // priority 0 inherits the caller's; stack-size 0 lets the child choose.
+    spawn: func(module: list<u8>, args: list<string>, priority: u32, stack-size: u32) -> handle;
+    spawn-path: func(path: string, args: list<string>, priority: u32, stack-size: u32) -> handle;
+    // The child's exit code, -trapped or -killed; collects the child.
+    wait: func(child: handle, timeout: timeout-ms) -> s32;
+    kill: func(child: handle) -> s32;
+    self: func() -> s32;
+    parent: func() -> s32;
+}
+
+world program {
+    import handle;
+    import sync;
+    import timer;
+    import wait;
+    import proc;
+}
