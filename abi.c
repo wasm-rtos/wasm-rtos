@@ -1500,7 +1500,13 @@ static m3ApiRawFunction(os_abi_i2c_transaction)
         ops[index].kind = (uint8_t)kind;
         ops[index].length = os_abi_read_le32(record + 8U);
     }
-    m3ApiReturn(os_abi_error(os_i2c_transaction(entry->id, ops, count)));
+    /* A port working in the background leaves the program waiting; the end writes the result. */
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_i2c_transaction(entry->id, ops, count));
+    return os_guest_end();
 }
 #endif
 
@@ -1606,7 +1612,12 @@ static m3ApiRawFunction(os_abi_spi_transaction)
         ops[index].read = read;
         ops[index].length = length;
     }
-    m3ApiReturn(os_abi_error(os_spi_transaction(entry->id, ops, count)));
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_spi_transaction(entry->id, ops, count));
+    return os_guest_end();
 }
 #endif
 

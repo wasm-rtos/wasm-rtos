@@ -186,8 +186,8 @@ program's memory, valid during the call. A trace hook sees every finished
 transaction, for logs and bus analyzers.
 
 ```c
-static const OsI2cPort i2c = { NULL, board_i2c_transaction };
-static const OsSpiPort spi = { NULL, board_spi_transaction };
+static const OsI2cPort i2c = { NULL, board_i2c_transaction, NULL };
+static const OsSpiPort spi = { NULL, board_spi_transaction, NULL };  /* synchronous: no finish */
 os_i2c_port_set(&i2c);
 os_spi_port_set(&spi);
 os_i2c_add_bus("i2c0", 0, 400000);
@@ -199,6 +199,27 @@ os_bus_trace_set(log_transaction, NULL);
 An I2C port returns `OS_STATUS_NACK`, `OS_STATUS_BUS_ERROR` or
 `OS_STATUS_TIMEOUT` as the bus reports them; programs get `-WR_ENACK`,
 `-WR_EBUS` and `-WR_ETIMEOUT`.
+
+A port with DMA starts the transfer and returns `OS_STATUS_PENDING`; only the
+calling program waits, the others run. The interrupt at the end of the
+transfer calls `os_bus_complete(kind, bus, status)`, which only records it;
+the next `os_schedule` raises chip select, traces the transaction and wakes
+the program. Until then the buffers belong to the port: the kernel does not
+swap the program out, and before it pauses, cancels or ends the program it
+calls the port's `finish`, which returns once the transfer is over and
+reported.
+
+```c
+static OsStatus lcd_spi_transaction(void* context, uint32_t bus, uint32_t mode, uint32_t hz,
+                                    const OsSpiOp* ops, uint32_t count)
+{
+    start_dma(bus, mode, hz, ops, count);    /* the ops and buffers stay valid until the end */
+    return OS_STATUS_PENDING;
+}
+
+void IRAM_ATTR spi_dma_done_isr(void) { os_bus_complete(OS_BUS_SPI, 2, OS_STATUS_OK); }
+static void lcd_spi_finish(void* context, uint32_t bus) { wait_for_dma_done(bus); }
+```
 
 ### Swapping
 
