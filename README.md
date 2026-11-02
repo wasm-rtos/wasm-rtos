@@ -58,6 +58,10 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_DISPLAY_MAX` | 2 | displays a platform can register |
 | `OS_HAS_INPUT` | 1 | buttons, rotary controls, touch and keyboards for programs (without it, `input` calls return `-WR_EUNSUPPORTED`) |
 | `OS_INPUT_MAX` / `OS_INPUT_QUEUE` / `OS_INPUT_MAX_HELD` | 8 / 32 / 4 | input devices, events queued per device (16 bytes each), keys tracked for long press and repeat |
+| `OS_HAS_I2C` / `OS_HAS_SPI` | 1 / 1 | I2C and SPI buses for programs through ports (without them, the calls return `-WR_EUNSUPPORTED`) |
+| `OS_I2C_MAX_BUSES` / `OS_I2C_MAX_DEVICES` | 2 / 16 | I2C buses, and addresses programs hold open at once |
+| `OS_SPI_MAX_BUSES` / `OS_SPI_MAX_DEVICES` | 2 / 8 | SPI buses, and devices programs hold open at once |
+| `OS_BUS_MAX_OPS` | 16 | ops in one transaction |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
 | `OS_NATIVE_STACK_BUDGET` | 16 KiB | C stack nested Wasm calls may use in one slice before it ends early (0 = unlimited) |
@@ -172,6 +176,30 @@ Report from the context that calls `os_schedule`; an interrupt handler
 should only note what happened (as with `os_gpio_edge`) and let the main
 loop report it.
 
+### Buses
+
+Register the I2C and SPI buses of the device profile with their speed and
+move bytes through a port. The kernel lends devices on them to programs,
+checks every transaction and drives SPI chip selects through the GPIO port,
+so the port gets whole transactions: a list of ops with pointers into the
+program's memory, valid during the call. A trace hook sees every finished
+transaction, for logs and bus analyzers.
+
+```c
+static const OsI2cPort i2c = { NULL, board_i2c_transaction };
+static const OsSpiPort spi = { NULL, board_spi_transaction };
+os_i2c_port_set(&i2c);
+os_spi_port_set(&spi);
+os_i2c_add_bus("i2c0", 0, 400000);
+os_spi_add_bus("spi0", 2, 40000000);
+os_gpio_add_pin("lcd-cs", 5, OS_GPIO_CAN_OUTPUT, 0);
+os_bus_trace_set(log_transaction, NULL);
+```
+
+An I2C port returns `OS_STATUS_NACK`, `OS_STATUS_BUS_ERROR` or
+`OS_STATUS_TIMEOUT` as the bus reports them; programs get `-WR_ENACK`,
+`-WR_EBUS` and `-WR_ETIMEOUT`.
+
 ### Swapping
 
 To move idle programs out of RAM, give the kernel somewhere to put them: a
@@ -224,7 +252,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-child processes, GPIO pins, displays and input devices. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes, GPIO pins, displays, input devices and I2C and SPI buses. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 

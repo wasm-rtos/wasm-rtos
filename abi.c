@@ -56,7 +56,9 @@ enum
     WR_EMISMATCH = 19,
     WR_ETRAPPED = 20,
     WR_EKILLED = 21,
-    WR_EINUSE = 22
+    WR_EINUSE = 22,
+    WR_ENACK = 23,
+    WR_EBUS = 24
 };
 
 #define WR_SYNC_EVENT_ALL 1U
@@ -91,6 +93,8 @@ int32_t os_abi_error(OsStatus status)
         case OS_STATUS_LIMIT_REACHED: return -WR_ELIMIT;
         case OS_STATUS_FILE_NOT_FOUND:
         case OS_STATUS_END_OF_DIRECTORY: return -WR_ENOTFOUND;
+        case OS_STATUS_NACK: return -WR_ENACK;
+        case OS_STATUS_BUS_ERROR: return -WR_EBUS;
         case OS_STATUS_NOT_A_DIRECTORY: return -WR_ENOTDIR;
         case OS_STATUS_IS_A_DIRECTORY: return -WR_EISDIR;
         default: return -WR_EINVAL;
@@ -160,6 +164,20 @@ static void os_abi_drop(OsAbiHandle* handle)
     if (handle->type == OS_OBJECT_INPUT)
     {
         os_input_close(handle->id);
+    }
+    else
+#endif
+#if OS_HAS_I2C
+    if (handle->type == OS_OBJECT_I2C)
+    {
+        os_i2c_close(handle->id);
+    }
+    else
+#endif
+#if OS_HAS_SPI
+    if (handle->type == OS_OBJECT_SPI)
+    {
+        os_spi_close(handle->id);
     }
     else
 #endif
@@ -833,7 +851,8 @@ static m3ApiRawFunction(os_abi_wait_any)
     for (index = 0U; index < count; ++index)
     {
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
-        if (entry == NULL || entry->type == OS_OBJECT_MUTEX || entry->type == OS_OBJECT_DISPLAY)
+        if (entry == NULL || entry->type == OS_OBJECT_MUTEX || entry->type == OS_OBJECT_DISPLAY ||
+            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI)
         {
             m3ApiReturn(-WR_EBADH);
         }
@@ -1387,7 +1406,211 @@ static m3ApiRawFunction(os_abi_input_read)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT
+/* ---------------------------------------------------------------------------
+ * i2c and spi
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_I2C || OS_HAS_SPI
+/* Program memory for a data range of an op; length 0 needs no memory. */
+static int32_t os_abi_bus_data(uint32_t address, uint32_t length, uint8_t** out_data)
+{
+    *out_data = NULL;
+    if (length == 0U)
+    {
+        return 0;
+    }
+    return os_guest_memory(address, length, out_data) == OS_STATUS_OK ? 0 : -WR_EFAULT;
+}
+#endif
+
+#if OS_HAS_I2C
+static m3ApiRawFunction(os_abi_i2c_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, bus_address);
+    m3ApiGetArg(uint32_t, bus_length);
+    m3ApiGetArg(uint32_t, address);
+    m3ApiGetArg(uint32_t, flags);
+    const char* bus = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    if (handle < 0)
+    {
+        m3ApiReturn(handle);
+    }
+    if (bus == NULL || flags != 0U)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    status = os_i2c_open(bus, bus_length, address, &id);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_abi_handle_new(OS_OBJECT_I2C, id);
+    if (handle < 0)
+    {
+        os_i2c_close(id);
+    }
+    m3ApiReturn(handle);
+}
+
+/* ops: count records of 12 bytes, u32 kind, u32 data, u32 length. */
+static m3ApiRawFunction(os_abi_i2c_transaction)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, ops_address);
+    m3ApiGetArg(uint32_t, count);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_I2C);
+    OsI2cOp ops[OS_BUS_MAX_OPS];
+    uint8_t* records = NULL;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (count > OS_BUS_MAX_OPS)
+    {
+        m3ApiReturn(-WR_ELIMIT);
+    }
+    if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        const uint8_t* record = records + index * 12U;
+        int32_t result = os_abi_bus_data(os_abi_read_le32(record + 4U), os_abi_read_le32(record + 8U), &ops[index].data);
+        uint32_t kind = os_abi_read_le32(record);
+        if (result < 0)
+        {
+            m3ApiReturn(result);
+        }
+        if (kind != OS_I2C_WRITE && kind != OS_I2C_READ)
+        {
+            m3ApiReturn(-WR_EINVAL);
+        }
+        ops[index].kind = (uint8_t)kind;
+        ops[index].length = os_abi_read_le32(record + 8U);
+    }
+    m3ApiReturn(os_abi_error(os_i2c_transaction(entry->id, ops, count)));
+}
+#endif
+
+#if OS_HAS_SPI
+static m3ApiRawFunction(os_abi_spi_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, bus_address);
+    m3ApiGetArg(uint32_t, bus_length);
+    m3ApiGetArg(uint32_t, cs_address);
+    m3ApiGetArg(uint32_t, cs_length);
+    m3ApiGetArg(uint32_t, mode);
+    m3ApiGetArg(uint32_t, frequency_hz);
+    const char* bus = NULL;
+    const char* cs = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    if (handle >= 0)
+    {
+        handle = os_abi_read_name(cs_address, cs_length, &cs);
+    }
+    if (handle < 0)
+    {
+        m3ApiReturn(handle);
+    }
+    if (bus == NULL)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    status = os_spi_open(bus, bus_length, cs, cs_length, mode, frequency_hz, &id);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_abi_handle_new(OS_OBJECT_SPI, id);
+    if (handle < 0)
+    {
+        os_spi_close(id);
+    }
+    m3ApiReturn(handle);
+}
+
+/* ops: count records of 16 bytes, u32 kind, u32 write, u32 read, u32 length. */
+static m3ApiRawFunction(os_abi_spi_transaction)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, ops_address);
+    m3ApiGetArg(uint32_t, count);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_SPI);
+    OsSpiOp ops[OS_BUS_MAX_OPS];
+    uint8_t* records = NULL;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (count > OS_BUS_MAX_OPS)
+    {
+        m3ApiReturn(-WR_ELIMIT);
+    }
+    if (count == 0U)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    if (os_guest_memory(ops_address, count * 16U, &records) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        const uint8_t* record = records + index * 16U;
+        uint32_t kind = os_abi_read_le32(record);
+        uint32_t length = os_abi_read_le32(record + 12U);
+        uint8_t* write = NULL;
+        uint8_t* read = NULL;
+        int32_t result = 0;
+
+        if (kind < OS_SPI_WRITE || kind > OS_SPI_DELAY_US)
+        {
+            m3ApiReturn(-WR_EINVAL);
+        }
+        if (kind == OS_SPI_WRITE || kind == OS_SPI_TRANSFER)
+        {
+            result = os_abi_bus_data(os_abi_read_le32(record + 4U), length, &write);
+        }
+        if (result == 0 && (kind == OS_SPI_READ || kind == OS_SPI_TRANSFER))
+        {
+            result = os_abi_bus_data(os_abi_read_le32(record + 8U), length, &read);
+        }
+        if (result < 0)
+        {
+            m3ApiReturn(result);
+        }
+        ops[index].kind = (uint8_t)kind;
+        ops[index].write = write;
+        ops[index].read = read;
+        ops[index].length = length;
+    }
+    m3ApiReturn(os_abi_error(os_spi_transaction(entry->id, ops, count)));
+}
+#endif
+
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || !OS_HAS_SPI
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static m3ApiRawFunction(os_abi_unsupported)
 {
@@ -1734,6 +1957,22 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("input"), "open", "i(iii)", os_abi_unsupported, 2U },
     { WR_MODULE("input"), "get", "i(ii)", os_abi_unsupported, 2U },
     { WR_MODULE("input"), "read", "i(iii)", os_abi_unsupported, 2U },
+#endif
+
+#if OS_HAS_I2C
+    { WR_MODULE("i2c"), "open", "i(iiii)", os_abi_i2c_open, 3U },
+    { WR_MODULE("i2c"), "transaction", "i(iii)", os_abi_i2c_transaction, 3U },
+#else
+    { WR_MODULE("i2c"), "open", "i(iiii)", os_abi_unsupported, 3U },
+    { WR_MODULE("i2c"), "transaction", "i(iii)", os_abi_unsupported, 3U },
+#endif
+
+#if OS_HAS_SPI
+    { WR_MODULE("spi"), "open", "i(iiiiii)", os_abi_spi_open, 3U },
+    { WR_MODULE("spi"), "transaction", "i(iii)", os_abi_spi_transaction, 3U },
+#else
+    { WR_MODULE("spi"), "open", "i(iiiiii)", os_abi_unsupported, 3U },
+    { WR_MODULE("spi"), "transaction", "i(iii)", os_abi_unsupported, 3U },
 #endif
 
 #if defined(OS_ABI_HAS_WASI)

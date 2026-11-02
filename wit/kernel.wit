@@ -1,4 +1,4 @@
-// wasm-rtos ABI 1.2: what a program imports from the kernel.
+// wasm-rtos ABI 1.3: what a program imports from the kernel.
 //
 // Lowered to core wasm imports by hand ("canonical ABI lite"): every function
 // returns s32, zero or a value on success and a negative `error` otherwise;
@@ -7,7 +7,7 @@
 // interface is "wasm-rtos:kernel/<interface>@1.<minor>.0", the minor version
 // the program was built for. docs/abi.md has the rules.
 
-package wasm-rtos:kernel@1.2.0;
+package wasm-rtos:kernel@1.3.0;
 
 interface types {
     // A handle to a kernel object; it belongs to the calling program.
@@ -21,6 +21,10 @@ interface types {
         dead, mismatch, trapped, killed,
         @since(version = 1.1.0)
         inuse,
+        @since(version = 1.3.0)
+        nack,
+        @since(version = 1.3.0)
+        bus,
     }
 }
 
@@ -148,6 +152,37 @@ interface input {
     read: func(device: handle, events: u32, max-events: u32) -> s32;
 }
 
+// A device at an address on an I2C bus named by the device profile
+// ("i2c0"); one program per address, the bus is shared.
+@since(version = 1.3.0)
+interface i2c {
+    use types.{handle};
+    // flags must be 0; address is 7-bit.
+    open: func(bus: string, address: u32, %flags: u32) -> handle;
+    // ops points to count records of 12 bytes, little-endian:
+    //   u32 kind (1 write, 2 read), u32 data, u32 length
+    // A repeated start between a write and a read, a stop at the end;
+    // adjacent ops of one kind continue without a start. No ops: only the
+    // address. -nack when the address or a byte is not acknowledged.
+    transaction: func(device: handle, ops: u32, count: u32) -> s32;
+}
+
+// An SPI bus named by the device profile ("spi0").
+@since(version = 1.3.0)
+interface spi {
+    use types.{handle};
+    // mode: bit 0 CPHA, bit 1 CPOL, bit 2 LSB first. With a chip select
+    // pin name the kernel drives it and the bus is shared; with "" the
+    // program takes the bus and drives chip select through gpio.
+    // frequency-hz 0 or above the bus's maximum gets the maximum.
+    open: func(bus: string, chip-select: string, mode: u32, frequency-hz: u32) -> handle;
+    // ops points to count records of 16 bytes, little-endian:
+    //   u32 kind (1 write, 2 read, 3 transfer, 4 delay-us), u32 write,
+    //   u32 read, u32 length (microseconds for a delay)
+    // Chip select is held for the whole transaction; a read sends zeros.
+    transaction: func(device: handle, ops: u32, count: u32) -> s32;
+}
+
 world program {
     import handle;
     import sync;
@@ -160,4 +195,8 @@ world program {
     import display;
     @since(version = 1.2.0)
     import input;
+    @since(version = 1.3.0)
+    import i2c;
+    @since(version = 1.3.0)
+    import spi;
 }

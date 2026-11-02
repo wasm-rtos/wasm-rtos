@@ -19,7 +19,9 @@ typedef enum OsObjectType
     OS_OBJECT_TASK,
     OS_OBJECT_GPIO,
     OS_OBJECT_DISPLAY,
-    OS_OBJECT_INPUT
+    OS_OBJECT_INPUT,
+    OS_OBJECT_I2C,
+    OS_OBJECT_SPI
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -133,6 +135,10 @@ OsStatus os_gpio_watch(uint32_t id, uint32_t edges);
 /* Edges since the last call; resets the count. */
 uint32_t os_gpio_take_events(uint32_t id);
 uint8_t os_gpio_ready(uint32_t id);
+/* An output whose levels are the pin's own, whatever the board inverts; it starts high (chip selects). */
+OsStatus os_gpio_open_physical(const char* name, uint32_t length, uint32_t* out_id);
+/* The platform's pin number behind a GPIO id. */
+uint32_t os_gpio_pin_number(uint32_t id);
 /* Deliver edges reported by os_gpio_edge; wakes waiting programs. */
 void os_gpio_poll(void);
 void os_gpio_shutdown(void);
@@ -201,6 +207,39 @@ uint8_t os_input_ready(uint32_t id);
 void os_input_update_time(void);
 uint32_t os_input_next_deadline_ms(void);
 void os_input_shutdown(void);
+#endif
+
+#if OS_HAS_I2C
+/* ---- I2C for programs (bus.c) ---------------------------------------------- */
+
+/*
+ * Devices are named by id (1-based). os_i2c_open: OS_STATUS_FILE_NOT_FOUND
+ * for an unknown bus, OS_STATUS_BUSY when another program has the address
+ * open, OS_STATUS_UNSUPPORTED without a port or buses.
+ */
+OsStatus os_i2c_open(const char* bus_name, uint32_t length, uint32_t address, uint32_t* out_id);
+void os_i2c_close(uint32_t id);
+OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count);
+void os_i2c_shutdown(void);
+#endif
+
+#if OS_HAS_SPI
+/* ---- SPI for programs (bus.c) ---------------------------------------------- */
+
+/*
+ * A cs of length 0 takes the whole bus: the program drives chip select
+ * itself. Otherwise the kernel claims the cs pin and drives it around every
+ * transaction, and the bus is shared. OS_STATUS_BUSY when that conflicts.
+ */
+OsStatus os_spi_open(const char* bus_name, uint32_t bus_length, const char* cs, uint32_t cs_length,
+                     uint32_t mode, uint32_t frequency_hz, uint32_t* out_id);
+void os_spi_close(uint32_t id);
+OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count);
+void os_spi_shutdown(void);
+#endif
+
+#if OS_HAS_I2C || OS_HAS_SPI
+void os_bus_shutdown(void);
 #endif
 
 #endif

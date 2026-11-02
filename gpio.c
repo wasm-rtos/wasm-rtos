@@ -333,6 +333,25 @@ OsStatus os_gpio_open(const char* name, uint32_t length, uint32_t flags, uint32_
     return OS_STATUS_OK;
 }
 
+uint32_t os_gpio_pin_number(uint32_t id)
+{
+    OsGpioPin* pin = os_gpio_pin(id);
+    return pin != NULL ? pin->pin : 0U;
+}
+
+OsStatus os_gpio_open_physical(const char* name, uint32_t length, uint32_t* out_id)
+{
+    OsGpioName* entry = os_gpio_find_name(name, length);
+    uint32_t flags = OS_GPIO_OUTPUT | OS_GPIO_INIT_HIGH;
+
+    /* Undo the board's inversion, so 1 is high on the pin. */
+    if (entry != NULL && (g_gpio.pins[entry->pin - 1U].options & OS_GPIO_ACTIVE_LOW) != 0U)
+    {
+        flags |= OS_GPIO_GUEST_ACTIVE_LOW;
+    }
+    return os_gpio_open(name, length, flags, out_id);
+}
+
 void os_gpio_close(uint32_t id)
 {
     OsGpioPin* pin = os_gpio_pin(id);

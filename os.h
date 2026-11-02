@@ -17,6 +17,8 @@
  *   OS_HAS_GPIO       pins for programs through a platform GPIO port
  *   OS_HAS_DISPLAY    displays for programs through a platform display port
  *   OS_HAS_INPUT      buttons, rotary controls, touch and keyboards for programs
+ *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
+ *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -35,6 +37,12 @@
 #endif
 #ifndef OS_HAS_INPUT
 #define OS_HAS_INPUT 1
+#endif
+#ifndef OS_HAS_I2C
+#define OS_HAS_I2C 1
+#endif
+#ifndef OS_HAS_SPI
+#define OS_HAS_SPI 1
 #endif
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
@@ -83,7 +91,9 @@ typedef enum OsStatus
     OS_STATUS_NOT_A_DIRECTORY,
     OS_STATUS_IS_A_DIRECTORY,
     OS_STATUS_READ_ONLY,
-    OS_STATUS_END_OF_DIRECTORY
+    OS_STATUS_END_OF_DIRECTORY,
+    OS_STATUS_NACK,
+    OS_STATUS_BUS_ERROR
 } OsStatus;
 
 typedef enum OsTaskState
@@ -171,7 +181,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
-#define OS_ABI_VERSION_MINOR 2U
+#define OS_ABI_VERSION_MINOR 3U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -864,6 +874,140 @@ OsStatus os_input_touch(uint32_t device, uint32_t contact, uint32_t phase, uint3
 OsStatus os_input_text(uint32_t device, uint32_t code_point);
 /* The id of the task that owns a device, 0 when it is free or unknown. */
 uint32_t os_input_get_owner(uint32_t device);
+#endif
+
+#if OS_HAS_I2C || OS_HAS_SPI
+/*
+ * Buses. The platform registers each bus under the device profile's name
+ * ("i2c0", "spi0") and moves the bytes through a port; the kernel lends
+ * devices on a bus to programs and checks every transaction, so a port only
+ * ever sees whole, valid transactions. Data pointers point into the
+ * program's memory and are valid during the call.
+ *
+ * A transaction runs to the end before the next one starts: one program's
+ * bytes never mix with another's. It blocks the kernel while the port works,
+ * so ports should be quick or use DMA.
+ */
+#ifndef OS_BUS_MAX_OPS
+#define OS_BUS_MAX_OPS 16U
+#endif
+#define OS_BUS_NAME_MAX 32U
+#endif
+
+#if OS_HAS_I2C
+/*
+ * I2C: ops in order, a repeated start where a read follows a write or a
+ * write follows a read, a stop at the end. Adjacent ops of the same kind
+ * continue without a start. No ops: just the address, to see whether a
+ * device answers. Return OS_STATUS_NACK when the address or a byte is not
+ * acknowledged, OS_STATUS_BUS_ERROR for a lost arbitration or a stuck bus,
+ * OS_STATUS_TIMEOUT when a device stretches the clock too long.
+ */
+#define OS_I2C_WRITE 1U
+#define OS_I2C_READ  2U
+
+#ifndef OS_I2C_MAX_BUSES
+#define OS_I2C_MAX_BUSES 2U
+#endif
+/* Devices programs may hold open at once, over all buses. */
+#ifndef OS_I2C_MAX_DEVICES
+#define OS_I2C_MAX_DEVICES 16U
+#endif
+
+typedef struct OsI2cOp
+{
+    uint8_t kind;      /* OS_I2C_WRITE or OS_I2C_READ */
+    uint8_t* data;     /* written from, or read into */
+    uint32_t length;
+} OsI2cOp;
+
+typedef struct OsI2cPort
+{
+    void* context;
+    OsStatus (*transaction)(void* context, uint32_t bus, uint32_t address, uint32_t frequency_hz,
+                            const OsI2cOp* ops, uint32_t count);
+} OsI2cPort;
+
+/* NULL removes the port; programs then get -WR_EUNSUPPORTED. */
+OsStatus os_i2c_port_set(const OsI2cPort* port);
+/* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_I2C_MAX_BUSES. */
+OsStatus os_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz);
+/* The id of the task that has address open on bus, 0 when none. */
+uint32_t os_i2c_get_owner(uint32_t bus, uint32_t address);
+#endif
+
+#if OS_HAS_SPI
+/*
+ * SPI: chip select (when the kernel drives it) goes low before the first op
+ * and high after the last, also after an error. A read sends zeros; a
+ * transfer sends and receives at once, and may read into the bytes it
+ * sends. A delay waits length microseconds with chip select held.
+ * mode: OS_SPI_CPHA | OS_SPI_CPOL (SPI modes 0-3), OS_SPI_LSB_FIRST.
+ */
+#define OS_SPI_WRITE    1U
+#define OS_SPI_READ     2U
+#define OS_SPI_TRANSFER 3U
+#define OS_SPI_DELAY_US 4U
+
+#define OS_SPI_CPHA      0x01U
+#define OS_SPI_CPOL      0x02U
+#define OS_SPI_LSB_FIRST 0x04U
+
+#ifndef OS_SPI_MAX_BUSES
+#define OS_SPI_MAX_BUSES 2U
+#endif
+#ifndef OS_SPI_MAX_DEVICES
+#define OS_SPI_MAX_DEVICES 8U
+#endif
+
+typedef struct OsSpiOp
+{
+    uint8_t kind;          /* OS_SPI_* */
+    const uint8_t* write;  /* WRITE and TRANSFER */
+    uint8_t* read;         /* READ and TRANSFER */
+    uint32_t length;       /* bytes, or microseconds for DELAY_US */
+} OsSpiOp;
+
+typedef struct OsSpiPort
+{
+    void* context;
+    OsStatus (*transaction)(void* context, uint32_t bus, uint32_t mode, uint32_t frequency_hz,
+                            const OsSpiOp* ops, uint32_t count);
+} OsSpiPort;
+
+OsStatus os_spi_port_set(const OsSpiPort* port);
+/* max_hz caps what programs ask for. */
+OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz);
+/* The id of the task that holds bus exclusively or has a device on it with chip select pin cs_pin; 0 when none. */
+uint32_t os_spi_get_owner(uint32_t bus, uint32_t cs_pin);
+#endif
+
+#if OS_HAS_I2C || OS_HAS_SPI
+/*
+ * Every finished transaction, for bus analyzers and logs: which program,
+ * which bus and device, the ops with the bytes written and read (valid
+ * during the call) and the result. device is the I2C address, or the chip
+ * select pin (OS_BUS_NO_CS when the program drives it).
+ */
+#define OS_BUS_I2C 1U
+#define OS_BUS_SPI 2U
+#define OS_BUS_NO_CS 0xFFFFFFFFU
+
+typedef struct OsBusTrace
+{
+    uint8_t kind;           /* OS_BUS_I2C or OS_BUS_SPI */
+    uint32_t bus;
+    uint32_t device;
+    uint32_t task_id;
+    uint32_t frequency_hz;
+    const void* ops;        /* const OsI2cOp* or const OsSpiOp* */
+    uint32_t count;
+    OsStatus status;
+} OsBusTrace;
+
+typedef void (*OsBusTraceFunction)(void* context, const OsBusTrace* trace);
+/* NULL stops tracing. */
+void os_bus_trace_set(OsBusTraceFunction function, void* context);
 #endif
 
 uint32_t os_get_task_count(void);
