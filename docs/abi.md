@@ -1,4 +1,4 @@
-# wasm-rtos ABI 1.2
+# wasm-rtos ABI 1.3
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
@@ -10,6 +10,7 @@ remove anything here.
 | 1.0 | `handle`, `sync`, `timer`, `wait`, `proc`, WASI, metadata |
 | 1.1 | `gpio`, error `WR_EINUSE` |
 | 1.2 | `display`, `input` |
+| 1.3 | `i2c`, `spi`, errors `WR_ENACK`, `WR_EBUS` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -84,6 +85,8 @@ remove anything here.
 | 20 | `WR_ETRAPPED` | `proc.wait`: the child trapped |
 | 21 | `WR_EKILLED` | `proc.wait`: the child was killed |
 | 22 | `WR_EINUSE` | another program uses it (1.1) |
+| 23 | `WR_ENACK` | `i2c`: the address or a byte was not acknowledged (1.3) |
+| 24 | `WR_EBUS` | the bus failed: lost arbitration, stuck lines (1.3) |
 
 ## Interfaces
 
@@ -254,6 +257,60 @@ named as the device profile names them (`"buttons"`, `"bezel"`, `"touch"`,
   spin or drag never floods the queue. When the queue is full anyway, the
   oldest events go and the next `read` starts with a `dropped` event.
 
+### `i2c` (1.3)
+Devices on I2C buses, the buses named as the device profile names them
+(`"i2c0"`). Drivers built once for wasm work on every board that has the
+chip on a bus.
+
+- `open(bus, address, flags)` returns a handle for the device at a 7-bit
+  address; flags are 0. Programs share the bus, one program per address
+  (`-WR_EINUSE`). An unknown bus is `-WR_ENOTFOUND`; a device without I2C,
+  `-WR_EUNSUPPORTED`.
+- `transaction(device, ops, count)` runs up to 16 ops as one transaction.
+  Each op is 12 bytes, little-endian: u32 `kind` (1 write, 2 read), u32
+  `data` (pointer), u32 `length`. Between a write and a read comes a
+  repeated start, at the end a stop; adjacent ops of one kind continue
+  without a start, so a register address and its data can sit in two
+  buffers. With no ops only the address goes out: a scan for devices.
+- Results: 0, `-WR_ENACK` (no device at the address, or it refused a byte),
+  `-WR_EBUS` (lost arbitration, stuck lines), `-WR_ETIMEOUT` (a device held
+  the clock too long), `-WR_EFAULT`, `-WR_EINVAL`, `-WR_ELIMIT` (more than
+  16 ops).
+- The bus speed is the profile's. C helpers: `wr_i2c_write`, `wr_i2c_read`,
+  `wr_i2c_write_read` (register reads).
+
+### `spi` (1.3)
+SPI buses named as the device profile names them (`"spi0"`).
+
+- `open(bus, chip_select, mode, frequency_hz)` returns a handle.
+  - With a chip select pin name (a `gpio` name such as `"lcd-cs"`), the
+    kernel owns that pin and drives it low around every transaction; other
+    programs may use other chip selects on the same bus.
+  - With an empty name the program takes the whole bus (`-WR_EINUSE` while
+    others use it, and they get it while it does) and drives chip select
+    itself through `gpio`, as Arduino libraries do.
+  - `mode`: bit 0 CPHA, bit 1 CPOL (SPI modes 0-3), bit 2 least significant
+    bit first. `frequency_hz` is the most the device takes; 0, or more than
+    the bus's maximum, gets the bus's maximum.
+- `transaction(device, ops, count)` runs 1 to 16 ops with chip select held
+  throughout. Each op is 16 bytes, little-endian: u32 `kind`, u32 `write`,
+  u32 `read`, u32 `length`.
+
+  | Kind | |
+  |---|---|
+  | 1 write | sends `length` bytes from `write` |
+  | 2 read | receives `length` bytes into `read`, sending zeros |
+  | 3 transfer | sends from `write` and receives into `read` at once; they may be the same buffer |
+  | 4 delay | waits `length` microseconds (at most 65535), chip select still low |
+
+- Results: 0, `-WR_EBUS`, `-WR_EFAULT`, `-WR_EINVAL`, `-WR_ELIMIT`.
+- Data/command lines, resets and interrupts of a chip are `gpio` pins: set
+  them between transactions.
+
+A transaction runs to its end before another starts, so one program's bytes
+never mix with another's. The kernel reads and writes the program's buffers
+in place during the call.
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -283,7 +340,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.2 states 65538 (1.2); kernels refuse only another major.
+A program for 1.3 states 65539 (1.3); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
@@ -296,8 +353,7 @@ These names are taken; their shape will follow the rules above.
   descriptors.
 - `wasm-rtos:kernel/device`: what the device offers (display size and shape,
   inputs, sensors), so programs ask instead of assuming.
-- `wasm-rtos:kernel/i2c`, `spi`, `uart`, `adc`, `pwm`: buses with whole
-  transactions and explicit errors, the same on every port.
+- `wasm-rtos:kernel/uart`, `adc`, `pwm`: the same way as `i2c` and `spi`.
 - `wasm-rtos:kernel/power`, `system`, `ui`: sleep and wake sources, battery
   and indicators, windows and dialogs. `ui` will hand programs windows that
   behave like `display` and `input` devices.

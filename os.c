@@ -576,6 +576,9 @@ void os_shutdown(void)
     os_event_group_free_all();
     os_timer_free_all();
     os_host_import_free_list();
+#if OS_HAS_I2C || OS_HAS_SPI
+    os_bus_shutdown();
+#endif
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
