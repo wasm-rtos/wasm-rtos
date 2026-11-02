@@ -10,6 +10,7 @@
 #endif
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -227,6 +228,7 @@ typedef struct OsState
     uint32_t* import_return_slot;
     OsSwapPort swap_port;
     uint8_t has_swap_port;
+    OsOutputPort output_port;
     uint8_t initialized;
     uint8_t time_update_initialized;
     uint8_t preempt_requested;
@@ -304,6 +306,9 @@ struct OsTask
     uint8_t wasm_needs_resume;
     uint8_t delete_requested;
     uint32_t run_count;
+    uint64_t fuel_used;
+    /* Fuel a stop request took back during the current slice; it was not spent. */
+    uint64_t fuel_taken_back;
 
 #if OS_HAS_PROCESSES
     /* Process state for tasks started through os_task_spawn */
@@ -452,6 +457,7 @@ static void os_advance_tick_ms(uint32_t milliseconds);
 static OsStatus os_sync_clock_before_deadline(void);
 static void os_clock_rearm(void);
 static OsTaskRunResult os_run_task_slice(OsTaskHandle task);
+static void os_task_count_fuel(OsTaskHandle task);
 #if d_m3HasHeapAccounting
 /* Charge interpreter allocations to task until the returned account is restored. */
 #define OS_HEAP_ENTER(task) M3HeapAccount* os_previous_heap_account = m3_SetHeapAccount((task)->heap_account)
@@ -2509,6 +2515,40 @@ OsStatus os_swap_port_set(const OsSwapPort* port)
     return OS_STATUS_OK;
 }
 
+OsStatus os_output_port_set(const OsOutputPort* port)
+{
+    if (port == NULL)
+    {
+        memset(&g_os.output_port, 0, sizeof(g_os.output_port));
+        return OS_STATUS_OK;
+    }
+    if (port->write == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    g_os.output_port = *port;
+    return OS_STATUS_OK;
+}
+
+void os_output_write(uint32_t fd, const void* data, uint32_t size)
+{
+    if (size == 0U)
+    {
+        return;
+    }
+    if (g_os.output_port.write != NULL)
+    {
+        uint32_t task_id = g_os.current_task != NULL ? g_os.current_task->id : 0U;
+        g_os.output_port.write(g_os.output_port.context, task_id, fd, data, size);
+        return;
+    }
+    {
+        FILE* stream = fd == 2U ? stderr : stdout;
+        fwrite(data, 1U, size, stream);
+        fflush(stream);
+    }
+}
+
 uint8_t os_task_is_swapped(OsTaskHandle task)
 {
     return task != NULL && os_task_is_in_list(task) && task->swapped ? 1U : 0U;
@@ -2776,6 +2816,16 @@ uint32_t os_task_get_run_count(OsTaskHandle task)
     }
 
     return task->run_count;
+}
+
+uint64_t os_task_get_fuel_used(OsTaskHandle task)
+{
+    if (task == NULL || !os_task_is_in_list(task))
+    {
+        return 0U;
+    }
+
+    return task->fuel_used;
 }
 
 OsStatus os_task_get_last_wait_status(OsTaskHandle task)
@@ -3660,6 +3710,7 @@ OsStatus os_schedule(void)
         OS_HEAP_LEAVE();
     }
     ++task->run_count;
+    os_task_count_fuel(task);
 
     if (g_os.current_task == task)
     {
@@ -6016,6 +6067,23 @@ static void os_clock_rearm(void)
     g_os.clock_port.arm_wakeup(g_os.clock_port.context, delay_ms);
 }
 
+/* Fuel the slice that just ended spent: what it got, less what is left or was taken back. */
+static void os_task_count_fuel(OsTaskHandle task)
+{
+    uint64_t unspent = 0U;
+
+    if (task->wasm_runtime == NULL || !m3_IsFuelEnabled(task->wasm_runtime))
+    {
+        return;
+    }
+    unspent = m3_GetFuel(task->wasm_runtime) + task->fuel_taken_back;
+    if (unspent < OS_TASK_SLICE_FUEL)
+    {
+        task->fuel_used += OS_TASK_SLICE_FUEL - unspent;
+    }
+    task->fuel_taken_back = 0U;
+}
+
 static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
 {
     M3Result result = m3Err_none;
@@ -6038,6 +6106,7 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
 
     task->wasm_stack_base = (uint8_t*)task->wasm_runtime->stack;
     m3_SetFuel(task->wasm_runtime, OS_TASK_SLICE_FUEL);
+    task->fuel_taken_back = 0U;
     if (g_os.preempt_requested)
     {
         os_request_task_stop(task);
@@ -6574,6 +6643,10 @@ static void os_request_task_stop(OsTaskHandle task)
         return;
     }
 
+    if (task == g_os.current_task)
+    {
+        task->fuel_taken_back += m3_GetFuel(task->wasm_runtime);
+    }
     m3_SetFuel(task->wasm_runtime, 0U);
 }
 

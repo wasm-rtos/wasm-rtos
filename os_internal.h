@@ -44,6 +44,8 @@ OsStatus os_guest_memory(uint32_t address, uint32_t length, uint8_t** out_memory
 uint32_t os_guest_last_wait_value(void);
 /* Kernel time in milliseconds, without the 32-bit wrap. */
 uint64_t os_time_ms64(void);
+/* Program output on fd 1 or 2, from the current task, to the output port. */
+void os_output_write(uint32_t fd, const void* data, uint32_t size);
 
 /* Per-task state owned by the ABI layer, released when the task ends. */
 void** os_task_abi_state(OsTaskHandle task);

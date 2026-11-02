@@ -109,6 +109,8 @@ void os_fs_image_close(OsFsImage* image);
 
 /* Kernel internal. */
 M3Result os_fs_link_wasi(IM3Module module);
+/* WASI errno for a write to fd other than stdout and stderr: files are read only. */
+uint16_t os_fs_write_error(uint32_t fd);
 void os_fs_release_task(uint32_t task_id);
 void os_fs_shutdown(void);
 
