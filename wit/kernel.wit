@@ -1,4 +1,4 @@
-// wasm-rtos ABI 1.4: what a program imports from the kernel.
+// wasm-rtos ABI 1.5: what a program imports from the kernel.
 //
 // Lowered to core wasm imports by hand ("canonical ABI lite"): every function
 // returns s32, zero or a value on success and a negative `error` otherwise;
@@ -7,7 +7,7 @@
 // interface is "wasm-rtos:kernel/<interface>@1.<minor>.0", the minor version
 // the program was built for. docs/abi.md has the rules.
 
-package wasm-rtos:kernel@1.4.0;
+package wasm-rtos:kernel@1.5.0;
 
 interface types {
     // A handle to a kernel object; it belongs to the calling program.
@@ -225,6 +225,25 @@ interface uart {
     get: func(port: handle, property: property) -> s32;
 }
 
+// Timed pulse trains on a GPIO pin, owned like an opened pin.
+@since(version = 1.5.0)
+interface pulse {
+    use types.{handle, timeout-ms};
+    flags pulse-flags { receive, idle-high }
+    enum property { reserved, resolution }
+    open: func(name: string, %flags: pulse-flags) -> handle;
+    // items points to count 32-bit words, 4-byte aligned: bit 31 the level,
+    // bits 0-30 the time in ns. carrier-hz 0: plain levels.
+    send: func(channel: handle, items: u32, count: u32, carrier-hz: u32) -> s32;
+    // Bytes, most significant bit first; each bit is (high, low) ns.
+    send-bits: func(channel: handle, data: list<u8>, zero-high-ns: u32, zero-low-ns: u32, one-high-ns: u32,
+                    one-low-ns: u32) -> s32;
+    // From the first edge until idle-ns without one or max items: the count;
+    // -timeout when no edge comes within timeout.
+    receive: func(channel: handle, items: u32, max: u32, idle-ns: u32, timeout: timeout-ms) -> s32;
+    get: func(channel: handle, property: property) -> s32;
+}
+
 world program {
     import handle;
     import sync;
@@ -247,4 +266,6 @@ world program {
     import pwm;
     @since(version = 1.4.0)
     import uart;
+    @since(version = 1.5.0)
+    import pulse;
 }

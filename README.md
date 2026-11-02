@@ -65,6 +65,7 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_HAS_ADC` / `OS_ADC_MAX` | 1 / 8 | analog inputs, and channels a platform can register |
 | `OS_HAS_PWM` / `OS_PWM_MAX` | `OS_HAS_GPIO` / 8 | PWM outputs on GPIO pins with `OS_GPIO_CAN_PWM`, and outputs at once |
 | `OS_HAS_UART` / `OS_UART_MAX` / `OS_UART_RX_BUFFER` | 1 / 4 / 256 | serial ports, and received bytes kept per port |
+| `OS_HAS_PULSE` / `OS_PULSE_MAX` | `OS_HAS_GPIO` / 4 | timed pulse trains on GPIO pins with `OS_GPIO_CAN_PULSE`, and channels at once |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
 | `OS_NATIVE_STACK_BUDGET` | 16 KiB | C stack nested Wasm calls may use in one slice before it ends early (0 = unlimited) |
@@ -258,6 +259,26 @@ bytes; when room comes back it calls `os_uart_writable`. Received bytes go
 to `os_uart_receive`, errors to `os_uart_error`; all three are safe in an
 interrupt handler.
 
+### Pulse trains
+
+Pins with `OS_GPIO_CAN_PULSE` can send and capture timed pulse trains
+through a pulse port backed by hardware made for it: the ESP32's RMT, the
+RP2040's PIO, a timer with DMA. Items are a level bit and nanoseconds; the
+port rounds to its tick (`resolution_ns`). `send_bits` encodes bytes bit by
+bit on the fly, as an RMT bytes encoder does, so 300 addressable LEDs take
+900 bytes, not 28 KB of items. Like background bus transfers, the port may
+return `OS_STATUS_PENDING` and report the end with `os_pulse_complete`
+(interrupt-safe); `finish` must end the work at once, and `receive` times
+its own timeout.
+
+```c
+static const OsPulsePort rmt = { NULL, rmt_configure, rmt_send, rmt_send_bits, rmt_receive,
+                                 rmt_finish, rmt_release, 25 /* ns per tick at 40 MHz */ };
+os_pulse_port_set(&rmt);
+os_gpio_add_pin("strip", 18, OS_GPIO_CAN_OUTPUT | OS_GPIO_CAN_PULSE, 0);
+os_gpio_add_pin("ir-in", 19, OS_GPIO_CAN_INPUT | OS_GPIO_CAN_PULSE, 0);
+```
+
 ### Swapping
 
 To move idle programs out of RAM, give the kernel somewhere to put them: a
@@ -310,7 +331,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-child processes, GPIO pins, displays, input devices, I2C and SPI buses, analog inputs, PWM outputs and serial ports. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes, GPIO pins, displays, input devices, I2C and SPI buses, analog inputs, PWM outputs, serial ports and pulse trains. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 
