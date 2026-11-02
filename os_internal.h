@@ -17,7 +17,9 @@ typedef enum OsObjectType
     OS_OBJECT_EVENT_GROUP,
     OS_OBJECT_TIMER,
     OS_OBJECT_TASK,
-    OS_OBJECT_GPIO
+    OS_OBJECT_GPIO,
+    OS_OBJECT_DISPLAY,
+    OS_OBJECT_INPUT
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -134,6 +136,71 @@ uint8_t os_gpio_ready(uint32_t id);
 /* Deliver edges reported by os_gpio_edge; wakes waiting programs. */
 void os_gpio_poll(void);
 void os_gpio_shutdown(void);
+#endif
+
+#if OS_HAS_DISPLAY
+/* ---- Displays for programs (display.c) ------------------------------------ */
+
+/* What display-get reports; unknown properties are OS_STATUS_UNSUPPORTED. */
+#define OS_DISPLAY_PROP_WIDTH      1U
+#define OS_DISPLAY_PROP_HEIGHT     2U
+#define OS_DISPLAY_PROP_SHAPE      3U
+#define OS_DISPLAY_PROP_FORMAT     4U
+#define OS_DISPLAY_PROP_FORMATS    5U
+#define OS_DISPLAY_PROP_DPI        6U
+#define OS_DISPLAY_PROP_BRIGHTNESS 7U
+
+/*
+ * Displays are named by id (1-based). os_display_open: OS_STATUS_FILE_NOT_FOUND
+ * for an unknown name, OS_STATUS_BUSY when another program owns it.
+ * Rectangles must lie inside the display and data must hold exactly the
+ * rectangle (OS_STATUS_INVALID_ARGUMENT); a format the display does not
+ * accept is OS_STATUS_UNSUPPORTED.
+ */
+OsStatus os_display_open(const char* name, uint32_t length, uint32_t* out_id);
+void os_display_close(uint32_t id);
+OsStatus os_display_get(uint32_t id, uint32_t property, uint32_t* out_value);
+OsStatus os_display_write(uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                          uint32_t format, const void* pixels, uint32_t size);
+OsStatus os_display_fill(uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                         uint32_t format, uint32_t color);
+OsStatus os_display_flush(uint32_t id);
+OsStatus os_display_set_brightness(uint32_t id, uint32_t level);
+void os_display_shutdown(void);
+#endif
+
+#if OS_HAS_INPUT
+/* ---- Input devices for programs (input.c) --------------------------------- */
+
+#define OS_INPUT_PROP_KIND           1U
+#define OS_INPUT_PROP_WIDTH          2U
+#define OS_INPUT_PROP_HEIGHT         3U
+#define OS_INPUT_PROP_STEPS_PER_TURN 4U
+
+/* One event as programs read it: 16 bytes, little-endian. */
+#define OS_INPUT_EVENT_SIZE 16U
+#define OS_INPUT_EVENT_KEY     1U
+#define OS_INPUT_EVENT_ROTATE  2U
+#define OS_INPUT_EVENT_TOUCH   3U
+#define OS_INPUT_EVENT_TEXT    4U
+#define OS_INPUT_EVENT_DROPPED 5U
+/* Key event values. */
+#define OS_INPUT_KEY_RELEASED   0
+#define OS_INPUT_KEY_PRESSED    1
+#define OS_INPUT_KEY_REPEATED   2
+#define OS_INPUT_KEY_LONG_PRESS 3
+
+/* Devices are named by id (1-based), like displays. */
+OsStatus os_input_open(const char* name, uint32_t length, uint32_t* out_id);
+void os_input_close(uint32_t id);
+OsStatus os_input_get(uint32_t id, uint32_t property, uint32_t* out_value);
+/* Move up to max_events events into out (OS_INPUT_EVENT_SIZE bytes each); returns how many. */
+uint32_t os_input_read(uint32_t id, uint8_t* out, uint32_t max_events);
+uint8_t os_input_ready(uint32_t id);
+/* Long presses and repeats that are due; the next one, in ms from now (OS_WAIT_FOREVER: none). */
+void os_input_update_time(void);
+uint32_t os_input_next_deadline_ms(void);
+void os_input_shutdown(void);
 #endif
 
 #endif

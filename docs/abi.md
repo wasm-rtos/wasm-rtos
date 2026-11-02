@@ -1,4 +1,4 @@
-# wasm-rtos ABI 1.1
+# wasm-rtos ABI 1.2
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
@@ -9,6 +9,7 @@ remove anything here.
 |---|---|
 | 1.0 | `handle`, `sync`, `timer`, `wait`, `proc`, WASI, metadata |
 | 1.1 | `gpio`, error `WR_EINUSE` |
+| 1.2 | `display`, `input` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -159,6 +160,100 @@ Pins, named as the device profile names them (`"led"`, `"button-a"`,
 Timing finer than the scheduler, such as bit-banged protocols, is not what
 `gpio` is for; buses and pulse interfaces get their own interfaces.
 
+### `display` (1.2)
+Screens, named as the device profile names them (`"main"` for the primary
+one). A program draws by rectangles, the way graphics libraries hand over
+what they rendered, so it never needs a whole frame in memory.
+
+- `open(name, flags)` returns a handle; flags are 0. A display has one owner
+  at a time (`-WR_EINUSE`); when the handle closes the picture stays until
+  the next owner draws. An unknown name is `-WR_ENOTFOUND`; a device without
+  displays gives `-WR_EUNSUPPORTED`.
+- `get(display, property)` describes it, so a program adapts instead of
+  assuming:
+
+  | Property | Value |
+  |---|---|
+  | 1 `width`, 2 `height` | pixels |
+  | 3 `shape` | 0 rectangle, 1 round: a circle inscribed in width x height; pixels outside it are not shown |
+  | 4 `format` | the panel's own pixel format, the fastest to write |
+  | 5 `formats` | bit `1 << format` for every format `write` accepts |
+  | 6 `dpi` | pixels per inch, 0 when unknown |
+  | 7 `brightness` | 0-255; `-WR_EUNSUPPORTED` without brightness control |
+
+  A property this kernel does not know is `-WR_EUNSUPPORTED`, so programs
+  may ask for properties of later versions.
+- Pixel formats, as the program stores them:
+
+  | Format | Layout |
+  |---|---|
+  | 1 `mono1` | 1 bit per pixel, 1 = lit; each row starts on a byte; the leftmost pixel is the top bit |
+  | 2 `rgb565` | 16-bit little-endian, red in bits 15-11, green 10-5, blue 4-0 |
+  | 3 `xrgb8888` | 32-bit little-endian `0x00RRGGBB` |
+
+  The kernel does not convert: a program writes a format the display
+  accepts, at best its own.
+- `write(display, x, y, width, height, format, pixels, length)` puts a
+  rectangle on the display. It must lie inside the display and `length` must
+  be exactly the rectangle's bytes (`-WR_EINVAL`); another format is
+  `-WR_EUNSUPPORTED`. The kernel reads the pixels during the call, so the
+  buffer can be reused when it returns.
+- `fill(display, x, y, width, height, format, color)` paints a rectangle one
+  pixel value, for clearing without a buffer.
+- `flush(display)`: what was written shows no later than this. Displays that
+  draw at once make it free; e-paper and displays that send whole frames
+  show the picture here. Call it when a frame is complete.
+- `set-brightness(display, level)`, 0-255.
+
+### `input` (1.2)
+Buttons, rotary controls (a bezel, a knob), touch surfaces and keyboards,
+named as the device profile names them (`"buttons"`, `"bezel"`, `"touch"`,
+`"keyboard"`).
+
+- `open(name, flags)` returns a handle; flags are 0. A device has one owner
+  at a time (`-WR_EINUSE`). An unknown name is `-WR_ENOTFOUND`; a device
+  without any input gives `-WR_EUNSUPPORTED`. Events are kept only while a
+  program owns the device: what happened before `open` does not arrive.
+- `get(device, property)`: 1 `kind` (1 buttons, 2 rotary, 3 touch,
+  4 keyboard), 2 `width` and 3 `height` (touch coordinates run from 0 to
+  width-1 and height-1, the pixels of the display it covers), 4
+  `steps-per-turn` (rotary detents in a full turn, 0 when unknown). Unknown
+  properties are `-WR_EUNSUPPORTED`.
+- The handle is ready for `wait.any` while events are queued.
+  `read(device, events, max_events)` moves up to `max_events` of them into
+  `events` and returns how many; 0 means none, it never blocks.
+- An event is 16 bytes, little-endian:
+
+  | Offset | Field | |
+  |---|---|---|
+  | 0 | u8 `type` | see below |
+  | 1 | u8 | reserved, 0 |
+  | 2 | u16 `code` | key code, axis or contact |
+  | 4 | s32 `value` | |
+  | 8 | u16 `x`, 10 u16 `y` | touch position, else 0 |
+  | 12 | u32 `time` | kernel time in ms (low 32 bits) when it happened |
+
+  | Type | `code` | `value` |
+  |---|---|---|
+  | 1 key | Linux key code (`KEY_*`, `BTN_*`) | 0 released, 1 pressed, 2 repeated, 3 long press |
+  | 2 rotate | Linux axis: `REL_DIAL` (7) for a bezel or dial, `REL_WHEEL` (8) | detents, positive clockwise |
+  | 3 touch | contact, 0 for the first finger | 0 up, 1 down, 2 move |
+  | 4 text | 0 | a Unicode code point a keyboard typed |
+  | 5 dropped | 0 | events lost before the ones that follow |
+
+- Keys use the Linux input event codes (`linux/input-event-codes.h`): one
+  table for keyboards and for device buttons such as `KEY_BACK` or
+  `KEY_SELECT`.
+- Long presses and repeats come from the kernel, with the timings of the
+  device profile, so they feel the same in every program: a key held for
+  the long-press time reports `3` once; a key that repeats reports `2` at
+  the repeat rate until it is released. Gestures (double clicks, swipes) are
+  for libraries, from the event times and positions.
+- Turns the program has not read yet add up into one event, and so do
+  unread moves of one contact (only the last position stays), so a fast
+  spin or drag never floods the queue. When the queue is full anyway, the
+  oldest events go and the next `read` starts with a `dropped` event.
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -188,7 +283,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.1 states 65537 (1.1); kernels refuse only another major.
+A program for 1.2 states 65538 (1.2); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
@@ -203,9 +298,9 @@ These names are taken; their shape will follow the rules above.
   inputs, sensors), so programs ask instead of assuming.
 - `wasm-rtos:kernel/i2c`, `spi`, `uart`, `adc`, `pwm`: buses with whole
   transactions and explicit errors, the same on every port.
-- `wasm-rtos:kernel/input`: rotary, button and touch events.
-- `wasm-rtos:kernel/display`, `power`, `system`, `ui`: drawing, sleep and
-  wake sources, battery and indicators, windows and dialogs.
+- `wasm-rtos:kernel/power`, `system`, `ui`: sleep and wake sources, battery
+  and indicators, windows and dialogs. `ui` will hand programs windows that
+  behave like `display` and `input` devices.
 
 ## Not in 1.0
 
