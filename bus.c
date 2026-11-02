@@ -8,6 +8,7 @@
 
 #if OS_HAS_I2C || OS_HAS_SPI
 
+#include <stdlib.h>
 #include <string.h>
 
 /* A background transfer's end is recorded by interrupt handlers and taken by the kernel. */
@@ -31,9 +32,9 @@ typedef atomic_uchar OsBusFlag;
 /* Longest delay op, in microseconds. */
 #define OS_SPI_MAX_DELAY_US 65535U
 
+/* Allocated when the platform registers the bus, with room for a background transfer's ops. */
 typedef struct OsBus
 {
-    uint8_t used;
     uint32_t bus;
     char name[OS_BUS_NAME_MAX + 1U];
     uint8_t name_length;
@@ -62,10 +63,11 @@ static struct
     void* context;
 } g_bus_trace;
 
-static OsStatus os_bus_add(OsBus* buses, uint32_t max, const char* name, uint32_t bus, uint32_t frequency_hz)
+static OsStatus os_bus_add(OsBus** buses, uint32_t max, const char* name, uint32_t bus, uint32_t frequency_hz)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
     OsBus* slot = NULL;
+    uint32_t free_index = max;
     uint32_t index = 0U;
 
     if (length == 0U || length > OS_BUS_NAME_MAX || frequency_hz == 0U)
@@ -74,46 +76,62 @@ static OsStatus os_bus_add(OsBus* buses, uint32_t max, const char* name, uint32_
     }
     for (index = 0U; index < max; ++index)
     {
-        if (buses[index].used &&
-            (buses[index].bus == bus ||
-             (buses[index].name_length == length && memcmp(buses[index].name, name, length) == 0)))
+        if (buses[index] != NULL &&
+            (buses[index]->bus == bus ||
+             (buses[index]->name_length == length && memcmp(buses[index]->name, name, length) == 0)))
         {
             return OS_STATUS_BUSY;
         }
-        if (!buses[index].used && slot == NULL)
+        if (buses[index] == NULL && free_index == max)
         {
-            slot = &buses[index];
+            free_index = index;
         }
     }
-    if (slot == NULL)
+    if (free_index == max)
     {
         return OS_STATUS_LIMIT_REACHED;
     }
-    memset(slot, 0, sizeof(*slot));
-    slot->used = 1U;
+    slot = (OsBus*)calloc(1U, sizeof(OsBus));
+    if (slot == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
     slot->bus = bus;
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
     slot->frequency_hz = frequency_hz;
+    buses[free_index] = slot;
     return OS_STATUS_OK;
 }
 
 /* The bus called name; OS_STATUS_UNSUPPORTED when there are no buses at all. */
-static OsStatus os_bus_find(OsBus* buses, uint32_t max, const char* name, uint32_t length, OsBus** out_bus)
+static OsStatus os_bus_find(OsBus** buses, uint32_t max, const char* name, uint32_t length, OsBus** out_bus)
 {
     uint8_t any = 0U;
     uint32_t index = 0U;
 
     for (index = 0U; index < max; ++index)
     {
-        any |= buses[index].used;
-        if (buses[index].used && buses[index].name_length == length && memcmp(buses[index].name, name, length) == 0)
+        any |= buses[index] != NULL;
+        if (buses[index] != NULL && buses[index]->name_length == length &&
+            memcmp(buses[index]->name, name, length) == 0)
         {
-            *out_bus = &buses[index];
+            *out_bus = buses[index];
             return OS_STATUS_OK;
         }
     }
     return any ? OS_STATUS_FILE_NOT_FOUND : OS_STATUS_UNSUPPORTED;
+}
+
+static void os_bus_free_all(OsBus** buses, uint32_t max)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < max; ++index)
+    {
+        free(buses[index]);
+        buses[index] = NULL;
+    }
 }
 
 static void os_bus_report(uint8_t kind, uint32_t bus, uint32_t device, uint32_t task_id, uint32_t frequency_hz,
@@ -278,7 +296,7 @@ static struct
 {
     OsI2cPort port;
     uint8_t has_port;
-    OsBus buses[OS_I2C_MAX_BUSES];
+    OsBus* buses[OS_I2C_MAX_BUSES];
     OsI2cDevice devices[OS_I2C_MAX_DEVICES];
 } g_i2c;
 
@@ -409,6 +427,7 @@ OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count)
 
 void os_i2c_shutdown(void)
 {
+    os_bus_free_all(g_i2c.buses, OS_I2C_MAX_BUSES);
     memset(&g_i2c, 0, sizeof(g_i2c));
 }
 #endif
@@ -434,7 +453,7 @@ static struct
 {
     OsSpiPort port;
     uint8_t has_port;
-    OsBus buses[OS_SPI_MAX_BUSES];
+    OsBus* buses[OS_SPI_MAX_BUSES];
     OsSpiDevice devices[OS_SPI_MAX_DEVICES];
 } g_spi;
 
@@ -596,13 +615,14 @@ OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count)
 
 void os_spi_shutdown(void)
 {
+    os_bus_free_all(g_spi.buses, OS_SPI_MAX_BUSES);
     memset(&g_spi, 0, sizeof(g_spi));
 }
 #endif
 
 static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
 {
-    OsBus* buses = NULL;
+    OsBus** buses = NULL;
     uint32_t max = 0U;
     uint32_t index = 0U;
 
@@ -622,9 +642,9 @@ static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
 #endif
     for (index = 0U; index < max; ++index)
     {
-        if (buses[index].used && buses[index].bus == number)
+        if (buses[index] != NULL && buses[index]->bus == number)
         {
-            return &buses[index];
+            return buses[index];
         }
     }
     return NULL;
@@ -671,13 +691,19 @@ static void os_bus_each(void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id
 #if OS_HAS_I2C
     for (index = 0U; index < OS_I2C_MAX_BUSES; ++index)
     {
-        visit(OS_BUS_I2C, &g_i2c.buses[index], task_id);
+        if (g_i2c.buses[index] != NULL)
+        {
+            visit(OS_BUS_I2C, g_i2c.buses[index], task_id);
+        }
     }
 #endif
 #if OS_HAS_SPI
     for (index = 0U; index < OS_SPI_MAX_BUSES; ++index)
     {
-        visit(OS_BUS_SPI, &g_spi.buses[index], task_id);
+        if (g_spi.buses[index] != NULL)
+        {
+            visit(OS_BUS_SPI, g_spi.buses[index], task_id);
+        }
     }
 #endif
     (void)index;
@@ -686,7 +712,7 @@ static void os_bus_each(void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id
 static void os_bus_poll_one(uint8_t kind, OsBus* bus, uint32_t task_id)
 {
     (void)task_id;
-    if (bus->used && bus->busy && OS_BUS_FLAG_TAKE(bus->done))
+    if (bus->busy && OS_BUS_FLAG_TAKE(bus->done))
     {
         os_bus_deliver(kind, bus);
     }
@@ -694,7 +720,7 @@ static void os_bus_poll_one(uint8_t kind, OsBus* bus, uint32_t task_id)
 
 static void os_bus_finish_one(uint8_t kind, OsBus* bus, uint32_t task_id)
 {
-    if (bus->used && bus->busy && (task_id == 0U || bus->task_id == task_id))
+    if (bus->busy && (task_id == 0U || bus->task_id == task_id))
     {
         os_bus_finish(kind, bus);
     }

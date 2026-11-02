@@ -8,6 +8,7 @@
 
 #if OS_HAS_UART
 
+#include <stdlib.h>
 #include <string.h>
 
 #if (OS_UART_RX_BUFFER & (OS_UART_RX_BUFFER - 1U)) != 0U
@@ -36,9 +37,9 @@ typedef atomic_uint_fast32_t OsUartCounter;
 #define OS_UART_TAKE(value) ((uint32_t)atomic_exchange_explicit(&(value), 0U, memory_order_acq_rel))
 #endif
 
+/* Allocated when the platform registers the port. */
 typedef struct OsUart
 {
-    uint8_t used;
     uint32_t uart;
     char name[OS_UART_NAME_MAX + 1U];
     uint8_t name_length;
@@ -46,8 +47,12 @@ typedef struct OsUart
     uint32_t baud;
     /* Owning task id, 0 when free; bytes are kept only while owned. */
     uint32_t owner;
-    /* Received bytes: the port's handler writes at head, the kernel reads at tail. */
-    uint8_t rx[OS_UART_RX_BUFFER];
+    /*
+     * Received bytes: the port's handler writes at head, the kernel reads at
+     * tail. Allocated when a program first opens the port and kept until
+     * shutdown, so an interrupt handler never writes into freed memory.
+     */
+    uint8_t* rx;
     OsUartCounter head;
     OsUartCounter tail;
     OsUartCounter errors;
@@ -61,12 +66,12 @@ static struct
 {
     OsUartPort port;
     uint8_t has_port;
-    OsUart uarts[OS_UART_MAX];
+    OsUart* uarts[OS_UART_MAX];
 } g_uart;
 
 static OsUart* os_uart_slot(uint32_t id)
 {
-    return id >= 1U && id <= OS_UART_MAX && g_uart.uarts[id - 1U].used ? &g_uart.uarts[id - 1U] : NULL;
+    return id >= 1U && id <= OS_UART_MAX ? g_uart.uarts[id - 1U] : NULL;
 }
 
 static OsUart* os_uart_by_number(uint32_t number)
@@ -75,9 +80,9 @@ static OsUart* os_uart_by_number(uint32_t number)
 
     for (index = 0U; index < OS_UART_MAX; ++index)
     {
-        if (g_uart.uarts[index].used && g_uart.uarts[index].uart == number)
+        if (g_uart.uarts[index] != NULL && g_uart.uarts[index]->uart == number)
         {
-            return &g_uart.uarts[index];
+            return g_uart.uarts[index];
         }
     }
     return NULL;
@@ -109,6 +114,7 @@ OsStatus os_uart_add(const char* name, uint32_t number, uint32_t max_baud)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
     OsUart* slot = NULL;
+    uint32_t free_index = OS_UART_MAX;
     uint32_t index = 0U;
 
     if (length == 0U || length > OS_UART_NAME_MAX)
@@ -117,23 +123,27 @@ OsStatus os_uart_add(const char* name, uint32_t number, uint32_t max_baud)
     }
     for (index = 0U; index < OS_UART_MAX; ++index)
     {
-        OsUart* entry = &g_uart.uarts[index];
-        if (entry->used && (entry->uart == number ||
-                            (entry->name_length == length && memcmp(entry->name, name, length) == 0)))
+        OsUart* entry = g_uart.uarts[index];
+        if (entry != NULL && (entry->uart == number ||
+                              (entry->name_length == length && memcmp(entry->name, name, length) == 0)))
         {
             return OS_STATUS_BUSY;
         }
-        if (!entry->used && slot == NULL)
+        if (entry == NULL && free_index == OS_UART_MAX)
         {
-            slot = entry;
+            free_index = index;
         }
     }
-    if (slot == NULL)
+    if (free_index == OS_UART_MAX)
     {
         return OS_STATUS_LIMIT_REACHED;
     }
-    memset(slot, 0, sizeof(*slot));
-    slot->used = 1U;
+    slot = (OsUart*)calloc(1U, sizeof(OsUart));
+    if (slot == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    g_uart.uarts[free_index] = slot;
     slot->uart = number;
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
@@ -148,7 +158,7 @@ void os_uart_receive(uint32_t number, const uint8_t* data, uint32_t size)
     uint32_t head = 0U;
     uint32_t index = 0U;
 
-    if (uart == NULL || uart->owner == 0U || data == NULL)
+    if (uart == NULL || uart->owner == 0U || uart->rx == NULL || data == NULL)
     {
         return;
     }
@@ -199,8 +209,8 @@ void os_uart_poll(void)
 
     for (index = 0U; index < OS_UART_MAX; ++index)
     {
-        OsUart* uart = &g_uart.uarts[index];
-        if (!uart->used)
+        OsUart* uart = g_uart.uarts[index];
+        if (uart == NULL)
         {
             continue;
         }
@@ -238,12 +248,12 @@ OsStatus os_uart_open(const char* name, uint32_t length, uint32_t baud, uint32_t
     }
     for (index = 0U; index < OS_UART_MAX; ++index)
     {
-        OsUart* uart = &g_uart.uarts[index];
+        OsUart* uart = g_uart.uarts[index];
         OsStatus status = OS_STATUS_OK;
         uint32_t actual = 0U;
 
-        any |= uart->used;
-        if (!uart->used || uart->name_length != length || memcmp(uart->name, name, length) != 0)
+        any |= uart != NULL;
+        if (uart == NULL || uart->name_length != length || memcmp(uart->name, name, length) != 0)
         {
             continue;
         }
@@ -254,6 +264,14 @@ OsStatus os_uart_open(const char* name, uint32_t length, uint32_t baud, uint32_t
         if (uart->max_baud != 0U && baud > uart->max_baud)
         {
             return OS_STATUS_UNSUPPORTED;
+        }
+        if (uart->rx == NULL)
+        {
+            uart->rx = (uint8_t*)malloc(OS_UART_RX_BUFFER);
+            if (uart->rx == NULL)
+            {
+                return OS_STATUS_OUT_OF_MEMORY;
+            }
         }
         status = g_uart.port.configure(g_uart.port.context, uart->uart, baud, format, &actual);
         if (status != OS_STATUS_OK)
@@ -391,6 +409,16 @@ uint8_t os_uart_ready(uint32_t id)
 
 void os_uart_shutdown(void)
 {
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_UART_MAX; ++index)
+    {
+        if (g_uart.uarts[index] != NULL)
+        {
+            free(g_uart.uarts[index]->rx);
+            free(g_uart.uarts[index]);
+        }
+    }
     memset(&g_uart, 0, sizeof(g_uart));
 }
 
