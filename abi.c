@@ -9,6 +9,7 @@
  */
 
 #include "os_internal.h"
+#include "fs.h"
 
 #if defined(d_m3HasWASI) || defined(d_m3HasMetaWASI) || defined(d_m3HasUVWASI)
 #include "wasm3/source/extra/wasi_core.h"
@@ -1174,6 +1175,14 @@ static m3ApiRawFunction(os_abi_unsupported)
  * ------------------------------------------------------------------------ */
 
 #if defined(OS_ABI_HAS_WASI)
+static void os_abi_write_le32(uint8_t* out, uint32_t value)
+{
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8U);
+    out[2] = (uint8_t)(value >> 16U);
+    out[3] = (uint8_t)(value >> 24U);
+}
+
 static void os_abi_write_le64(uint8_t* out, uint64_t value)
 {
     uint32_t index = 0U;
@@ -1243,6 +1252,62 @@ static m3ApiRawFunction(os_abi_wasi_sched_yield)
         return m3Err_none;
     }
     return m3_Yield();
+}
+
+/*
+ * fd_write: stdout and stderr go to the output port with the writer's task
+ * id; files are read only.
+ */
+static m3ApiRawFunction(os_abi_wasi_fd_write)
+{
+    m3ApiReturnType(uint32_t);
+    m3ApiGetArg(uint32_t, fd);
+    m3ApiGetArg(uint32_t, iovs_address);
+    m3ApiGetArg(uint32_t, iovs_count);
+    m3ApiGetArg(uint32_t, written_address);
+    uint8_t* iovs = NULL;
+    uint8_t* written = NULL;
+    uint32_t total = 0U;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    if (iovs_count > UINT32_MAX / 8U ||
+        os_guest_memory(iovs_address, iovs_count * 8U, &iovs) != OS_STATUS_OK ||
+        os_guest_memory(written_address, 4U, &written) != OS_STATUS_OK)
+    {
+        m3ApiReturn(__WASI_ERRNO_FAULT);
+    }
+    if (fd != 1U && fd != 2U)
+    {
+#if OS_HAS_FS
+        m3ApiReturn(os_fs_write_error(fd));
+#else
+        m3ApiReturn(__WASI_ERRNO_BADF);
+#endif
+    }
+
+    /* Check every buffer first, so a bad one writes nothing. */
+    for (index = 0U; index < iovs_count; ++index)
+    {
+        uint8_t* data = NULL;
+        uint32_t length = os_abi_read_le32(iovs + index * 8U + 4U);
+        if (os_guest_memory(os_abi_read_le32(iovs + index * 8U), length, &data) != OS_STATUS_OK ||
+            length > UINT32_MAX - total)
+        {
+            m3ApiReturn(__WASI_ERRNO_FAULT);
+        }
+        total += length;
+    }
+    for (index = 0U; index < iovs_count; ++index)
+    {
+        uint8_t* data = NULL;
+        uint32_t length = os_abi_read_le32(iovs + index * 8U + 4U);
+        (void)os_guest_memory(os_abi_read_le32(iovs + index * 8U), length, &data);
+        os_output_write(fd, data, length);
+    }
+
+    os_abi_write_le32(written, total);
+    m3ApiReturn(__WASI_ERRNO_SUCCESS);
 }
 
 /*
@@ -1422,10 +1487,12 @@ static const OsAbiImport g_abi_imports[] =
     { "wasi_snapshot_preview1", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get, 0U },
     { "wasi_snapshot_preview1", "sched_yield", "i()", os_abi_wasi_sched_yield, 0U },
     { "wasi_snapshot_preview1", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff, 0U },
+    { "wasi_snapshot_preview1", "fd_write", "i(iiii)", os_abi_wasi_fd_write, 0U },
     { "wasi_unstable", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get, 0U },
     { "wasi_unstable", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get, 0U },
     { "wasi_unstable", "sched_yield", "i()", os_abi_wasi_sched_yield, 0U },
     { "wasi_unstable", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff, 0U },
+    { "wasi_unstable", "fd_write", "i(iiii)", os_abi_wasi_fd_write, 0U },
 #endif
 };
 

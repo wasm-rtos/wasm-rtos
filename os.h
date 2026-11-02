@@ -469,6 +469,21 @@ typedef struct OsSwapPort
 OsStatus os_swap_port_set(const OsSwapPort* port);
 
 /*
+ * Where programs' stdout (fd 1) and stderr (fd 2) go. write gets the id of
+ * the task that wrote, so a platform can keep a log per program, send it to
+ * a UART, or both. Without a port, output goes to the C library's stdout
+ * and stderr. Like the other ports, it is cleared by os_init.
+ */
+typedef struct OsOutputPort
+{
+    void* context;
+    void (*write)(void* context, uint32_t task_id, uint32_t fd, const void* data, uint32_t size);
+} OsOutputPort;
+
+/* NULL restores the default. */
+OsStatus os_output_port_set(const OsOutputPort* port);
+
+/*
  * Write the task out and free its interpreter state. Any task but the one
  * running can be swapped out, waiting or not; a task that has not started
  * frees its state without writing anything. OS_STATUS_UNSUPPORTED without a
@@ -556,6 +571,12 @@ OsStatus os_task_write_memory(
 const char* os_task_get_name(OsTaskHandle task);
 OsTaskHandle os_task_get_current(void);
 uint32_t os_task_get_run_count(OsTaskHandle task);
+/*
+ * Interpreter work units the task has spent, over all its slices; 0 in a
+ * build without fuel. Deterministic, unlike time, so the same program uses
+ * the same fuel on every device and in the browser.
+ */
+uint64_t os_task_get_fuel_used(OsTaskHandle task);
 OsStatus os_task_get_last_wait_status(OsTaskHandle task);
 uint32_t os_task_get_last_wait_value(OsTaskHandle task);
 

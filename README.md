@@ -143,6 +143,24 @@ os_swap_port_set(&swap);
 os_task_swap_out(menu_task);   /* RAM back, until the menu has work to do */
 ```
 
+### Program output
+
+What programs write to stdout and stderr goes to the C library's `stdout`
+and `stderr` unless the platform installs an output port. Its `write` gets
+the id of the task that wrote, so the platform can keep a log per program,
+send everything to a UART, or both. Output is a byte stream: a line may
+arrive in several pieces.
+
+```c
+static void uart_output(void* context, uint32_t task_id, uint32_t fd, const void* data, uint32_t size);
+static const OsOutputPort output = { NULL, uart_output };
+os_output_port_set(&output);
+```
+
+`os_task_get_fuel_used` tells how much interpreter work a task has done. It
+counts the same on every device, so it compares programs where time would
+compare devices.
+
 ### Snapshots
 
 `os_task_write_snapshot` saves a program that is between two slices and

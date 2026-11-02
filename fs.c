@@ -1041,42 +1041,9 @@ static m3ApiRawFunction(os_fs_wasi_fd_pread)
     m3ApiReturn(__WASI_ERRNO_SUCCESS);
 }
 
-/* stdout and stderr go to the host C library; files are read only. */
-static m3ApiRawFunction(os_fs_wasi_fd_write)
+uint16_t os_fs_write_error(uint32_t fd)
 {
-    m3ApiReturnType(uint32_t)
-    m3ApiGetArg(__wasi_fd_t, fd)
-    m3ApiGetArgMem(OsFsIovec*, iovs)
-    m3ApiGetArg(__wasi_size_t, iovs_len)
-    m3ApiGetArgMem(__wasi_size_t*, nwritten)
-    FILE* stream = fd == 1U ? stdout : fd == 2U ? stderr : NULL;
-    uint32_t total = 0U;
-    uint32_t index = 0U;
-    (void)_ctx;
-
-    m3ApiCheckMem(iovs, iovs_len * sizeof(OsFsIovec));
-    m3ApiCheckMem(nwritten, sizeof(__wasi_size_t));
-
-    if (stream == NULL)
-    {
-        m3ApiReturn(os_fs_file_for_fd(fd) != NULL || fd == OS_FS_ROOT_FD ? __WASI_ERRNO_ROFS : __WASI_ERRNO_BADF);
-    }
-
-    for (index = 0U; index < iovs_len; ++index)
-    {
-        void* address = m3ApiOffsetToPtr(m3ApiReadMem32(&iovs[index].buf));
-        uint32_t length = m3ApiReadMem32(&iovs[index].buf_len);
-        if (length == 0U)
-        {
-            continue;
-        }
-        m3ApiCheckMem(address, length);
-        total += (uint32_t)fwrite(address, 1U, length, stream);
-    }
-    fflush(stream);
-
-    m3ApiWriteMem32(nwritten, total);
-    m3ApiReturn(__WASI_ERRNO_SUCCESS);
+    return os_fs_file_for_fd(fd) != NULL || fd == OS_FS_ROOT_FD ? __WASI_ERRNO_ROFS : __WASI_ERRNO_BADF;
 }
 
 static __wasi_errno_t os_fs_seek(uint32_t fd, int64_t offset, uint32_t whence, uint64_t* out_position)
@@ -1432,7 +1399,6 @@ static const OsFsWasiImport g_wasi_common[] =
     { "path_open", "i(ii*iiIIi*)", os_fs_wasi_path_open },
     { "fd_read", "i(i*i*)", os_fs_wasi_fd_read },
     { "fd_pread", "i(i*iI*)", os_fs_wasi_fd_pread },
-    { "fd_write", "i(i*i*)", os_fs_wasi_fd_write },
     { "fd_tell", "i(i*)", os_fs_wasi_fd_tell },
     { "fd_close", "i(i)", os_fs_wasi_fd_close },
     { "fd_fdstat_get", "i(i*)", os_fs_wasi_fd_fdstat_get },
