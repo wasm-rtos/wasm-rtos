@@ -240,6 +240,14 @@ void os_spi_shutdown(void);
 
 #if OS_HAS_I2C || OS_HAS_SPI
 void os_bus_shutdown(void);
+/* Deliver background transfers that have ended. */
+void os_bus_poll(void);
+/* End the background transfer task_id waits for, at once (the port's finish). */
+void os_bus_finish_task(uint32_t task_id);
+/* The current task waits for its background transfer (os.c). */
+OsStatus os_bus_wait_begin(void);
+/* The transfer of task_id ended with status; wakes it (os.c). */
+void os_bus_wait_end(uint32_t task_id, OsStatus status);
 #endif
 
 #endif

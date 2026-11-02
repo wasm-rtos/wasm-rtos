@@ -309,7 +309,11 @@ SPI buses named as the device profile names them (`"spi0"`).
 
 A transaction runs to its end before another starts, so one program's bytes
 never mix with another's. The kernel reads and writes the program's buffers
-in place during the call.
+in place. Only the calling program waits for a transaction: on devices that
+move the bytes in the background (DMA) the other programs run meanwhile,
+and the call returns when the transfer has ended. A wait for a transfer is
+not cut short: when the program is paused or its wait is aborted, the
+transfer still ends and the program gets its result.
 
 ## WASI
 

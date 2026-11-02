@@ -10,6 +10,24 @@
 
 #include <string.h>
 
+/* A background transfer's end is recorded by interrupt handlers and taken by the kernel. */
+#if defined(__STDC_NO_ATOMICS__)
+typedef volatile uint8_t OsBusFlag;
+#define OS_BUS_FLAG_SET(flag) ((flag) = 1U)
+#define OS_BUS_FLAG_TAKE(flag) os_bus_flag_take(&(flag))
+static uint8_t os_bus_flag_take(OsBusFlag* flag)
+{
+    uint8_t value = *flag;
+    *flag = 0U;
+    return value;
+}
+#else
+#include <stdatomic.h>
+typedef atomic_uchar OsBusFlag;
+#define OS_BUS_FLAG_SET(flag) atomic_store_explicit(&(flag), 1U, memory_order_release)
+#define OS_BUS_FLAG_TAKE(flag) atomic_exchange_explicit(&(flag), 0U, memory_order_acquire)
+#endif
+
 /* Longest delay op, in microseconds. */
 #define OS_SPI_MAX_DELAY_US 65535U
 
@@ -20,6 +38,22 @@ typedef struct OsBus
     char name[OS_BUS_NAME_MAX + 1U];
     uint8_t name_length;
     uint32_t frequency_hz;
+
+    /* A transfer the port runs in the background, with the kernel's copy of its ops. */
+    uint8_t busy;
+    uint32_t task_id;
+    uint32_t device;
+    uint32_t transfer_hz;
+    uint32_t mode;
+    uint32_t cs;
+    uint32_t count;
+    union
+    {
+        OsI2cOp i2c[OS_BUS_MAX_OPS];
+        OsSpiOp spi[OS_BUS_MAX_OPS];
+    } ops;
+    OsBusFlag done;
+    volatile OsStatus result;
 } OsBus;
 
 static struct
@@ -82,8 +116,8 @@ static OsStatus os_bus_find(OsBus* buses, uint32_t max, const char* name, uint32
     return any ? OS_STATUS_FILE_NOT_FOUND : OS_STATUS_UNSUPPORTED;
 }
 
-static void os_bus_report(uint8_t kind, uint32_t bus, uint32_t device, uint32_t frequency_hz, const void* ops,
-                          uint32_t count, OsStatus status)
+static void os_bus_report(uint8_t kind, uint32_t bus, uint32_t device, uint32_t task_id, uint32_t frequency_hz,
+                          const void* ops, uint32_t count, OsStatus status)
 {
     OsBusTrace trace;
 
@@ -94,7 +128,7 @@ static void os_bus_report(uint8_t kind, uint32_t bus, uint32_t device, uint32_t 
     trace.kind = kind;
     trace.bus = bus;
     trace.device = device;
-    trace.task_id = os_task_get_id(os_task_get_current());
+    trace.task_id = task_id;
     trace.frequency_hz = frequency_hz;
     trace.ops = ops;
     trace.count = count;
@@ -106,6 +140,125 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context)
 {
     g_bus_trace.function = function;
     g_bus_trace.context = function != NULL ? context : NULL;
+}
+
+static void os_bus_finish(uint8_t kind, OsBus* bus);
+static OsBus* os_bus_by_number(uint8_t kind, uint32_t number);
+static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t);
+static void* os_bus_port_context(uint8_t kind);
+
+/* Hand a finished background transfer to its program: chip select up, trace, wake. */
+static void os_bus_deliver(uint8_t kind, OsBus* bus)
+{
+    OsStatus status = bus->result;
+    uint32_t task_id = bus->task_id;
+
+    bus->busy = 0U;
+#if OS_HAS_GPIO
+    if (bus->cs != 0U)
+    {
+        (void)os_gpio_set(bus->cs, 1U);
+    }
+#endif
+    os_bus_report(kind, bus->bus, bus->device, task_id, bus->transfer_hz,
+                  kind == OS_BUS_I2C ? (const void*)bus->ops.i2c : (const void*)bus->ops.spi, bus->count, status);
+    os_bus_wait_end(task_id, status);
+}
+
+/*
+ * Start a transaction on a bus: wait out another program's transfer, let
+ * the port run it on the kernel's copy of the ops, and either finish here
+ * or leave the calling program waiting (OS_STATUS_PENDING).
+ */
+static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t frequency_hz, uint32_t mode,
+                             uint32_t cs, const void* ops, uint32_t count, OsStatus (*run)(OsBus* bus))
+{
+    OsStatus status = OS_STATUS_OK;
+
+    if (bus->busy)
+    {
+        os_bus_finish(kind, bus);
+    }
+    memcpy(&bus->ops, ops, count * (kind == OS_BUS_I2C ? sizeof(OsI2cOp) : sizeof(OsSpiOp)));
+    bus->task_id = os_task_get_id(os_task_get_current());
+    bus->device = device;
+    bus->transfer_hz = frequency_hz;
+    bus->mode = mode;
+    bus->cs = cs;
+    bus->count = count;
+    (void)OS_BUS_FLAG_TAKE(bus->done);
+
+#if OS_HAS_GPIO
+    if (cs != 0U)
+    {
+        status = os_gpio_set(cs, 0U);
+    }
+#endif
+    if (status == OS_STATUS_OK)
+    {
+        status = run(bus);
+    }
+    if (status == OS_STATUS_PENDING)
+    {
+        bus->busy = 1U;
+        if (os_bus_wait_begin() == OS_STATUS_OK)
+        {
+            return OS_STATUS_PENDING;
+        }
+        /* Nobody to wait (a call from the host): finish now. */
+        os_bus_finish(kind, bus);
+        return bus->result;
+    }
+#if OS_HAS_GPIO
+    if (cs != 0U)
+    {
+        (void)os_gpio_set(cs, 1U);
+    }
+#endif
+    os_bus_report(kind, bus->bus, device, bus->task_id, frequency_hz,
+                  kind == OS_BUS_I2C ? (const void*)bus->ops.i2c : (const void*)bus->ops.spi, count, status);
+    return status;
+}
+
+/* Make the port end a background transfer now, then deliver it. */
+static void os_bus_finish(uint8_t kind, OsBus* bus)
+{
+    void (*finish)(void*, uint32_t) = os_bus_port_finish(kind);
+
+    if (!bus->busy)
+    {
+        return;
+    }
+    if (!OS_BUS_FLAG_TAKE(bus->done))
+    {
+        if (finish != NULL)
+        {
+            finish(os_bus_port_context(kind), bus->bus);
+        }
+        /* A port that did not report even now has failed the transfer. */
+        if (!OS_BUS_FLAG_TAKE(bus->done))
+        {
+            bus->result = OS_STATUS_BUS_ERROR;
+        }
+    }
+    os_bus_deliver(kind, bus);
+}
+
+void os_bus_complete(uint32_t kind, uint32_t number, OsStatus status)
+{
+    OsBus* bus = os_bus_by_number((uint8_t)kind, number);
+
+    if (bus != NULL && bus->busy)
+    {
+        bus->result = status;
+        OS_BUS_FLAG_SET(bus->done);
+    }
+}
+
+uint8_t os_bus_is_busy(uint32_t kind, uint32_t number)
+{
+    OsBus* bus = os_bus_by_number((uint8_t)kind, number);
+    return bus != NULL && bus->busy;
 }
 
 /* ---------------------------------------------------------------------------
@@ -224,10 +377,15 @@ void os_i2c_close(uint32_t id)
     }
 }
 
+static OsStatus os_i2c_run(OsBus* bus)
+{
+    return g_i2c.port.transaction(g_i2c.port.context, bus->bus, bus->device, bus->transfer_hz, bus->ops.i2c,
+                                  bus->count);
+}
+
 OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count)
 {
     OsI2cDevice* device = os_i2c_device(id);
-    OsStatus status = OS_STATUS_OK;
     uint32_t index = 0U;
 
     if (device == NULL || count > OS_BUS_MAX_OPS)
@@ -245,10 +403,8 @@ OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count)
             return OS_STATUS_INVALID_ARGUMENT;
         }
     }
-    status = g_i2c.port.transaction(g_i2c.port.context, device->bus->bus, device->address,
-                                    device->bus->frequency_hz, ops, count);
-    os_bus_report(OS_BUS_I2C, device->bus->bus, device->address, device->bus->frequency_hz, ops, count, status);
-    return status;
+    return os_bus_start(OS_BUS_I2C, device->bus, device->address, device->bus->frequency_hz, 0U, 0U, ops, count,
+                        os_i2c_run);
 }
 
 void os_i2c_shutdown(void)
@@ -405,10 +561,15 @@ void os_spi_close(uint32_t id)
     memset(device, 0, sizeof(*device));
 }
 
+static OsStatus os_spi_run(OsBus* bus)
+{
+    return g_spi.port.transaction(g_spi.port.context, bus->bus, bus->mode, bus->transfer_hz, bus->ops.spi,
+                                  bus->count);
+}
+
 OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count)
 {
     OsSpiDevice* device = os_spi_device(id);
-    OsStatus status = OS_STATUS_OK;
     uint32_t index = 0U;
 
     if (device == NULL || count == 0U || count > OS_BUS_MAX_OPS)
@@ -429,25 +590,8 @@ OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count)
         }
     }
 
-#if OS_HAS_GPIO
-    if (device->cs != 0U)
-    {
-        status = os_gpio_set(device->cs, 0U);
-    }
-#endif
-    if (status == OS_STATUS_OK)
-    {
-        status = g_spi.port.transaction(g_spi.port.context, device->bus->bus, device->mode, device->frequency_hz, ops,
-                                        count);
-    }
-#if OS_HAS_GPIO
-    if (device->cs != 0U)
-    {
-        (void)os_gpio_set(device->cs, 1U);
-    }
-#endif
-    os_bus_report(OS_BUS_SPI, device->bus->bus, device->cs_pin, device->frequency_hz, ops, count, status);
-    return status;
+    return os_bus_start(OS_BUS_SPI, device->bus, device->cs_pin, device->frequency_hz, device->mode, device->cs, ops,
+                        count, os_spi_run);
 }
 
 void os_spi_shutdown(void)
@@ -456,8 +600,123 @@ void os_spi_shutdown(void)
 }
 #endif
 
+static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
+{
+    OsBus* buses = NULL;
+    uint32_t max = 0U;
+    uint32_t index = 0U;
+
+#if OS_HAS_I2C
+    if (kind == OS_BUS_I2C)
+    {
+        buses = g_i2c.buses;
+        max = OS_I2C_MAX_BUSES;
+    }
+#endif
+#if OS_HAS_SPI
+    if (kind == OS_BUS_SPI)
+    {
+        buses = g_spi.buses;
+        max = OS_SPI_MAX_BUSES;
+    }
+#endif
+    for (index = 0U; index < max; ++index)
+    {
+        if (buses[index].used && buses[index].bus == number)
+        {
+            return &buses[index];
+        }
+    }
+    return NULL;
+}
+
+static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t)
+{
+#if OS_HAS_I2C
+    if (kind == OS_BUS_I2C)
+    {
+        return g_i2c.port.finish;
+    }
+#endif
+#if OS_HAS_SPI
+    if (kind == OS_BUS_SPI)
+    {
+        return g_spi.port.finish;
+    }
+#endif
+    return NULL;
+}
+
+static void* os_bus_port_context(uint8_t kind)
+{
+#if OS_HAS_I2C
+    if (kind == OS_BUS_I2C)
+    {
+        return g_i2c.port.context;
+    }
+#endif
+#if OS_HAS_SPI
+    if (kind == OS_BUS_SPI)
+    {
+        return g_spi.port.context;
+    }
+#endif
+    return NULL;
+}
+
+/* Every bus of both kinds, for the loops below. */
+static void os_bus_each(void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id), uint32_t task_id)
+{
+    uint32_t index = 0U;
+#if OS_HAS_I2C
+    for (index = 0U; index < OS_I2C_MAX_BUSES; ++index)
+    {
+        visit(OS_BUS_I2C, &g_i2c.buses[index], task_id);
+    }
+#endif
+#if OS_HAS_SPI
+    for (index = 0U; index < OS_SPI_MAX_BUSES; ++index)
+    {
+        visit(OS_BUS_SPI, &g_spi.buses[index], task_id);
+    }
+#endif
+    (void)index;
+}
+
+static void os_bus_poll_one(uint8_t kind, OsBus* bus, uint32_t task_id)
+{
+    (void)task_id;
+    if (bus->used && bus->busy && OS_BUS_FLAG_TAKE(bus->done))
+    {
+        os_bus_deliver(kind, bus);
+    }
+}
+
+static void os_bus_finish_one(uint8_t kind, OsBus* bus, uint32_t task_id)
+{
+    if (bus->used && bus->busy && (task_id == 0U || bus->task_id == task_id))
+    {
+        os_bus_finish(kind, bus);
+    }
+}
+
+void os_bus_poll(void)
+{
+    os_bus_each(os_bus_poll_one, 0U);
+}
+
+void os_bus_finish_task(uint32_t task_id)
+{
+    if (task_id != 0U)
+    {
+        os_bus_each(os_bus_finish_one, task_id);
+    }
+}
+
 void os_bus_shutdown(void)
 {
+    /* Ports must be done with every buffer before the kernel lets go. */
+    os_bus_each(os_bus_finish_one, 0U);
 #if OS_HAS_I2C
     os_i2c_shutdown();
 #endif

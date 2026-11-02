@@ -93,7 +93,8 @@ typedef enum OsStatus
     OS_STATUS_READ_ONLY,
     OS_STATUS_END_OF_DIRECTORY,
     OS_STATUS_NACK,
-    OS_STATUS_BUS_ERROR
+    OS_STATUS_BUS_ERROR,
+    OS_STATUS_PENDING
 } OsStatus;
 
 typedef enum OsTaskState
@@ -885,13 +886,45 @@ uint32_t os_input_get_owner(uint32_t device);
  * program's memory and are valid during the call.
  *
  * A transaction runs to the end before the next one starts: one program's
- * bytes never mix with another's. It blocks the kernel while the port works,
- * so ports should be quick or use DMA.
+ * bytes never mix with another's.
+ *
+ * A port may work in the background (DMA): transaction starts the transfer
+ * and returns OS_STATUS_PENDING, and the port reports the end with
+ * os_bus_complete. Only the calling program waits meanwhile; the others
+ * run. Until then the ops array and every buffer stay valid and untouched by
+ * the kernel: the program is not swapped out, and before it is paused,
+ * cancelled or ended the kernel calls finish, which returns only once the
+ * transfer is over and reported. A port that never returns
+ * OS_STATUS_PENDING may leave finish NULL.
  */
 #ifndef OS_BUS_MAX_OPS
 #define OS_BUS_MAX_OPS 16U
 #endif
 #define OS_BUS_NAME_MAX 32U
+
+/* The ops of a transaction; see I2C and SPI below. */
+#define OS_I2C_WRITE 1U
+#define OS_I2C_READ  2U
+
+typedef struct OsI2cOp
+{
+    uint8_t kind;      /* OS_I2C_WRITE or OS_I2C_READ */
+    uint8_t* data;     /* written from, or read into */
+    uint32_t length;
+} OsI2cOp;
+
+#define OS_SPI_WRITE    1U
+#define OS_SPI_READ     2U
+#define OS_SPI_TRANSFER 3U
+#define OS_SPI_DELAY_US 4U
+
+typedef struct OsSpiOp
+{
+    uint8_t kind;          /* OS_SPI_* */
+    const uint8_t* write;  /* WRITE and TRANSFER */
+    uint8_t* read;         /* READ and TRANSFER */
+    uint32_t length;       /* bytes, or microseconds for DELAY_US */
+} OsSpiOp;
 #endif
 
 #if OS_HAS_I2C
@@ -903,9 +936,6 @@ uint32_t os_input_get_owner(uint32_t device);
  * acknowledged, OS_STATUS_BUS_ERROR for a lost arbitration or a stuck bus,
  * OS_STATUS_TIMEOUT when a device stretches the clock too long.
  */
-#define OS_I2C_WRITE 1U
-#define OS_I2C_READ  2U
-
 #ifndef OS_I2C_MAX_BUSES
 #define OS_I2C_MAX_BUSES 2U
 #endif
@@ -914,18 +944,12 @@ uint32_t os_input_get_owner(uint32_t device);
 #define OS_I2C_MAX_DEVICES 16U
 #endif
 
-typedef struct OsI2cOp
-{
-    uint8_t kind;      /* OS_I2C_WRITE or OS_I2C_READ */
-    uint8_t* data;     /* written from, or read into */
-    uint32_t length;
-} OsI2cOp;
-
 typedef struct OsI2cPort
 {
     void* context;
     OsStatus (*transaction)(void* context, uint32_t bus, uint32_t address, uint32_t frequency_hz,
                             const OsI2cOp* ops, uint32_t count);
+    void (*finish)(void* context, uint32_t bus);
 } OsI2cPort;
 
 /* NULL removes the port; programs then get -WR_EUNSUPPORTED. */
@@ -944,11 +968,6 @@ uint32_t os_i2c_get_owner(uint32_t bus, uint32_t address);
  * sends. A delay waits length microseconds with chip select held.
  * mode: OS_SPI_CPHA | OS_SPI_CPOL (SPI modes 0-3), OS_SPI_LSB_FIRST.
  */
-#define OS_SPI_WRITE    1U
-#define OS_SPI_READ     2U
-#define OS_SPI_TRANSFER 3U
-#define OS_SPI_DELAY_US 4U
-
 #define OS_SPI_CPHA      0x01U
 #define OS_SPI_CPOL      0x02U
 #define OS_SPI_LSB_FIRST 0x04U
@@ -960,19 +979,12 @@ uint32_t os_i2c_get_owner(uint32_t bus, uint32_t address);
 #define OS_SPI_MAX_DEVICES 8U
 #endif
 
-typedef struct OsSpiOp
-{
-    uint8_t kind;          /* OS_SPI_* */
-    const uint8_t* write;  /* WRITE and TRANSFER */
-    uint8_t* read;         /* READ and TRANSFER */
-    uint32_t length;       /* bytes, or microseconds for DELAY_US */
-} OsSpiOp;
-
 typedef struct OsSpiPort
 {
     void* context;
     OsStatus (*transaction)(void* context, uint32_t bus, uint32_t mode, uint32_t frequency_hz,
                             const OsSpiOp* ops, uint32_t count);
+    void (*finish)(void* context, uint32_t bus);
 } OsSpiPort;
 
 OsStatus os_spi_port_set(const OsSpiPort* port);
@@ -1008,6 +1020,17 @@ typedef struct OsBusTrace
 typedef void (*OsBusTraceFunction)(void* context, const OsBusTrace* trace);
 /* NULL stops tracing. */
 void os_bus_trace_set(OsBusTraceFunction function, void* context);
+
+/*
+ * The end of a transfer a port started with OS_STATUS_PENDING, with its
+ * result (kind is OS_BUS_I2C or OS_BUS_SPI). Safe to call from an interrupt
+ * handler: it only records the result; the next os_schedule (or finish)
+ * delivers it to the waiting program. With a tickless clock, wake the
+ * kernel afterwards as for os_gpio_edge.
+ */
+void os_bus_complete(uint32_t kind, uint32_t bus, OsStatus status);
+/* Whether a background transfer is in progress on a bus. */
+uint8_t os_bus_is_busy(uint32_t kind, uint32_t bus);
 #endif
 
 uint32_t os_get_task_count(void);
