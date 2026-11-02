@@ -54,6 +54,10 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_ABI_MAX_HANDLES` | 32 | handles one program may hold |
 | `OS_HAS_GPIO` | 1 | pins for programs through a GPIO port (without it, `gpio` calls return `-WR_EUNSUPPORTED`) |
 | `OS_GPIO_MAX_PINS` / `OS_GPIO_MAX_NAMES` | 32 / 64 | pins and pin names a platform can register |
+| `OS_HAS_DISPLAY` | 1 | displays for programs through a display port (without it, `display` calls return `-WR_EUNSUPPORTED`) |
+| `OS_DISPLAY_MAX` | 2 | displays a platform can register |
+| `OS_HAS_INPUT` | 1 | buttons, rotary controls, touch and keyboards for programs (without it, `input` calls return `-WR_EUNSUPPORTED`) |
+| `OS_INPUT_MAX` / `OS_INPUT_QUEUE` / `OS_INPUT_MAX_HELD` | 8 / 32 / 4 | input devices, events queued per device (16 bytes each), keys tracked for long press and repeat |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
 | `OS_NATIVE_STACK_BUDGET` | 16 KiB | C stack nested Wasm calls may use in one slice before it ends early (0 = unlimited) |
@@ -124,6 +128,50 @@ next `os_schedule` wakes the program waiting for that pin. A program owns a
 pin until it closes it or ends, even by a trap; the kernel then configures
 it as an input without pulls.
 
+### Display
+
+Register each display of the device profile with its size, shape, pixel
+formats and density, and draw through a display port. The kernel checks
+every call, so `write` only ever gets a whole rectangle inside the display
+in a format it accepts; the pixels point into the program's memory and are
+valid during the call. `fill` and `flush` are optional: without `fill`, or
+when it returns `OS_STATUS_UNSUPPORTED` for a display or format, the kernel
+writes rows, and `flush` is for displays that buffer (e-paper, a frame
+sent whole).
+
+```c
+static const OsDisplayPort display = { NULL, lcd_write, lcd_fill, NULL, lcd_backlight };
+static const OsDisplayInfo round_lcd = {
+    .width = 240, .height = 240, .shape = OS_DISPLAY_ROUND, .format = OS_DISPLAY_RGB565, .dpi = 260,
+    .formats = OS_DISPLAY_FORMAT_BIT(OS_DISPLAY_RGB565), .has_brightness = 1, .brightness = 200,
+};
+os_display_port_set(&display);
+os_display_add("main", 0, &round_lcd);
+```
+
+A port converts to the panel's own order, such as big-endian RGB565 over SPI.
+
+### Input
+
+Register the input devices of the device profile and report what happens;
+the kernel queues events for the program that owns each device and makes
+long presses and key repeat from the timings given, so they feel the same in
+every program. Keys use the Linux input event codes.
+
+```c
+static const OsInputInfo bezel = { .kind = OS_INPUT_ROTARY, .steps_per_turn = 24 };
+static const OsInputInfo buttons = { .kind = OS_INPUT_BUTTONS, .long_press_ms = 600 };
+os_input_add("bezel", 0, &bezel);
+os_input_add("buttons", 1, &buttons);
+
+os_input_rotate(0, 7 /* REL_DIAL */, -1);      /* one detent counter-clockwise */
+os_input_key(1, 158 /* KEY_BACK */, 1);        /* pressed */
+```
+
+Report from the context that calls `os_schedule`; an interrupt handler
+should only note what happened (as with `os_gpio_edge`) and let the main
+loop report it.
+
 ### Swapping
 
 To move idle programs out of RAM, give the kernel somewhere to put them: a
@@ -176,7 +224,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-child processes and GPIO pins. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes, GPIO pins, displays and input devices. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 

@@ -15,6 +15,8 @@
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
  *   OS_HAS_GPIO       pins for programs through a platform GPIO port
+ *   OS_HAS_DISPLAY    displays for programs through a platform display port
+ *   OS_HAS_INPUT      buttons, rotary controls, touch and keyboards for programs
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -27,6 +29,12 @@
 #endif
 #ifndef OS_HAS_GPIO
 #define OS_HAS_GPIO 1
+#endif
+#ifndef OS_HAS_DISPLAY
+#define OS_HAS_DISPLAY 1
+#endif
+#ifndef OS_HAS_INPUT
+#define OS_HAS_INPUT 1
 #endif
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
@@ -163,7 +171,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
-#define OS_ABI_VERSION_MINOR 1U
+#define OS_ABI_VERSION_MINOR 2U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -723,6 +731,139 @@ void os_gpio_edge(uint32_t pin, uint32_t edges);
 
 /* The id of the task that owns a pin, 0 when it is free or unknown. */
 uint32_t os_gpio_get_owner(uint32_t pin);
+#endif
+
+#if OS_HAS_DISPLAY
+/*
+ * Displays. The platform registers each display a program may draw on under
+ * the device profile's name ("main" for the primary one) and draws through a
+ * port; the kernel lends a display to one program at a time and checks every
+ * write, so the port only ever sees whole rectangles inside the display in a
+ * format it accepts.
+ *
+ * Pixel formats, as programs write them:
+ *   OS_DISPLAY_MONO1     1 bit per pixel, 1 = lit; rows of whole bytes, the
+ *                        leftmost pixel in the most significant bit
+ *   OS_DISPLAY_RGB565    16-bit little-endian, red in the top 5 bits
+ *   OS_DISPLAY_XRGB8888  32-bit little-endian 0x00RRGGBB
+ * A port converts to the panel's own order (such as big-endian RGB565 over
+ * SPI) itself.
+ */
+#define OS_DISPLAY_MONO1    1U
+#define OS_DISPLAY_RGB565   2U
+#define OS_DISPLAY_XRGB8888 3U
+#define OS_DISPLAY_FORMAT_BIT(format) (1U << (format))
+
+#define OS_DISPLAY_RECTANGLE 0U
+/* A circle inscribed in width x height; pixels outside it are not shown. */
+#define OS_DISPLAY_ROUND     1U
+
+#ifndef OS_DISPLAY_MAX
+#define OS_DISPLAY_MAX 2U
+#endif
+#define OS_DISPLAY_NAME_MAX 32U
+
+typedef struct OsDisplayInfo
+{
+    uint16_t width;
+    uint16_t height;
+    uint8_t shape;            /* OS_DISPLAY_RECTANGLE or OS_DISPLAY_ROUND */
+    uint8_t format;           /* the panel's own format, the fastest to write */
+    uint16_t dpi;             /* pixels per inch, 0 when unknown */
+    uint32_t formats;         /* OS_DISPLAY_FORMAT_BIT of each format write accepts; includes format */
+    uint8_t has_brightness;   /* set_brightness works */
+    uint8_t brightness;       /* the level at registration, 0-255 */
+} OsDisplayInfo;
+
+/*
+ * write puts a rectangle of pixels on the display; pixels is valid only
+ * during the call. fill paints a rectangle one color (a pixel value in
+ * format); without it, or when it returns OS_STATUS_UNSUPPORTED for that
+ * display or format, the kernel writes rows. flush makes everything written
+ * visible: a port that buffers (e-paper, a frame it sends whole) shows it
+ * now; one that writes the panel directly may leave it NULL.
+ */
+typedef struct OsDisplayPort
+{
+    void* context;
+    OsStatus (*write)(void* context, uint32_t display, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                      uint32_t format, const void* pixels, uint32_t size);
+    OsStatus (*fill)(void* context, uint32_t display, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                     uint32_t format, uint32_t color);
+    OsStatus (*flush)(void* context, uint32_t display);
+    OsStatus (*set_brightness)(void* context, uint32_t display, uint8_t level);
+} OsDisplayPort;
+
+/* NULL removes the port; programs then get -WR_EUNSUPPORTED. */
+OsStatus os_display_port_set(const OsDisplayPort* port);
+/*
+ * Make display number display available to programs under name.
+ * OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED
+ * past OS_DISPLAY_MAX.
+ */
+OsStatus os_display_add(const char* name, uint32_t display, const OsDisplayInfo* info);
+/* The id of the task that owns a display, 0 when it is free or unknown. */
+uint32_t os_display_get_owner(uint32_t display);
+#endif
+
+#if OS_HAS_INPUT
+/*
+ * Input devices: a group of buttons, a rotary control such as a bezel or a
+ * knob, a touch surface, a keyboard. The platform registers each under the
+ * device profile's name ("buttons", "bezel", "touch", "keyboard") and reports
+ * what happens; the kernel queues events for the program that owns the
+ * device and makes long presses and key repeat from the timings given here,
+ * so they feel the same in every program.
+ *
+ * Keys and buttons use Linux input event codes (KEY_*, BTN_*); rotation is
+ * reported for a REL_* code, such as REL_DIAL for a bezel or REL_WHEEL.
+ * Report from the context that calls os_schedule, not from an interrupt
+ * handler.
+ */
+#define OS_INPUT_BUTTONS  1U
+#define OS_INPUT_ROTARY   2U
+#define OS_INPUT_TOUCH    3U
+#define OS_INPUT_KEYBOARD 4U
+
+#ifndef OS_INPUT_MAX
+#define OS_INPUT_MAX 8U
+#endif
+/* Events a device holds for its program before old ones are dropped. */
+#ifndef OS_INPUT_QUEUE
+#define OS_INPUT_QUEUE 32U
+#endif
+/* Keys a device tracks as held, for long presses and repeat. */
+#ifndef OS_INPUT_MAX_HELD
+#define OS_INPUT_MAX_HELD 4U
+#endif
+#define OS_INPUT_NAME_MAX 32U
+
+typedef struct OsInputInfo
+{
+    uint8_t kind;                /* OS_INPUT_* */
+    uint16_t width;              /* touch: coordinates run 0..width-1, 0..height-1 */
+    uint16_t height;
+    uint16_t steps_per_turn;     /* rotary: detents in a full turn, 0 when unknown */
+    uint16_t long_press_ms;      /* keys held this long report a long press; 0: never */
+    uint16_t repeat_delay_ms;    /* keys held this long start repeating; 0: never */
+    uint16_t repeat_interval_ms; /* then repeat this often */
+} OsInputInfo;
+
+/* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_INPUT_MAX. */
+OsStatus os_input_add(const char* name, uint32_t device, const OsInputInfo* info);
+/* A key or button went down (1) or up (0). */
+OsStatus os_input_key(uint32_t device, uint32_t code, uint8_t down);
+/* steps detents on axis code (REL_*), positive clockwise. */
+OsStatus os_input_rotate(uint32_t device, uint32_t code, int32_t steps);
+/* Contact contact touched (OS_INPUT_TOUCH_DOWN), moved, or lifted at x, y. */
+#define OS_INPUT_TOUCH_UP   0U
+#define OS_INPUT_TOUCH_DOWN 1U
+#define OS_INPUT_TOUCH_MOVE 2U
+OsStatus os_input_touch(uint32_t device, uint32_t contact, uint32_t phase, uint32_t x, uint32_t y);
+/* Text a keyboard produced, one Unicode code point, besides its key events. */
+OsStatus os_input_text(uint32_t device, uint32_t code_point);
+/* The id of the task that owns a device, 0 when it is free or unknown. */
+uint32_t os_input_get_owner(uint32_t device);
 #endif
 
 uint32_t os_get_task_count(void);

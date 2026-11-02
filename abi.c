@@ -149,6 +149,20 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
+#if OS_HAS_DISPLAY
+    if (handle->type == OS_OBJECT_DISPLAY)
+    {
+        os_display_close(handle->id);
+    }
+    else
+#endif
+#if OS_HAS_INPUT
+    if (handle->type == OS_OBJECT_INPUT)
+    {
+        os_input_close(handle->id);
+    }
+    else
+#endif
     if (handle->type != OS_OBJECT_TASK)
     {
         os_object_release(handle->type, handle->id);
@@ -819,7 +833,7 @@ static m3ApiRawFunction(os_abi_wait_any)
     for (index = 0U; index < count; ++index)
     {
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
-        if (entry == NULL || entry->type == OS_OBJECT_MUTEX)
+        if (entry == NULL || entry->type == OS_OBJECT_MUTEX || entry->type == OS_OBJECT_DISPLAY)
         {
             m3ApiReturn(-WR_EBADH);
         }
@@ -1159,7 +1173,221 @@ static m3ApiRawFunction(os_abi_gpio_events)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO
+/* ---------------------------------------------------------------------------
+ * display
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_DISPLAY
+static m3ApiRawFunction(os_abi_display_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, flags);
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(name_address, name_length, &name);
+    if (handle < 0)
+    {
+        m3ApiReturn(handle);
+    }
+    if (name == NULL || flags != 0U)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    status = os_display_open(name, name_length, &id);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_abi_handle_new(OS_OBJECT_DISPLAY, id);
+    if (handle < 0)
+    {
+        os_display_close(id);
+    }
+    m3ApiReturn(handle);
+}
+
+static m3ApiRawFunction(os_abi_display_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, property);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    status = os_display_get(entry->id, property, &value);
+    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
+}
+
+static m3ApiRawFunction(os_abi_display_write)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, x);
+    m3ApiGetArg(uint32_t, y);
+    m3ApiGetArg(uint32_t, width);
+    m3ApiGetArg(uint32_t, height);
+    m3ApiGetArg(uint32_t, format);
+    m3ApiGetArg(uint32_t, pixels_address);
+    m3ApiGetArg(uint32_t, length);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
+    uint8_t* pixels = NULL;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (length > 0U && os_guest_memory(pixels_address, length, &pixels) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    /* The port reads the program's memory in place, during this call only. */
+    m3ApiReturn(os_abi_error(os_display_write(entry->id, x, y, width, height, format, pixels, length)));
+}
+
+static m3ApiRawFunction(os_abi_display_fill)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, x);
+    m3ApiGetArg(uint32_t, y);
+    m3ApiGetArg(uint32_t, width);
+    m3ApiGetArg(uint32_t, height);
+    m3ApiGetArg(uint32_t, format);
+    m3ApiGetArg(uint32_t, color);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_display_fill(entry->id, x, y, width, height, format, color)));
+}
+
+static m3ApiRawFunction(os_abi_display_flush)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_display_flush(entry->id)));
+}
+
+static m3ApiRawFunction(os_abi_display_set_brightness)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, level);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_display_set_brightness(entry->id, level)));
+}
+#endif
+
+/* ---------------------------------------------------------------------------
+ * input
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_INPUT
+static m3ApiRawFunction(os_abi_input_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, flags);
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(name_address, name_length, &name);
+    if (handle < 0)
+    {
+        m3ApiReturn(handle);
+    }
+    if (name == NULL || flags != 0U)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    status = os_input_open(name, name_length, &id);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_abi_handle_new(OS_OBJECT_INPUT, id);
+    if (handle < 0)
+    {
+        os_input_close(id);
+    }
+    m3ApiReturn(handle);
+}
+
+static m3ApiRawFunction(os_abi_input_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, property);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_INPUT);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    status = os_input_get(entry->id, property, &value);
+    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
+}
+
+static m3ApiRawFunction(os_abi_input_read)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, events_address);
+    m3ApiGetArg(uint32_t, max_events);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_INPUT);
+    uint8_t* events = NULL;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (max_events > UINT32_MAX / OS_INPUT_EVENT_SIZE ||
+        os_guest_memory(events_address, max_events * OS_INPUT_EVENT_SIZE, &events) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    m3ApiReturn((int32_t)os_input_read(entry->id, events, max_events));
+}
+#endif
+
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static m3ApiRawFunction(os_abi_unsupported)
 {
@@ -1480,6 +1708,32 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("gpio"), "set-mode", "i(ii)", os_abi_unsupported, 1U },
     { WR_MODULE("gpio"), "watch", "i(ii)", os_abi_unsupported, 1U },
     { WR_MODULE("gpio"), "events", "i(i)", os_abi_unsupported, 1U },
+#endif
+
+#if OS_HAS_DISPLAY
+    { WR_MODULE("display"), "open", "i(iii)", os_abi_display_open, 2U },
+    { WR_MODULE("display"), "get", "i(ii)", os_abi_display_get, 2U },
+    { WR_MODULE("display"), "write", "i(iiiiiiii)", os_abi_display_write, 2U },
+    { WR_MODULE("display"), "fill", "i(iiiiiii)", os_abi_display_fill, 2U },
+    { WR_MODULE("display"), "flush", "i(i)", os_abi_display_flush, 2U },
+    { WR_MODULE("display"), "set-brightness", "i(ii)", os_abi_display_set_brightness, 2U },
+#else
+    { WR_MODULE("display"), "open", "i(iii)", os_abi_unsupported, 2U },
+    { WR_MODULE("display"), "get", "i(ii)", os_abi_unsupported, 2U },
+    { WR_MODULE("display"), "write", "i(iiiiiiii)", os_abi_unsupported, 2U },
+    { WR_MODULE("display"), "fill", "i(iiiiiii)", os_abi_unsupported, 2U },
+    { WR_MODULE("display"), "flush", "i(i)", os_abi_unsupported, 2U },
+    { WR_MODULE("display"), "set-brightness", "i(ii)", os_abi_unsupported, 2U },
+#endif
+
+#if OS_HAS_INPUT
+    { WR_MODULE("input"), "open", "i(iii)", os_abi_input_open, 2U },
+    { WR_MODULE("input"), "get", "i(ii)", os_abi_input_get, 2U },
+    { WR_MODULE("input"), "read", "i(iii)", os_abi_input_read, 2U },
+#else
+    { WR_MODULE("input"), "open", "i(iii)", os_abi_unsupported, 2U },
+    { WR_MODULE("input"), "get", "i(ii)", os_abi_unsupported, 2U },
+    { WR_MODULE("input"), "read", "i(iii)", os_abi_unsupported, 2U },
 #endif
 
 #if defined(OS_ABI_HAS_WASI)

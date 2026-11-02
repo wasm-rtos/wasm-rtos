@@ -2,7 +2,7 @@
 #define WASM_RTOS_H_GUEST
 
 /*
- * wasm-rtos ABI 1.1 for programs written in C or C++ (wasm32).
+ * wasm-rtos ABI 1.2 for programs written in C or C++ (wasm32).
  *
  * Every call returns an int32_t: zero or a value on success, a negative WR_E*
  * error otherwise. Handles belong to the calling program and close when it
@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define WR_ABI_VERSION_MAJOR 1
-#define WR_ABI_VERSION_MINOR 1
+#define WR_ABI_VERSION_MINOR 2
 
 /* Errors; calls return their negatives. */
 #define WR_EFAULT       1   /* a pointer or range lies outside the program's memory */
@@ -63,6 +63,78 @@ extern "C" {
 #define WR_GPIO_RISING     0x01u
 #define WR_GPIO_FALLING    0x02u
 
+/* display-get properties (1.2); a property the kernel does not know is -WR_EUNSUPPORTED. */
+#define WR_DISPLAY_WIDTH      1u
+#define WR_DISPLAY_HEIGHT     2u
+#define WR_DISPLAY_SHAPE      3u  /* WR_DISPLAY_RECTANGLE or WR_DISPLAY_ROUND */
+#define WR_DISPLAY_FORMAT     4u  /* the panel's own format, the fastest to write */
+#define WR_DISPLAY_FORMATS    5u  /* WR_DISPLAY_FORMAT_BIT of every format display-write accepts */
+#define WR_DISPLAY_DPI        6u  /* pixels per inch, 0 when unknown */
+#define WR_DISPLAY_BRIGHTNESS 7u  /* 0-255; -WR_EUNSUPPORTED without brightness control */
+#define WR_DISPLAY_RECTANGLE  0u
+#define WR_DISPLAY_ROUND      1u  /* a circle inscribed in width x height */
+/* Pixel formats. MONO1: 1 bit per pixel, 1 = lit, rows of whole bytes,
+ * leftmost pixel in the top bit. RGB565: uint16_t, red in the top 5 bits.
+ * XRGB8888: uint32_t 0x00RRGGBB. Both little-endian, as wasm32 stores them. */
+#define WR_PIXEL_MONO1    1u
+#define WR_PIXEL_RGB565   2u
+#define WR_PIXEL_XRGB8888 3u
+#define WR_DISPLAY_FORMAT_BIT(format) (1u << (format))
+
+/* input-get properties (1.2). */
+#define WR_INPUT_KIND           1u  /* WR_INPUT_BUTTONS ... WR_INPUT_KEYBOARD */
+#define WR_INPUT_WIDTH          2u  /* touch: x runs 0..width-1 */
+#define WR_INPUT_HEIGHT         3u
+#define WR_INPUT_STEPS_PER_TURN 4u  /* rotary: detents in a full turn, 0 when unknown */
+#define WR_INPUT_BUTTONS  1u
+#define WR_INPUT_ROTARY   2u
+#define WR_INPUT_TOUCH    3u
+#define WR_INPUT_KEYBOARD 4u
+
+/* One input event as input-read stores it (16 bytes, little-endian). */
+typedef struct wr_input_event
+{
+    uint8_t type;      /* WR_EVENT_KEY ... WR_EVENT_DROPPED */
+    uint8_t reserved;
+    uint16_t code;     /* key: Linux key code; rotate: REL_* axis; touch: contact */
+    int32_t value;     /* see the event types */
+    uint16_t x;        /* touch position */
+    uint16_t y;
+    uint32_t time_ms;  /* kernel time, low 32 bits, when it happened */
+} wr_input_event;
+
+#define WR_EVENT_KEY     1u  /* value: WR_KEY_RELEASED, _PRESSED, _REPEATED or _LONG_PRESS */
+#define WR_EVENT_ROTATE  2u  /* value: detents, positive clockwise */
+#define WR_EVENT_TOUCH   3u  /* value: WR_TOUCH_UP, _DOWN or _MOVE; x, y */
+#define WR_EVENT_TEXT    4u  /* value: a Unicode code point the keyboard typed */
+#define WR_EVENT_DROPPED 5u  /* value: events lost before the ones that follow */
+#define WR_KEY_RELEASED   0
+#define WR_KEY_PRESSED    1
+#define WR_KEY_REPEATED   2  /* still held, at the device's repeat rate */
+#define WR_KEY_LONG_PRESS 3  /* held for the device's long-press time; once per press */
+#define WR_TOUCH_UP   0
+#define WR_TOUCH_DOWN 1
+#define WR_TOUCH_MOVE 2
+
+/* Codes are the Linux input event codes (linux/input-event-codes.h); some common ones. */
+#define WR_KEY_ESC        1
+#define WR_KEY_BACKSPACE  14
+#define WR_KEY_ENTER      28
+#define WR_KEY_SPACE      57
+#define WR_KEY_HOME       102
+#define WR_KEY_UP         103
+#define WR_KEY_LEFT       105
+#define WR_KEY_RIGHT      106
+#define WR_KEY_DOWN       108
+#define WR_KEY_POWER      116
+#define WR_KEY_MENU       139
+#define WR_KEY_BACK       158
+#define WR_KEY_SELECT     0x161
+#define WR_BTN_0          0x100  /* BTN_0 ... BTN_9: buttons without a meaning of their own */
+#define WR_REL_HWHEEL     6
+#define WR_REL_DIAL       7      /* a bezel or a dial */
+#define WR_REL_WHEEL      8
+
 /* One string argument for spawn: matches the ABI's (pointer, length) pair. */
 typedef struct wr_str
 {
@@ -71,7 +143,7 @@ typedef struct wr_str
 } wr_str;
 
 #define WR_IMPORT(interface, name) \
-    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.1.0"), import_name(name)))
+    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.2.0"), import_name(name)))
 
 /* handle */
 WR_IMPORT("handle", "close") int32_t wr_close(int32_t handle);
@@ -128,6 +200,28 @@ WR_IMPORT("gpio", "set-mode") int32_t wr_gpio_set_mode(int32_t pin, uint32_t fla
 WR_IMPORT("gpio", "watch") int32_t wr_gpio_watch(int32_t pin, uint32_t edges);
 WR_IMPORT("gpio", "events") int32_t wr_gpio_events(int32_t pin);
 
+/* display (1.2): screens by the device profile's names ("main"); one owner at
+ * a time (-WR_EINUSE). display-write takes exactly the rectangle's pixels,
+ * which must lie inside the display; what is written shows no later than
+ * display-flush. flags are 0. */
+WR_IMPORT("display", "open") int32_t wr_display_open(const char* name, uint32_t name_length, uint32_t flags);
+WR_IMPORT("display", "get") int32_t wr_display_get(int32_t display, uint32_t property);
+WR_IMPORT("display", "write") int32_t wr_display_write(int32_t display, uint32_t x, uint32_t y, uint32_t width,
+                                                       uint32_t height, uint32_t format, const void* pixels,
+                                                       uint32_t length);
+WR_IMPORT("display", "fill") int32_t wr_display_fill(int32_t display, uint32_t x, uint32_t y, uint32_t width,
+                                                     uint32_t height, uint32_t format, uint32_t color);
+WR_IMPORT("display", "flush") int32_t wr_display_flush(int32_t display);
+WR_IMPORT("display", "set-brightness") int32_t wr_display_set_brightness(int32_t display, uint32_t level);
+
+/* input (1.2): devices by the device profile's names ("buttons", "bezel",
+ * "touch", "keyboard"); one owner at a time. The handle is ready for
+ * wait.any while events are queued; input-read moves up to max_events of
+ * them and returns how many (0: none). flags are 0. */
+WR_IMPORT("input", "open") int32_t wr_input_open(const char* name, uint32_t name_length, uint32_t flags);
+WR_IMPORT("input", "get") int32_t wr_input_get(int32_t device, uint32_t property);
+WR_IMPORT("input", "read") int32_t wr_input_read(int32_t device, wr_input_event* events, uint32_t max_events);
+
 /* Time, sleep and yield through WASI, for programs without a C library. */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
 int32_t wr_wasi_clock_time_get_(uint32_t clock, uint64_t precision, uint64_t* out_time);
@@ -179,6 +273,8 @@ static inline wr_str wr_cstr(const char* text)
 #define wr_event_open(name) wr_event_create((name), wr_strlen(name))
 #define wr_queue_open(name, item_size, capacity) wr_queue_create((name), wr_strlen(name), (item_size), (capacity))
 #define wr_gpio_open_cstr(name, flags) wr_gpio_open((name), wr_strlen(name), (flags))
+#define wr_display_open_cstr(name) wr_display_open((name), wr_strlen(name), 0)
+#define wr_input_open_cstr(name) wr_input_open((name), wr_strlen(name), 0)
 #define wr_spawn_path_cstr(path, args, argc, priority, stack) \
     wr_spawn_path((path), wr_strlen(path), (args), (argc), (priority), (stack))
 
@@ -192,7 +288,7 @@ static inline wr_str wr_cstr(const char* text)
     __asm__(WR_APP_SECTION_ ".int8 " #key "\n.uleb128 2f-1f\n1:\n.ascii \"" text "\"\n2:\n.text\n")
 
 /* The ABI version the program was written for (major << 16 | minor). */
-#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65537)
+#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65538)
 /* Interpreter stack in bytes, unless whoever starts the program picks one. */
 #define WR_APP_STACK_SIZE(bytes) WR_APP_U32_(2, bytes)
 /* Name shown for the program. */

@@ -1,4 +1,4 @@
-// wasm-rtos ABI 1.1: what a program imports from the kernel.
+// wasm-rtos ABI 1.2: what a program imports from the kernel.
 //
 // Lowered to core wasm imports by hand ("canonical ABI lite"): every function
 // returns s32, zero or a value on success and a negative `error` otherwise;
@@ -7,7 +7,7 @@
 // interface is "wasm-rtos:kernel/<interface>@1.<minor>.0", the minor version
 // the program was built for. docs/abi.md has the rules.
 
-package wasm-rtos:kernel@1.1.0;
+package wasm-rtos:kernel@1.2.0;
 
 interface types {
     // A handle to a kernel object; it belongs to the calling program.
@@ -103,6 +103,51 @@ interface gpio {
     events: func(pin: handle) -> s32;
 }
 
+// Screens by the device profile's names ("main"), one owner at a time.
+@since(version = 1.2.0)
+interface display {
+    use types.{handle};
+    // get: width, height, shape (0 rectangle, 1 round), format (the panel's
+    // own), formats (bit 1 << format for each one write accepts), dpi (0:
+    // unknown), brightness (0-255, -unsupported without control). A
+    // property this kernel does not know is -unsupported.
+    enum property { reserved, width, height, shape, format, formats, dpi, brightness }
+    // mono1: 1 bit per pixel, 1 = lit, rows of whole bytes, leftmost pixel
+    // in the top bit; rgb565: u16 LE, red in the top 5 bits; xrgb8888: u32
+    // LE 0x00RRGGBB.
+    enum pixel-format { reserved, mono1, rgb565, xrgb8888 }
+    // flags must be 0.
+    open: func(name: string, %flags: u32) -> handle;
+    get: func(display: handle, property: property) -> s32;
+    // pixels: exactly the rectangle's bytes in format; the rectangle lies
+    // inside the display. Shows no later than flush.
+    write: func(display: handle, x: u32, y: u32, width: u32, height: u32, format: pixel-format, pixels: list<u8>) -> s32;
+    // color is one pixel value in format.
+    fill: func(display: handle, x: u32, y: u32, width: u32, height: u32, format: pixel-format, color: u32) -> s32;
+    flush: func(display: handle) -> s32;
+    set-brightness: func(display: handle, level: u32) -> s32;
+}
+
+// Buttons, rotary controls, touch and keyboards by the device profile's
+// names ("buttons", "bezel", "touch", "keyboard"), one owner at a time. The
+// handle is ready for wait.any while events are queued.
+@since(version = 1.2.0)
+interface input {
+    use types.{handle};
+    enum property { reserved, kind, width, height, steps-per-turn }
+    enum kind { reserved, buttons, rotary, touch, keyboard }
+    // events points to max-events records of 16 bytes, little-endian:
+    //   u8 type, u8 reserved, u16 code, s32 value, u16 x, u16 y, u32 time-ms
+    // type 1 key (code: Linux key code; value 0 released, 1 pressed,
+    // 2 repeated, 3 long press), 2 rotate (code: Linux REL_* axis; value:
+    // detents, positive clockwise), 3 touch (code: contact; value 0 up,
+    // 1 down, 2 move; x, y), 4 text (value: Unicode code point), 5 dropped
+    // (value: events lost before the following ones). Returns the count.
+    open: func(name: string, %flags: u32) -> handle;
+    get: func(device: handle, property: property) -> s32;
+    read: func(device: handle, events: u32, max-events: u32) -> s32;
+}
+
 world program {
     import handle;
     import sync;
@@ -111,4 +156,8 @@ world program {
     import proc;
     @since(version = 1.1.0)
     import gpio;
+    @since(version = 1.2.0)
+    import display;
+    @since(version = 1.2.0)
+    import input;
 }
