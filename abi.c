@@ -1713,7 +1713,11 @@ static m3ApiRawFunction(os_abi_adc_read)
     {
         m3ApiReturn(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_property(os_adc_read(entry->id, &value), value));
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_adc_read(entry->id, &value);
+        m3ApiReturn(os_abi_property(status, value));
+    }
 }
 
 static m3ApiRawFunction(os_abi_adc_read_mv)
@@ -1728,7 +1732,11 @@ static m3ApiRawFunction(os_abi_adc_read_mv)
     {
         m3ApiReturn(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_property(os_adc_read_mv(entry->id, &value), value));
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_adc_read_mv(entry->id, &value);
+        m3ApiReturn(os_abi_property(status, value));
+    }
 }
 
 static m3ApiRawFunction(os_abi_adc_get)
@@ -1744,7 +1752,11 @@ static m3ApiRawFunction(os_abi_adc_get)
     {
         m3ApiReturn(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_property(os_adc_get(entry->id, property, &value), value));
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_adc_get(entry->id, property, &value);
+        m3ApiReturn(os_abi_property(status, value));
+    }
 }
 #endif
 
@@ -1817,7 +1829,11 @@ static m3ApiRawFunction(os_abi_pwm_get)
     {
         m3ApiReturn(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_property(os_pwm_get(entry->id, property, &value), value));
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_pwm_get(entry->id, property, &value);
+        m3ApiReturn(os_abi_property(status, value));
+    }
 }
 #endif
 
@@ -1928,7 +1944,11 @@ static m3ApiRawFunction(os_abi_uart_get)
     {
         m3ApiReturn(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_property(os_uart_get(entry->id, property, &value), value));
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_uart_get(entry->id, property, &value);
+        m3ApiReturn(os_abi_property(status, value));
+    }
 }
 #endif
 
