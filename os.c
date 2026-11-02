@@ -76,7 +76,9 @@ typedef enum OsTaskWaitType
     OS_TASK_WAIT_CHILD,
     OS_TASK_WAIT_ANY,
     /* A bus transfer in the background: the port uses the task's memory until it ends. */
-    OS_TASK_WAIT_BUS
+    OS_TASK_WAIT_BUS,
+    /* Something outside the kernel's objects, by key (os_signal_wait). */
+    OS_TASK_WAIT_SIGNAL
 } OsTaskWaitType;
 
 typedef enum OsWaitReturnKind
@@ -580,6 +582,15 @@ void os_shutdown(void)
     os_host_import_free_list();
 #if OS_HAS_I2C || OS_HAS_SPI
     os_bus_shutdown();
+#endif
+#if OS_HAS_ADC
+    os_adc_shutdown();
+#endif
+#if OS_HAS_PWM
+    os_pwm_shutdown();
+#endif
+#if OS_HAS_UART
+    os_uart_shutdown();
 #endif
 #if OS_HAS_FS
     os_fs_shutdown();
@@ -3723,6 +3734,10 @@ OsStatus os_schedule(void)
 #if OS_HAS_I2C || OS_HAS_SPI
     /* Background bus transfers that have ended. */
     os_bus_poll();
+#endif
+#if OS_HAS_UART
+    /* Bytes received and room to send, reported from interrupt handlers. */
+    os_uart_poll();
 #endif
 
     if (g_os.clock_port.now_ms != NULL)
@@ -7078,6 +7093,10 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target)
         case OS_OBJECT_INPUT:
             return os_input_ready(target->id);
 #endif
+#if OS_HAS_UART
+        case OS_OBJECT_UART:
+            return os_uart_ready(target->id);
+#endif
         default:
             return 0U;
     }
@@ -7256,6 +7275,37 @@ void os_bus_wait_end(uint32_t task_id, OsStatus status)
     os_recalculate_task_counters();
 }
 #endif
+
+OsStatus os_signal_wait(uint32_t key, uint32_t timeout_ms)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsStatus status = os_begin_task_wait(task, OS_TASK_WAIT_SIGNAL, timeout_ms);
+
+    if (status == OS_STATUS_OK)
+    {
+        task->wait_bits = key;
+    }
+    return status;
+}
+
+void os_signal_wake(uint32_t key)
+{
+    OsTaskHandle task = NULL;
+    uint8_t woke = 0U;
+
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        if (task->state == OS_TASK_WAITING && task->wait_type == OS_TASK_WAIT_SIGNAL && task->wait_bits == key)
+        {
+            os_complete_task_wait(task, OS_STATUS_OK, 0U);
+            woke = 1U;
+        }
+    }
+    if (woke)
+    {
+        os_recalculate_task_counters();
+    }
+}
 
 OsStatus os_host_wait_begin(uint32_t* result_slot)
 {

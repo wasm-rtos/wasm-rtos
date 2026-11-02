@@ -181,6 +181,20 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
+#if OS_HAS_PWM
+    if (handle->type == OS_OBJECT_PWM)
+    {
+        os_pwm_close(handle->id);
+    }
+    else
+#endif
+#if OS_HAS_UART
+    if (handle->type == OS_OBJECT_UART)
+    {
+        os_uart_close(handle->id);
+    }
+    else
+#endif
     if (handle->type != OS_OBJECT_TASK)
     {
         os_object_release(handle->type, handle->id);
@@ -852,7 +866,8 @@ static m3ApiRawFunction(os_abi_wait_any)
     {
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX || entry->type == OS_OBJECT_DISPLAY ||
-            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI)
+            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI || entry->type == OS_OBJECT_ADC ||
+            entry->type == OS_OBJECT_PWM)
         {
             m3ApiReturn(-WR_EBADH);
         }
@@ -1621,7 +1636,304 @@ static m3ApiRawFunction(os_abi_spi_transaction)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || !OS_HAS_SPI
+/* ---------------------------------------------------------------------------
+ * adc, pwm, uart
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_ADC || OS_HAS_PWM || OS_HAS_UART
+/* A property value for the program, or the error. */
+static int32_t os_abi_property(OsStatus status, uint32_t value)
+{
+    return status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status);
+}
+
+/* Read a name, then make a handle for what opener opened, closing it again when no handle is left. */
+static int32_t os_abi_open_device(uint32_t name_address, uint32_t name_length, OsObjectType type,
+                                  OsStatus (*opener)(const char* name, uint32_t length, void* context, uint32_t* out_id),
+                                  void* context, void (*closer)(uint32_t id))
+{
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = os_abi_read_name(name_address, name_length, &name);
+    OsStatus status = OS_STATUS_OK;
+
+    if (handle < 0)
+    {
+        return handle;
+    }
+    if (name == NULL)
+    {
+        return -WR_EINVAL;
+    }
+    status = opener(name, name_length, context, &id);
+    if (status != OS_STATUS_OK)
+    {
+        return status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status);
+    }
+    handle = os_abi_handle_new(type, id);
+    if (handle < 0 && closer != NULL)
+    {
+        closer(id);
+    }
+    return handle;
+}
+#endif
+
+#if OS_HAS_ADC
+static OsStatus os_abi_adc_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    (void)context;
+    return os_adc_open(name, length, out_id);
+}
+
+static m3ApiRawFunction(os_abi_adc_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, flags);
+    OS_ABI_UNUSED();
+
+    if (flags != 0U)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_ADC, os_abi_adc_opener, NULL, NULL));
+}
+
+static m3ApiRawFunction(os_abi_adc_read)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_property(os_adc_read(entry->id, &value), value));
+}
+
+static m3ApiRawFunction(os_abi_adc_read_mv)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_property(os_adc_read_mv(entry->id, &value), value));
+}
+
+static m3ApiRawFunction(os_abi_adc_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, property);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_property(os_adc_get(entry->id, property, &value), value));
+}
+#endif
+
+#if OS_HAS_PWM
+typedef struct OsAbiPwmOpen
+{
+    uint32_t frequency_hz;
+    uint32_t flags;
+} OsAbiPwmOpen;
+
+static OsStatus os_abi_pwm_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    const OsAbiPwmOpen* open = (const OsAbiPwmOpen*)context;
+    return os_pwm_open(name, length, open->frequency_hz, open->flags, out_id);
+}
+
+static m3ApiRawFunction(os_abi_pwm_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, frequency_hz);
+    m3ApiGetArg(uint32_t, flags);
+    OsAbiPwmOpen open = { frequency_hz, flags };
+    OS_ABI_UNUSED();
+
+    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_PWM, os_abi_pwm_opener, &open, os_pwm_close));
+}
+
+static m3ApiRawFunction(os_abi_pwm_set_duty)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, duty);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_pwm_set_duty(entry->id, duty)));
+}
+
+static m3ApiRawFunction(os_abi_pwm_set_frequency)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, frequency_hz);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_pwm_set_frequency(entry->id, frequency_hz)));
+}
+
+static m3ApiRawFunction(os_abi_pwm_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, property);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_property(os_pwm_get(entry->id, property, &value), value));
+}
+#endif
+
+#if OS_HAS_UART
+typedef struct OsAbiUartOpen
+{
+    uint32_t baud;
+    uint32_t format;
+} OsAbiUartOpen;
+
+static OsStatus os_abi_uart_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    const OsAbiUartOpen* open = (const OsAbiUartOpen*)context;
+    return os_uart_open(name, length, open->baud, open->format, out_id);
+}
+
+static m3ApiRawFunction(os_abi_uart_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, baud);
+    m3ApiGetArg(uint32_t, format);
+    OsAbiUartOpen open = { baud, format };
+    OS_ABI_UNUSED();
+
+    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_UART, os_abi_uart_opener, &open,
+                                   os_uart_close));
+}
+
+static m3ApiRawFunction(os_abi_uart_read)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, buffer_address);
+    m3ApiGetArg(uint32_t, max);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
+    uint8_t* buffer = NULL;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (max > 0x7FFFFFFFU || (max > 0U && os_guest_memory(buffer_address, max, &buffer) != OS_STATUS_OK))
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    m3ApiReturn((int32_t)os_uart_read(entry->id, buffer, max));
+}
+
+static m3ApiRawFunction(os_abi_uart_write)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, data_address);
+    m3ApiGetArg(uint32_t, length);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
+    uint8_t* data = NULL;
+    uint32_t written = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    status = os_uart_write(entry->id, data, length, &written);
+    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)written : os_abi_error(status));
+}
+
+static m3ApiRawFunction(os_abi_uart_wait_writable)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, timeout_ms);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    status = os_uart_wait_writable(entry->id, timeout_ms);
+    *raw_return = os_abi_error(status);
+    return os_guest_end();
+}
+
+static m3ApiRawFunction(os_abi_uart_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, property);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_property(os_uart_get(entry->id, property, &value), value));
+}
+#endif
+
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
+    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static m3ApiRawFunction(os_abi_unsupported)
 {
@@ -1984,6 +2296,44 @@ static const OsAbiImport g_abi_imports[] =
 #else
     { WR_MODULE("spi"), "open", "i(iiiiii)", os_abi_unsupported, 3U },
     { WR_MODULE("spi"), "transaction", "i(iii)", os_abi_unsupported, 3U },
+#endif
+
+#if OS_HAS_ADC
+    { WR_MODULE("adc"), "open", "i(iii)", os_abi_adc_open, 4U },
+    { WR_MODULE("adc"), "read", "i(i)", os_abi_adc_read, 4U },
+    { WR_MODULE("adc"), "read-mv", "i(i)", os_abi_adc_read_mv, 4U },
+    { WR_MODULE("adc"), "get", "i(ii)", os_abi_adc_get, 4U },
+#else
+    { WR_MODULE("adc"), "open", "i(iii)", os_abi_unsupported, 4U },
+    { WR_MODULE("adc"), "read", "i(i)", os_abi_unsupported, 4U },
+    { WR_MODULE("adc"), "read-mv", "i(i)", os_abi_unsupported, 4U },
+    { WR_MODULE("adc"), "get", "i(ii)", os_abi_unsupported, 4U },
+#endif
+
+#if OS_HAS_PWM
+    { WR_MODULE("pwm"), "open", "i(iiii)", os_abi_pwm_open, 4U },
+    { WR_MODULE("pwm"), "set-duty", "i(ii)", os_abi_pwm_set_duty, 4U },
+    { WR_MODULE("pwm"), "set-frequency", "i(ii)", os_abi_pwm_set_frequency, 4U },
+    { WR_MODULE("pwm"), "get", "i(ii)", os_abi_pwm_get, 4U },
+#else
+    { WR_MODULE("pwm"), "open", "i(iiii)", os_abi_unsupported, 4U },
+    { WR_MODULE("pwm"), "set-duty", "i(ii)", os_abi_unsupported, 4U },
+    { WR_MODULE("pwm"), "set-frequency", "i(ii)", os_abi_unsupported, 4U },
+    { WR_MODULE("pwm"), "get", "i(ii)", os_abi_unsupported, 4U },
+#endif
+
+#if OS_HAS_UART
+    { WR_MODULE("uart"), "open", "i(iiii)", os_abi_uart_open, 4U },
+    { WR_MODULE("uart"), "read", "i(iii)", os_abi_uart_read, 4U },
+    { WR_MODULE("uart"), "write", "i(iii)", os_abi_uart_write, 4U },
+    { WR_MODULE("uart"), "wait-writable", "i(ii)", os_abi_uart_wait_writable, 4U },
+    { WR_MODULE("uart"), "get", "i(ii)", os_abi_uart_get, 4U },
+#else
+    { WR_MODULE("uart"), "open", "i(iiii)", os_abi_unsupported, 4U },
+    { WR_MODULE("uart"), "read", "i(iii)", os_abi_unsupported, 4U },
+    { WR_MODULE("uart"), "write", "i(iii)", os_abi_unsupported, 4U },
+    { WR_MODULE("uart"), "wait-writable", "i(ii)", os_abi_unsupported, 4U },
+    { WR_MODULE("uart"), "get", "i(ii)", os_abi_unsupported, 4U },
 #endif
 
 #if defined(OS_ABI_HAS_WASI)

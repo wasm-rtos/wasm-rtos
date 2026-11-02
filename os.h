@@ -19,6 +19,9 @@
  *   OS_HAS_INPUT      buttons, rotary controls, touch and keyboards for programs
  *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
  *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
+ *   OS_HAS_ADC        analog inputs for programs through a platform ADC port
+ *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
+ *   OS_HAS_UART       serial ports for programs through a platform UART port
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -43,6 +46,19 @@
 #endif
 #ifndef OS_HAS_SPI
 #define OS_HAS_SPI 1
+#endif
+#ifndef OS_HAS_ADC
+#define OS_HAS_ADC 1
+#endif
+/* PWM outputs are GPIO pins: off without GPIO. */
+#ifndef OS_HAS_PWM
+#define OS_HAS_PWM OS_HAS_GPIO
+#endif
+#if OS_HAS_PWM && !OS_HAS_GPIO
+#error "OS_HAS_PWM needs OS_HAS_GPIO"
+#endif
+#ifndef OS_HAS_UART
+#define OS_HAS_UART 1
 #endif
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
@@ -182,7 +198,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
-#define OS_ABI_VERSION_MINOR 3U
+#define OS_ABI_VERSION_MINOR 4U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -701,7 +717,8 @@ OsStatus os_schedule(void);
 #define OS_GPIO_CAN_PULL_DOWN  0x08U
 #define OS_GPIO_CAN_OPEN_DRAIN 0x10U
 #define OS_GPIO_CAN_EDGES      0x20U
-#define OS_GPIO_CAN_ALL        0x3FU
+#define OS_GPIO_CAN_PWM        0x40U
+#define OS_GPIO_CAN_ALL        0x7FU
 
 /* os_gpio_add_pin options: the board inverts the pin, so programs see 1 for "on". */
 #define OS_GPIO_ACTIVE_LOW 0x01U
@@ -1031,6 +1048,108 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context);
 void os_bus_complete(uint32_t kind, uint32_t bus, OsStatus status);
 /* Whether a background transfer is in progress on a bus. */
 uint8_t os_bus_is_busy(uint32_t kind, uint32_t bus);
+#endif
+
+#if OS_HAS_ADC
+/*
+ * Analog inputs, registered under the device profile's names ("a0",
+ * "battery"). Reading changes nothing, so programs share a channel. read
+ * returns the converter's raw value; read_mv, when the port has one, a
+ * calibrated voltage. Without it, or when it returns OS_STATUS_UNSUPPORTED
+ * for a channel, the kernel scales the raw value.
+ */
+#ifndef OS_ADC_MAX
+#define OS_ADC_MAX 8U
+#endif
+#define OS_ADC_NAME_MAX 32U
+
+typedef struct OsAdcInfo
+{
+    uint8_t resolution_bits;   /* raw values run 0 .. 2^bits - 1 */
+    uint32_t full_scale_mv;    /* the voltage of the largest raw value */
+} OsAdcInfo;
+
+typedef struct OsAdcPort
+{
+    void* context;
+    OsStatus (*read)(void* context, uint32_t channel, uint32_t* out_raw);
+    OsStatus (*read_mv)(void* context, uint32_t channel, uint32_t* out_mv);
+} OsAdcPort;
+
+OsStatus os_adc_port_set(const OsAdcPort* port);
+/* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_ADC_MAX. */
+OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo* info);
+#endif
+
+#if OS_HAS_PWM
+/*
+ * Pulse-width outputs on GPIO pins that have OS_GPIO_CAN_PWM. A program owns
+ * the pin as it would through gpio; closing gives it back as an input.
+ * Duty is 0 (always low) to 65535 (always high) on the pin; the kernel has
+ * already applied the board's and the program's inversion. A port without a
+ * free channel or timer for the pin returns OS_STATUS_LIMIT_REACHED; it may
+ * round the frequency and reports the one it set.
+ */
+#define OS_PWM_DUTY_MAX 65535U
+
+typedef struct OsPwmPort
+{
+    void* context;
+    OsStatus (*start)(void* context, uint32_t pin, uint32_t frequency_hz, uint32_t duty, uint32_t* out_frequency_hz);
+    OsStatus (*set_duty)(void* context, uint32_t pin, uint32_t duty);
+    OsStatus (*set_frequency)(void* context, uint32_t pin, uint32_t frequency_hz, uint32_t* out_frequency_hz);
+    void (*stop)(void* context, uint32_t pin);
+} OsPwmPort;
+
+OsStatus os_pwm_port_set(const OsPwmPort* port);
+#endif
+
+#if OS_HAS_UART
+/*
+ * Serial ports, registered under the device profile's names ("uart1",
+ * "gps"), one owner each. Received bytes go into a kernel buffer the port
+ * fills with os_uart_receive; sending hands bytes to the port's write,
+ * which takes what fits in its own buffer and returns how many. When it
+ * has room again it calls os_uart_writable. Both are safe in interrupt
+ * handlers; the next os_schedule wakes the programs waiting for them.
+ */
+#ifndef OS_UART_MAX
+#define OS_UART_MAX 4U
+#endif
+/* Bytes the kernel keeps for a program between reads; a power of two. */
+#ifndef OS_UART_RX_BUFFER
+#define OS_UART_RX_BUFFER 256U
+#endif
+#define OS_UART_NAME_MAX 32U
+
+/* Frame format for configure; 8 data bits, no parity, 1 stop bit when 0. */
+#define OS_UART_PARITY_EVEN 0x01U
+#define OS_UART_PARITY_ODD  0x02U
+#define OS_UART_STOP_2      0x04U
+#define OS_UART_DATA_7      0x08U
+#define OS_UART_FLOW_RTS_CTS 0x10U
+
+typedef struct OsUartPort
+{
+    void* context;
+    OsStatus (*configure)(void* context, uint32_t uart, uint32_t baud, uint32_t format, uint32_t* out_baud);
+    /* Takes up to size bytes into the port's own buffer; how many in *out_written. */
+    OsStatus (*write)(void* context, uint32_t uart, const uint8_t* data, uint32_t size, uint32_t* out_written);
+    /* The port stops receiving: the program closed the port. May be NULL. */
+    void (*close)(void* context, uint32_t uart);
+} OsUartPort;
+
+OsStatus os_uart_port_set(const OsUartPort* port);
+/* max_baud caps what programs ask for (0: no cap). OS_STATUS_BUSY or OS_STATUS_LIMIT_REACHED as above. */
+OsStatus os_uart_add(const char* name, uint32_t uart, uint32_t max_baud);
+/* Received bytes; those that do not fit are dropped and counted. */
+void os_uart_receive(uint32_t uart, const uint8_t* data, uint32_t size);
+/* A frame error, parity error or overrun in the port: counted. */
+void os_uart_error(uint32_t uart);
+/* The port's send buffer has room again. */
+void os_uart_writable(uint32_t uart);
+/* The id of the task that owns a port, 0 when it is free. */
+uint32_t os_uart_get_owner(uint32_t uart);
 #endif
 
 uint32_t os_get_task_count(void);

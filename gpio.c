@@ -333,6 +333,25 @@ OsStatus os_gpio_open(const char* name, uint32_t length, uint32_t flags, uint32_
     return OS_STATUS_OK;
 }
 
+OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low, uint32_t* out_id,
+                          uint8_t* out_inverted)
+{
+    OsGpioName* entry = os_gpio_find_name(name, length);
+    OsStatus status = OS_STATUS_OK;
+
+    if (entry != NULL && (g_gpio.pins[entry->pin - 1U].capabilities & OS_GPIO_CAN_PWM) == 0U)
+    {
+        return OS_STATUS_UNSUPPORTED;
+    }
+    /* Logical 0 is "off" whichever way the pin is inverted. */
+    status = os_gpio_open(name, length, OS_GPIO_OUTPUT | (active_low ? OS_GPIO_GUEST_ACTIVE_LOW : 0U), out_id);
+    if (status == OS_STATUS_OK)
+    {
+        *out_inverted = os_gpio_inverted(&g_gpio.pins[*out_id - 1U]);
+    }
+    return status;
+}
+
 uint32_t os_gpio_pin_number(uint32_t id)
 {
     OsGpioPin* pin = os_gpio_pin(id);
