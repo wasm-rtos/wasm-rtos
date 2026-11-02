@@ -9,6 +9,7 @@
 
 #if OS_HAS_INPUT
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct OsInputEvent
@@ -30,16 +31,17 @@ typedef struct OsInputHeld
     uint64_t repeat_at;
 } OsInputHeld;
 
+/* Allocated when the platform registers the device. */
 typedef struct OsInputDevice
 {
-    uint8_t used;
     uint32_t device;
     char name[OS_INPUT_NAME_MAX + 1U];
     uint8_t name_length;
     OsInputInfo info;
     /* Owning task id, 0 when free; events are kept only while owned. */
     uint32_t owner;
-    OsInputEvent queue[OS_INPUT_QUEUE];
+    /* Allocated while a program owns the device: events are kept only then. */
+    OsInputEvent* queue;
     uint32_t head;
     uint32_t count;
     /* Events lost to a full queue since the program last read. */
@@ -49,12 +51,12 @@ typedef struct OsInputDevice
 
 static struct
 {
-    OsInputDevice devices[OS_INPUT_MAX];
+    OsInputDevice* devices[OS_INPUT_MAX];
 } g_input;
 
 static OsInputDevice* os_input_slot(uint32_t id)
 {
-    return id >= 1U && id <= OS_INPUT_MAX && g_input.devices[id - 1U].used ? &g_input.devices[id - 1U] : NULL;
+    return id >= 1U && id <= OS_INPUT_MAX ? g_input.devices[id - 1U] : NULL;
 }
 
 static OsInputDevice* os_input_by_number(uint32_t device)
@@ -63,9 +65,9 @@ static OsInputDevice* os_input_by_number(uint32_t device)
 
     for (index = 0U; index < OS_INPUT_MAX; ++index)
     {
-        if (g_input.devices[index].used && g_input.devices[index].device == device)
+        if (g_input.devices[index] != NULL && g_input.devices[index]->device == device)
         {
-            return &g_input.devices[index];
+            return g_input.devices[index];
         }
     }
     return NULL;
@@ -113,6 +115,7 @@ OsStatus os_input_add(const char* name, uint32_t device, const OsInputInfo* info
 {
     size_t length = name != NULL ? strlen(name) : 0U;
     OsInputDevice* slot = NULL;
+    uint32_t free_index = OS_INPUT_MAX;
     uint32_t index = 0U;
 
     if (length == 0U || length > OS_INPUT_NAME_MAX || info == NULL || info->kind < OS_INPUT_BUTTONS ||
@@ -123,23 +126,27 @@ OsStatus os_input_add(const char* name, uint32_t device, const OsInputInfo* info
     }
     for (index = 0U; index < OS_INPUT_MAX; ++index)
     {
-        OsInputDevice* entry = &g_input.devices[index];
-        if (entry->used && (entry->device == device ||
-                            (entry->name_length == length && memcmp(entry->name, name, length) == 0)))
+        OsInputDevice* entry = g_input.devices[index];
+        if (entry != NULL && (entry->device == device ||
+                              (entry->name_length == length && memcmp(entry->name, name, length) == 0)))
         {
             return OS_STATUS_BUSY;
         }
-        if (!entry->used && slot == NULL)
+        if (entry == NULL && free_index == OS_INPUT_MAX)
         {
-            slot = entry;
+            free_index = index;
         }
     }
-    if (slot == NULL)
+    if (free_index == OS_INPUT_MAX)
     {
         return OS_STATUS_LIMIT_REACHED;
     }
-    memset(slot, 0, sizeof(*slot));
-    slot->used = 1U;
+    slot = (OsInputDevice*)calloc(1U, sizeof(OsInputDevice));
+    if (slot == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    g_input.devices[free_index] = slot;
     slot->device = device;
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
@@ -284,13 +291,18 @@ OsStatus os_input_open(const char* name, uint32_t length, uint32_t* out_id)
 
     for (index = 0U; index < OS_INPUT_MAX; ++index)
     {
-        OsInputDevice* device = &g_input.devices[index];
-        any |= device->used;
-        if (device->used && device->name_length == length && memcmp(device->name, name, length) == 0)
+        OsInputDevice* device = g_input.devices[index];
+        any |= device != NULL;
+        if (device != NULL && device->name_length == length && memcmp(device->name, name, length) == 0)
         {
             if (device->owner != 0U)
             {
                 return OS_STATUS_BUSY;
+            }
+            device->queue = (OsInputEvent*)calloc(OS_INPUT_QUEUE, sizeof(OsInputEvent));
+            if (device->queue == NULL)
+            {
+                return OS_STATUS_OUT_OF_MEMORY;
             }
             os_input_clear(device);
             device->owner = os_task_get_id(os_task_get_current());
@@ -306,10 +318,12 @@ void os_input_close(uint32_t id)
 {
     OsInputDevice* device = os_input_slot(id);
 
-    if (device != NULL)
+    if (device != NULL && device->owner != 0U)
     {
         os_input_clear(device);
         device->owner = 0U;
+        free(device->queue);
+        device->queue = NULL;
     }
 }
 
@@ -397,10 +411,10 @@ void os_input_update_time(void)
 
     for (index = 0U; index < OS_INPUT_MAX; ++index)
     {
-        OsInputDevice* device = &g_input.devices[index];
+        OsInputDevice* device = g_input.devices[index];
         uint32_t key = 0U;
 
-        if (!device->used || device->owner == 0U)
+        if (device == NULL || device->owner == 0U)
         {
             continue;
         }
@@ -434,10 +448,10 @@ uint32_t os_input_next_deadline_ms(void)
 
     for (index = 0U; index < OS_INPUT_MAX; ++index)
     {
-        const OsInputDevice* device = &g_input.devices[index];
+        const OsInputDevice* device = g_input.devices[index];
         uint32_t key = 0U;
 
-        if (!device->used || device->owner == 0U)
+        if (device == NULL || device->owner == 0U)
         {
             continue;
         }
@@ -463,6 +477,16 @@ uint32_t os_input_next_deadline_ms(void)
 
 void os_input_shutdown(void)
 {
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_INPUT_MAX; ++index)
+    {
+        if (g_input.devices[index] != NULL)
+        {
+            free(g_input.devices[index]->queue);
+            free(g_input.devices[index]);
+        }
+    }
     memset(&g_input, 0, sizeof(g_input));
 }
 

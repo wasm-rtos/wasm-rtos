@@ -7,11 +7,12 @@
 
 #if OS_HAS_ADC
 
+#include <stdlib.h>
 #include <string.h>
 
+/* Allocated when the platform registers the channel. */
 typedef struct OsAdcChannel
 {
-    uint8_t used;
     uint32_t channel;
     char name[OS_ADC_NAME_MAX + 1U];
     uint8_t name_length;
@@ -22,12 +23,12 @@ static struct
 {
     OsAdcPort port;
     uint8_t has_port;
-    OsAdcChannel channels[OS_ADC_MAX];
+    OsAdcChannel* channels[OS_ADC_MAX];
 } g_adc;
 
 static OsAdcChannel* os_adc_slot(uint32_t id)
 {
-    return id >= 1U && id <= OS_ADC_MAX && g_adc.channels[id - 1U].used ? &g_adc.channels[id - 1U] : NULL;
+    return id >= 1U && id <= OS_ADC_MAX ? g_adc.channels[id - 1U] : NULL;
 }
 
 static uint32_t os_adc_max_raw(const OsAdcChannel* channel)
@@ -56,6 +57,7 @@ OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo*
 {
     size_t length = name != NULL ? strlen(name) : 0U;
     OsAdcChannel* slot = NULL;
+    uint32_t free_index = OS_ADC_MAX;
     uint32_t index = 0U;
 
     if (length == 0U || length > OS_ADC_NAME_MAX || info == NULL || info->resolution_bits == 0U ||
@@ -65,23 +67,27 @@ OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo*
     }
     for (index = 0U; index < OS_ADC_MAX; ++index)
     {
-        OsAdcChannel* entry = &g_adc.channels[index];
-        if (entry->used && (entry->channel == channel ||
-                            (entry->name_length == length && memcmp(entry->name, name, length) == 0)))
+        OsAdcChannel* entry = g_adc.channels[index];
+        if (entry != NULL && (entry->channel == channel ||
+                              (entry->name_length == length && memcmp(entry->name, name, length) == 0)))
         {
             return OS_STATUS_BUSY;
         }
-        if (!entry->used && slot == NULL)
+        if (entry == NULL && free_index == OS_ADC_MAX)
         {
-            slot = entry;
+            free_index = index;
         }
     }
-    if (slot == NULL)
+    if (free_index == OS_ADC_MAX)
     {
         return OS_STATUS_LIMIT_REACHED;
     }
-    memset(slot, 0, sizeof(*slot));
-    slot->used = 1U;
+    slot = (OsAdcChannel*)calloc(1U, sizeof(OsAdcChannel));
+    if (slot == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    g_adc.channels[free_index] = slot;
     slot->channel = channel;
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
@@ -100,9 +106,9 @@ OsStatus os_adc_open(const char* name, uint32_t length, uint32_t* out_id)
     }
     for (index = 0U; index < OS_ADC_MAX; ++index)
     {
-        OsAdcChannel* entry = &g_adc.channels[index];
-        any |= entry->used;
-        if (entry->used && entry->name_length == length && memcmp(entry->name, name, length) == 0)
+        OsAdcChannel* entry = g_adc.channels[index];
+        any |= entry != NULL;
+        if (entry != NULL && entry->name_length == length && memcmp(entry->name, name, length) == 0)
         {
             *out_id = index + 1U;
             return OS_STATUS_OK;
@@ -183,6 +189,12 @@ OsStatus os_adc_get(uint32_t id, uint32_t property, uint32_t* out_value)
 
 void os_adc_shutdown(void)
 {
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_ADC_MAX; ++index)
+    {
+        free(g_adc.channels[index]);
+    }
     memset(&g_adc, 0, sizeof(g_adc));
 }
 

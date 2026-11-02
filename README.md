@@ -71,6 +71,13 @@ wasm3. Every subsystem can be left out to save space:
 | `d_m3HasDylink` | 0 | `dylink.0` libraries (`os_wasm_library_register`) |
 | `d_m3HasHeapAccounting` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
 
+The `*_MAX` limits are slots: each costs a pointer. A pin, display, input
+device, bus, serial port or analog channel takes memory when the platform
+registers it, an input device's event queue while a program owns it, and a
+serial port's receive buffer from the first time a program opens it (it
+stays, as interrupt handlers write into it). A board with a few devices
+spends a few hundred bytes on them.
+
 The file system needs 32-bit pointers; build 8-bit targets with
 `OS_HAS_FS=0`.
 

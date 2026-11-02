@@ -7,6 +7,7 @@
 
 #if OS_HAS_GPIO
 
+#include <stdlib.h>
 #include <string.h>
 
 /* Edge counts are bumped from interrupt handlers and taken by the kernel. */
@@ -33,9 +34,9 @@ static uint32_t os_gpio_take_counter(OsGpioCounter* counter)
 #define OS_GPIO_GUEST_FLAGS (OS_GPIO_PORT_MODE | OS_GPIO_GUEST_ACTIVE_LOW | OS_GPIO_INIT_HIGH)
 #define OS_GPIO_GUEST_EDGES (OS_GPIO_GUEST_RISING | OS_GPIO_GUEST_FALLING)
 
+/* Allocated when the platform registers the pin; interrupt handlers count edges in it. */
 typedef struct OsGpioPin
 {
-    uint8_t used;
     uint32_t pin;
     uint32_t capabilities;
     uint32_t options;
@@ -48,25 +49,42 @@ typedef struct OsGpioPin
     OsGpioCounter falling;
 } OsGpioPin;
 
+/* A name and the pin it means, allocated with the name's own length. */
 typedef struct OsGpioName
 {
-    char name[OS_GPIO_NAME_MAX + 1U];
-    uint8_t length;
-    /* Index into g_gpio.pins plus one, 0 when the slot is free. */
+    /* Index into g_gpio.pins plus one. */
     uint8_t pin;
+    uint8_t length;
+    char name[];
 } OsGpioName;
 
+/* Only slots: what the board registers is allocated, so unused capacity costs a pointer. */
 static struct
 {
     OsGpioPort port;
     uint8_t has_port;
-    OsGpioPin pins[OS_GPIO_MAX_PINS];
-    OsGpioName names[OS_GPIO_MAX_NAMES];
+    OsGpioPin* pins[OS_GPIO_MAX_PINS];
+    OsGpioName* names[OS_GPIO_MAX_NAMES];
 } g_gpio;
 
 static OsGpioPin* os_gpio_pin(uint32_t id)
 {
-    return id >= 1U && id <= OS_GPIO_MAX_PINS && g_gpio.pins[id - 1U].used ? &g_gpio.pins[id - 1U] : NULL;
+    return id >= 1U && id <= OS_GPIO_MAX_PINS ? g_gpio.pins[id - 1U] : NULL;
+}
+
+/* The pin slot holding platform pin number pin, or OS_GPIO_MAX_PINS. */
+static uint32_t os_gpio_index_of(uint32_t pin)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
+    {
+        if (g_gpio.pins[index] != NULL && g_gpio.pins[index]->pin == pin)
+        {
+            break;
+        }
+    }
+    return index;
 }
 
 /* Whether the program's level is the pin's inverted. */
@@ -149,8 +167,8 @@ static OsGpioName* os_gpio_find_name(const char* name, uint32_t length)
 
     for (index = 0U; index < OS_GPIO_MAX_NAMES; ++index)
     {
-        OsGpioName* entry = &g_gpio.names[index];
-        if (entry->pin != 0U && entry->length == length && memcmp(entry->name, name, length) == 0)
+        OsGpioName* entry = g_gpio.names[index];
+        if (entry != NULL && entry->length == length && memcmp(entry->name, name, length) == 0)
         {
             return entry;
         }
@@ -161,9 +179,10 @@ static OsGpioName* os_gpio_find_name(const char* name, uint32_t length)
 OsStatus os_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, uint32_t options)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
-    OsGpioPin* slot = NULL;
+    uint32_t slot = os_gpio_index_of(pin);
+    uint32_t name_slot = 0U;
+    uint8_t new_pin = 0U;
     OsGpioName* entry = NULL;
-    uint32_t index = 0U;
 
     if (length == 0U || length > OS_GPIO_NAME_MAX || (capabilities & ~OS_GPIO_CAN_ALL) != 0U ||
         (options & ~OS_GPIO_ACTIVE_LOW) != 0U)
@@ -174,43 +193,49 @@ OsStatus os_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, 
     {
         return OS_STATUS_BUSY;
     }
-    for (index = 0U; index < OS_GPIO_MAX_PINS && slot == NULL; ++index)
-    {
-        if (g_gpio.pins[index].used && g_gpio.pins[index].pin == pin)
-        {
-            slot = &g_gpio.pins[index];
-        }
-    }
-    if (slot != NULL && (slot->capabilities != capabilities || slot->options != options))
+    if (slot < OS_GPIO_MAX_PINS &&
+        (g_gpio.pins[slot]->capabilities != capabilities || g_gpio.pins[slot]->options != options))
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
-    for (index = 0U; index < OS_GPIO_MAX_NAMES && entry == NULL; ++index)
+    while (name_slot < OS_GPIO_MAX_NAMES && g_gpio.names[name_slot] != NULL)
     {
-        if (g_gpio.names[index].pin == 0U)
-        {
-            entry = &g_gpio.names[index];
-        }
+        ++name_slot;
     }
-    for (index = 0U; index < OS_GPIO_MAX_PINS && slot == NULL; ++index)
+    if (slot == OS_GPIO_MAX_PINS)
     {
-        if (!g_gpio.pins[index].used)
+        for (slot = 0U; slot < OS_GPIO_MAX_PINS && g_gpio.pins[slot] != NULL; ++slot)
         {
-            slot = &g_gpio.pins[index];
-            memset(slot, 0, sizeof(*slot));
-            slot->pin = pin;
-            slot->capabilities = capabilities;
-            slot->options = options;
         }
+        new_pin = 1U;
     }
-    if (entry == NULL || slot == NULL)
+    if (name_slot == OS_GPIO_MAX_NAMES || slot == OS_GPIO_MAX_PINS)
     {
         return OS_STATUS_LIMIT_REACHED;
     }
-    slot->used = 1U;
+
+    entry = (OsGpioName*)malloc(sizeof(OsGpioName) + length);
+    if (entry == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    if (new_pin)
+    {
+        OsGpioPin* created = (OsGpioPin*)calloc(1U, sizeof(OsGpioPin));
+        if (created == NULL)
+        {
+            free(entry);
+            return OS_STATUS_OUT_OF_MEMORY;
+        }
+        created->pin = pin;
+        created->capabilities = capabilities;
+        created->options = options;
+        g_gpio.pins[slot] = created;
+    }
     memcpy(entry->name, name, length);
     entry->length = (uint8_t)length;
-    entry->pin = (uint8_t)(slot - g_gpio.pins + 1);
+    entry->pin = (uint8_t)(slot + 1U);
+    g_gpio.names[name_slot] = entry;
     return OS_STATUS_OK;
 }
 
@@ -220,8 +245,8 @@ void os_gpio_edge(uint32_t pin, uint32_t edges)
 
     for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
     {
-        OsGpioPin* slot = &g_gpio.pins[index];
-        if (slot->used && slot->pin == pin)
+        OsGpioPin* slot = g_gpio.pins[index];
+        if (slot != NULL && slot->pin == pin)
         {
             if ((edges & OS_GPIO_EDGE_RISING) != 0U)
             {
@@ -242,9 +267,9 @@ uint32_t os_gpio_get_owner(uint32_t pin)
 
     for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
     {
-        if (g_gpio.pins[index].used && g_gpio.pins[index].pin == pin)
+        if (g_gpio.pins[index] != NULL && g_gpio.pins[index]->pin == pin)
         {
-            return g_gpio.pins[index].owner;
+            return g_gpio.pins[index]->owner;
         }
     }
     return 0U;
@@ -257,12 +282,12 @@ void os_gpio_poll(void)
 
     for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
     {
-        OsGpioPin* slot = &g_gpio.pins[index];
+        OsGpioPin* slot = g_gpio.pins[index];
         uint32_t rising = 0U;
         uint32_t falling = 0U;
         uint32_t counted = 0U;
 
-        if (!slot->used)
+        if (slot == NULL)
         {
             continue;
         }
@@ -296,7 +321,7 @@ OsStatus os_gpio_open(const char* name, uint32_t length, uint32_t flags, uint32_
 {
     OsTaskHandle task = os_task_get_current();
     OsGpioName* entry = os_gpio_find_name(name, length);
-    OsGpioPin* pin = entry != NULL ? &g_gpio.pins[entry->pin - 1U] : NULL;
+    OsGpioPin* pin = entry != NULL ? g_gpio.pins[entry->pin - 1U] : NULL;
     OsStatus status = OS_STATUS_OK;
 
     if (!g_gpio.has_port)
@@ -329,7 +354,7 @@ OsStatus os_gpio_open(const char* name, uint32_t length, uint32_t flags, uint32_
         return status;
     }
     pin->owner = os_task_get_id(task);
-    *out_id = (uint32_t)(pin - g_gpio.pins + 1);
+    *out_id = entry->pin;
     return OS_STATUS_OK;
 }
 
@@ -339,7 +364,7 @@ OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low,
     OsGpioName* entry = os_gpio_find_name(name, length);
     OsStatus status = OS_STATUS_OK;
 
-    if (entry != NULL && (g_gpio.pins[entry->pin - 1U].capabilities & OS_GPIO_CAN_PWM) == 0U)
+    if (entry != NULL && (g_gpio.pins[entry->pin - 1U]->capabilities & OS_GPIO_CAN_PWM) == 0U)
     {
         return OS_STATUS_UNSUPPORTED;
     }
@@ -347,7 +372,7 @@ OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low,
     status = os_gpio_open(name, length, OS_GPIO_OUTPUT | (active_low ? OS_GPIO_GUEST_ACTIVE_LOW : 0U), out_id);
     if (status == OS_STATUS_OK)
     {
-        *out_inverted = os_gpio_inverted(&g_gpio.pins[*out_id - 1U]);
+        *out_inverted = os_gpio_inverted(g_gpio.pins[*out_id - 1U]);
     }
     return status;
 }
@@ -364,7 +389,7 @@ OsStatus os_gpio_open_physical(const char* name, uint32_t length, uint32_t* out_
     uint32_t flags = OS_GPIO_OUTPUT | OS_GPIO_INIT_HIGH;
 
     /* Undo the board's inversion, so 1 is high on the pin. */
-    if (entry != NULL && (g_gpio.pins[entry->pin - 1U].options & OS_GPIO_ACTIVE_LOW) != 0U)
+    if (entry != NULL && (g_gpio.pins[entry->pin - 1U]->options & OS_GPIO_ACTIVE_LOW) != 0U)
     {
         flags |= OS_GPIO_GUEST_ACTIVE_LOW;
     }
@@ -501,6 +526,16 @@ uint8_t os_gpio_ready(uint32_t id)
 
 void os_gpio_shutdown(void)
 {
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
+    {
+        free(g_gpio.pins[index]);
+    }
+    for (index = 0U; index < OS_GPIO_MAX_NAMES; ++index)
+    {
+        free(g_gpio.names[index]);
+    }
     memset(&g_gpio, 0, sizeof(g_gpio));
 }
 
