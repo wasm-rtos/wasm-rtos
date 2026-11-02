@@ -75,8 +75,8 @@ typedef enum OsTaskWaitType
     OS_TASK_WAIT_NOTIFICATION_TAKE,
     OS_TASK_WAIT_CHILD,
     OS_TASK_WAIT_ANY,
-    /* A bus transfer in the background: the port uses the task's memory until it ends. */
-    OS_TASK_WAIT_BUS,
+    /* A bus or pulse transfer in the background: the port uses the task's memory until it ends. */
+    OS_TASK_WAIT_TRANSFER,
     /* Something outside the kernel's objects, by key (os_signal_wait). */
     OS_TASK_WAIT_SIGNAL
 } OsTaskWaitType;
@@ -582,6 +582,9 @@ void os_shutdown(void)
     os_host_import_free_list();
 #if OS_HAS_I2C || OS_HAS_SPI
     os_bus_shutdown();
+#endif
+#if OS_HAS_PULSE
+    os_pulse_shutdown();
 #endif
 #if OS_HAS_ADC
     os_adc_shutdown();
@@ -2132,11 +2135,11 @@ OsStatus os_task_abort_wait(OsTaskHandle task)
         return OS_STATUS_NOT_WAITING;
     }
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_TRANSFERS
     /* Bytes on the wire cannot be called back: the transfer ends and the program gets its result. */
-    if (task->wait_type == OS_TASK_WAIT_BUS)
+    if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
-        os_bus_finish_task(task->id);
+        os_transfer_finish_task(task->id);
         os_recalculate_task_counters();
         return OS_STATUS_OK;
     }
@@ -2206,11 +2209,11 @@ OsStatus os_task_suspend(OsTaskHandle task)
         os_request_task_stop(task);
     }
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_TRANSFERS
     /* A transfer in progress ends first; its result reaches the program when it resumes. */
-    if (task->wait_type == OS_TASK_WAIT_BUS)
+    if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
-        os_bus_finish_task(task->id);
+        os_transfer_finish_task(task->id);
     }
 #endif
     if (task->state == OS_TASK_WAITING)
@@ -2634,7 +2637,7 @@ OsStatus os_task_swap_out(OsTaskHandle task)
         return OS_STATUS_TASK_DEAD;
     }
     /* A bus transfer is using its memory right now. */
-    if (task->wait_type == OS_TASK_WAIT_BUS)
+    if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
         return OS_STATUS_BUSY;
     }
@@ -3734,6 +3737,10 @@ OsStatus os_schedule(void)
 #if OS_HAS_I2C || OS_HAS_SPI
     /* Background bus transfers that have ended. */
     os_bus_poll();
+#endif
+#if OS_HAS_PULSE
+    /* Pulse trains sent or captured in the background. */
+    os_pulse_poll();
 #endif
 #if OS_HAS_UART
     /* Bytes received and room to send, reported from interrupt handlers. */
@@ -6675,10 +6682,10 @@ static void os_set_task_dead(OsTaskHandle task)
         g_os.current_task = NULL;
     }
 
-#if OS_HAS_I2C || OS_HAS_SPI
-    if (task->wait_type == OS_TASK_WAIT_BUS)
+#if OS_HAS_TRANSFERS
+    if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
-        os_bus_finish_task(task->id);
+        os_transfer_finish_task(task->id);
     }
 #endif
     os_cancel_task_wait(task, OS_STATUS_TASK_DEAD);
@@ -6759,11 +6766,11 @@ static void os_destroy_task(OsTaskHandle task)
         g_os.last_scheduled_task = task->previous;
     }
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_TRANSFERS
     /* The port must be done with the task's memory before it is freed. */
-    if (task->wait_type == OS_TASK_WAIT_BUS)
+    if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
-        os_bus_finish_task(task->id);
+        os_transfer_finish_task(task->id);
     }
 #endif
     os_cancel_task_wait(task, OS_STATUS_TASK_DEAD);
@@ -7257,22 +7264,32 @@ uint32_t os_current_parent_id(void)
 }
 #endif
 
-#if OS_HAS_I2C || OS_HAS_SPI
-OsStatus os_bus_wait_begin(void)
+#if OS_HAS_TRANSFERS
+OsStatus os_transfer_wait_begin(void)
 {
-    return os_begin_task_wait(g_os.current_task, OS_TASK_WAIT_BUS, OS_WAIT_FOREVER);
+    return os_begin_task_wait(g_os.current_task, OS_TASK_WAIT_TRANSFER, OS_WAIT_FOREVER);
 }
 
-void os_bus_wait_end(uint32_t task_id, OsStatus status)
+void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value)
 {
     OsTaskHandle task = os_task_find_by_id(task_id);
 
-    if (task == NULL || task->wait_type != OS_TASK_WAIT_BUS)
+    if (task == NULL || task->wait_type != OS_TASK_WAIT_TRANSFER)
     {
         return;
     }
-    os_complete_task_wait(task, status, 0U);
+    os_complete_task_wait(task, status, value);
     os_recalculate_task_counters();
+}
+
+void os_transfer_finish_task(uint32_t task_id)
+{
+#if OS_HAS_I2C || OS_HAS_SPI
+    os_bus_finish_task(task_id);
+#endif
+#if OS_HAS_PULSE
+    os_pulse_finish_task(task_id);
+#endif
 }
 #endif
 

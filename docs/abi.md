@@ -1,4 +1,4 @@
-# wasm-rtos ABI 1.4
+# wasm-rtos ABI 1.5
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
@@ -12,6 +12,7 @@ remove anything here.
 | 1.2 | `display`, `input` |
 | 1.3 | `i2c`, `spi`, errors `WR_ENACK`, `WR_EBUS` |
 | 1.4 | `adc`, `pwm`, `uart` |
+| 1.5 | `pulse` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -365,6 +366,35 @@ Serial ports, named as the device profile names them (`"uart1"`, `"gps"`).
   `errors` (frame, parity and overrun errors and dropped bytes since the
   last time the program asked).
 
+### `pulse` (1.5)
+Pulse trains timed finer than a program can keep: addressable LEDs,
+infrared remotes, echo sensors. Hardware made for it does the timing (a
+remote-control peripheral, programmable I/O, a timer with DMA); only the
+calling program waits while it works.
+
+- `open(name, flags)` on a GPIO pin by its name, owned as `gpio.open` does;
+  a pin without pulse hardware is `-WR_EUNSUPPORTED`. Flags:
+  `WR_PULSE_RECEIVE` (1) captures, otherwise the pin sends;
+  `WR_PULSE_IDLE_HIGH` (2) is the level between trains (sending only).
+  Levels are the pin's own.
+- An item is 32 bits: bit 31 the level, bits 0-30 the time in nanoseconds
+  (up to 2.1 s). The device rounds to its resolution, `get(channel, 1)`.
+  Item arrays must be 4-byte aligned (`-WR_EINVAL`).
+- `send(channel, items, count, carrier_hz)`: with a carrier, high items are
+  that carrier (infrared), low items silence.
+- `send-bits(channel, data, length, zero_high, zero_low, one_high,
+  one_low)` sends bytes, most significant bit first, each bit as a high and
+  a low time in nanoseconds. Addressable LEDs need 3 bytes per LED instead
+  of 96 bytes of items. `-WR_EUNSUPPORTED` on devices that cannot.
+- `receive(channel, items, max, idle_ns, timeout_ms)` captures from the
+  first edge until `idle_ns` pass without one or `max` items are full, and
+  returns how many it wrote; `-WR_ETIMEOUT` when no edge comes within
+  `timeout_ms`.
+- C helpers: `wr_ws2812_show` (bytes plus the latch time),
+  `wr_nec_encode` and `wr_nec_decode` for NEC infrared remotes.
+- Like a background bus transfer, the wait for a train is not cut short:
+  pausing or aborting the program's wait lets the train end first.
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -394,7 +424,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.4 states 65540 (1.4); kernels refuse only another major.
+A program for 1.5 states 65541 (1.5); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
@@ -407,8 +437,7 @@ These names are taken; their shape will follow the rules above.
   descriptors.
 - `wasm-rtos:kernel/device`: what the device offers (display size and shape,
   inputs, sensors), so programs ask instead of assuming.
-- `wasm-rtos:kernel/dac`, `pulse`, `onewire`: analog outputs, timed pulse
-  trains (addressable LEDs, infrared) and 1-Wire buses.
+- `wasm-rtos:kernel/dac`, `onewire`: analog outputs and 1-Wire buses.
 - `wasm-rtos:kernel/power`, `system`, `ui`: sleep and wake sources, battery
   and indicators, windows and dialogs. `ui` will hand programs windows that
   behave like `display` and `input` devices.

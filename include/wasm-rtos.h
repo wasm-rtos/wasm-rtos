@@ -2,7 +2,7 @@
 #define WASM_RTOS_H_GUEST
 
 /*
- * wasm-rtos ABI 1.4 for programs written in C or C++ (wasm32).
+ * wasm-rtos ABI 1.5 for programs written in C or C++ (wasm32).
  *
  * Every call returns an int32_t: zero or a value on success, a negative WR_E*
  * error otherwise. Handles belong to the calling program and close when it
@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define WR_ABI_VERSION_MAJOR 1
-#define WR_ABI_VERSION_MINOR 4
+#define WR_ABI_VERSION_MINOR 5
 
 /* Errors; calls return their negatives. */
 #define WR_EFAULT       1   /* a pointer or range lies outside the program's memory */
@@ -193,6 +193,15 @@ typedef struct wr_spi_op
 #define WR_UART_AVAILABLE 2u  /* received bytes waiting to be read */
 #define WR_UART_ERRORS    3u  /* frame, parity and overrun errors and lost bytes since the last ask */
 
+/* pulse (1.5): an item is 32 bits, WR_PULSE_HIGH for the level and the time
+ * in nanoseconds in the low 31 bits. */
+#define WR_PULSE_HIGH       0x80000000u
+#define WR_PULSE_TIME_MASK  0x7FFFFFFFu
+#define WR_PULSE_RECEIVE    0x01u  /* pulse-open: capture; otherwise send */
+#define WR_PULSE_IDLE_HIGH  0x02u  /* pulse-open: the level between trains */
+#define WR_PULSE_RESOLUTION 1u     /* pulse-get: nanoseconds of one hardware tick */
+#define WR_PULSE_ITEM(high, ns) ((uint32_t)((high) ? WR_PULSE_HIGH : 0u) | ((uint32_t)(ns) & WR_PULSE_TIME_MASK))
+
 /* One string argument for spawn: matches the ABI's (pointer, length) pair. */
 typedef struct wr_str
 {
@@ -201,7 +210,7 @@ typedef struct wr_str
 } wr_str;
 
 #define WR_IMPORT(interface, name) \
-    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.4.0"), import_name(name)))
+    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.5.0"), import_name(name)))
 
 /* handle */
 WR_IMPORT("handle", "close") int32_t wr_close(int32_t handle);
@@ -322,6 +331,24 @@ WR_IMPORT("uart", "write") int32_t wr_uart_write(int32_t port, const void* data,
 WR_IMPORT("uart", "wait-writable") int32_t wr_uart_wait_writable(int32_t port, uint32_t timeout_ms);
 WR_IMPORT("uart", "get") int32_t wr_uart_get(int32_t port, uint32_t property);
 
+/* pulse (1.5): timed pulse trains on a GPIO pin, by its name, sent or
+ * captured by hardware made for it; the pin is owned as with gpio-open.
+ * Only the calling program waits while the hardware works. items must be
+ * 4-byte aligned. pulse-send-bits sends bytes, most significant bit first,
+ * each bit as (high, low) nanoseconds: zero_* for a 0, one_* for a 1.
+ * pulse-receive captures from the first edge until idle_ns pass without
+ * one (or max items), and returns how many; -WR_ETIMEOUT when no edge comes
+ * within timeout_ms. */
+WR_IMPORT("pulse", "open") int32_t wr_pulse_open(const char* name, uint32_t name_length, uint32_t flags);
+WR_IMPORT("pulse", "send") int32_t wr_pulse_send(int32_t channel, const uint32_t* items, uint32_t count,
+                                                 uint32_t carrier_hz);
+WR_IMPORT("pulse", "send-bits") int32_t wr_pulse_send_bits(int32_t channel, const void* data, uint32_t length,
+                                                           uint32_t zero_high_ns, uint32_t zero_low_ns,
+                                                           uint32_t one_high_ns, uint32_t one_low_ns);
+WR_IMPORT("pulse", "receive") int32_t wr_pulse_receive(int32_t channel, uint32_t* items, uint32_t max,
+                                                       uint32_t idle_ns, uint32_t timeout_ms);
+WR_IMPORT("pulse", "get") int32_t wr_pulse_get(int32_t channel, uint32_t property);
+
 /* Time, sleep and yield through WASI, for programs without a C library. */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
 int32_t wr_wasi_clock_time_get_(uint32_t clock, uint64_t precision, uint64_t* out_time);
@@ -377,6 +404,68 @@ static inline wr_str wr_cstr(const char* text)
 #define wr_adc_open_cstr(name) wr_adc_open((name), wr_strlen(name), 0)
 #define wr_pwm_open_cstr(name, frequency_hz, flags) wr_pwm_open((name), wr_strlen(name), (frequency_hz), (flags))
 #define wr_uart_open_cstr(name, baud, format) wr_uart_open((name), wr_strlen(name), (baud), (format))
+#define wr_pulse_open_cstr(name, flags) wr_pulse_open((name), wr_strlen(name), (flags))
+
+/* Addressable LEDs (WS2812 and alike): 3 bytes per LED in green, red, blue
+ * order, then the low reset time that latches the colors. */
+static inline int32_t wr_ws2812_show(int32_t channel, const uint8_t* grb, uint32_t length)
+{
+    static const uint32_t latch = 80000u; /* 80 us low */
+    int32_t result = wr_pulse_send_bits(channel, grb, length, 400u, 850u, 800u, 450u);
+    return result < 0 ? result : wr_pulse_send(channel, &latch, 1u, 0u);
+}
+
+/* Infrared, NEC protocol: 38 kHz carrier, a 9 ms mark and 4.5 ms space, 32
+ * bits least significant first (address, its inverse, command, its
+ * inverse), each a 562 us mark and a 562 us (0) or 1687 us (1) space, a
+ * final mark. Fills 67 items. */
+#define WR_NEC_ITEMS 67u
+#define WR_NEC_CARRIER_HZ 38000u
+static inline void wr_nec_encode(uint8_t address, uint8_t command, uint32_t items[WR_NEC_ITEMS])
+{
+    uint32_t code = (uint32_t)address | ((uint32_t)(uint8_t)~address << 8) | ((uint32_t)command << 16) |
+                    ((uint32_t)(uint8_t)~command << 24);
+    uint32_t n = 0;
+    items[n++] = WR_PULSE_ITEM(1, 9000000u);
+    items[n++] = WR_PULSE_ITEM(0, 4500000u);
+    for (uint32_t bit = 0; bit < 32u; ++bit)
+    {
+        items[n++] = WR_PULSE_ITEM(1, 562500u);
+        items[n++] = WR_PULSE_ITEM(0, (code >> bit) & 1u ? 1687500u : 562500u);
+    }
+    items[n] = WR_PULSE_ITEM(1, 562500u);
+}
+
+/* Whether t is within a quarter of expected. */
+static inline int wr_pulse_near_(uint32_t t, uint32_t expected)
+{
+    return t > expected - expected / 4u && t < expected + expected / 4u;
+}
+
+/* Decode captured items as NEC; receivers often invert, so only times count.
+ * 0 and the address and command, or -1 when it is not a valid NEC frame. */
+static inline int32_t wr_nec_decode(const uint32_t* items, uint32_t count, uint8_t* address, uint8_t* command)
+{
+    uint32_t code = 0;
+    if (count < 66u || !wr_pulse_near_(items[0] & WR_PULSE_TIME_MASK, 9000000u) ||
+        !wr_pulse_near_(items[1] & WR_PULSE_TIME_MASK, 4500000u))
+        return -1;
+    for (uint32_t bit = 0; bit < 32u; ++bit)
+    {
+        uint32_t space = items[3u + bit * 2u] & WR_PULSE_TIME_MASK;
+        if (!wr_pulse_near_(items[2u + bit * 2u] & WR_PULSE_TIME_MASK, 562500u))
+            return -1;
+        if (wr_pulse_near_(space, 1687500u))
+            code |= 1u << bit;
+        else if (!wr_pulse_near_(space, 562500u))
+            return -1;
+    }
+    if (((code ^ (code >> 8)) & 0xFFu) != 0xFFu || (((code >> 16) ^ (code >> 24)) & 0xFFu) != 0xFFu)
+        return -1;
+    *address = (uint8_t)code;
+    *command = (uint8_t)(code >> 16);
+    return 0;
+}
 
 /* Send all of data, waiting for room as needed: the count sent, or an error. */
 static inline int32_t wr_uart_write_all(int32_t port, const void* data, uint32_t length, uint32_t timeout_ms)
@@ -447,7 +536,7 @@ static inline int32_t wr_spi_transfer(int32_t device, const void* out, void* in,
     __asm__(WR_APP_SECTION_ ".int8 " #key "\n.uleb128 2f-1f\n1:\n.ascii \"" text "\"\n2:\n.text\n")
 
 /* The ABI version the program was written for (major << 16 | minor). */
-#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65540)
+#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65541)
 /* Interpreter stack in bytes, unless whoever starts the program picks one. */
 #define WR_APP_STACK_SIZE(bytes) WR_APP_U32_(2, bytes)
 /* Name shown for the program. */

@@ -195,6 +195,13 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
+#if OS_HAS_PULSE
+    if (handle->type == OS_OBJECT_PULSE)
+    {
+        os_pulse_close(handle->id);
+    }
+    else
+#endif
     if (handle->type != OS_OBJECT_TASK)
     {
         os_object_release(handle->type, handle->id);
@@ -867,7 +874,7 @@ static m3ApiRawFunction(os_abi_wait_any)
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX || entry->type == OS_OBJECT_DISPLAY ||
             entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI || entry->type == OS_OBJECT_ADC ||
-            entry->type == OS_OBJECT_PWM)
+            entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE)
         {
             m3ApiReturn(-WR_EBADH);
         }
@@ -1640,7 +1647,7 @@ static m3ApiRawFunction(os_abi_spi_transaction)
  * adc, pwm, uart
  * ------------------------------------------------------------------------ */
 
-#if OS_HAS_ADC || OS_HAS_PWM || OS_HAS_UART
+#if OS_HAS_ADC || OS_HAS_PWM || OS_HAS_UART || OS_HAS_PULSE
 /* A property value for the program, or the error. */
 static int32_t os_abi_property(OsStatus status, uint32_t value)
 {
@@ -1952,8 +1959,160 @@ static m3ApiRawFunction(os_abi_uart_get)
 }
 #endif
 
+/* ---------------------------------------------------------------------------
+ * pulse
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_PULSE
+static OsStatus os_abi_pulse_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    return os_pulse_open(name, length, *(const uint32_t*)context, out_id);
+}
+
+static m3ApiRawFunction(os_abi_pulse_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, flags);
+    OS_ABI_UNUSED();
+
+    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_PULSE, os_abi_pulse_opener, &flags,
+                                   os_pulse_close));
+}
+
+/* Items are 32-bit words the port reads in place: they must be aligned. */
+static int32_t os_abi_pulse_items(uint32_t address, uint32_t count, uint32_t** out_items)
+{
+    uint8_t* memory = NULL;
+
+    if (count > 0x3FFFFFFFU || (address & 3U) != 0U)
+    {
+        return count > 0x3FFFFFFFU ? -WR_EFAULT : -WR_EINVAL;
+    }
+    if (count > 0U && os_guest_memory(address, count * 4U, &memory) != OS_STATUS_OK)
+    {
+        return -WR_EFAULT;
+    }
+    *out_items = (uint32_t*)(void*)memory;
+    return 0;
+}
+
+static m3ApiRawFunction(os_abi_pulse_send)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, items_address);
+    m3ApiGetArg(uint32_t, count);
+    m3ApiGetArg(uint32_t, carrier_hz);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
+    uint32_t* items = NULL;
+    int32_t result = 0;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    result = os_abi_pulse_items(items_address, count, &items);
+    if (result < 0)
+    {
+        m3ApiReturn(result);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_pulse_send(entry->id, items, count, carrier_hz));
+    return os_guest_end();
+}
+
+static m3ApiRawFunction(os_abi_pulse_send_bits)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, data_address);
+    m3ApiGetArg(uint32_t, length);
+    m3ApiGetArg(uint32_t, zero_high_ns);
+    m3ApiGetArg(uint32_t, zero_low_ns);
+    m3ApiGetArg(uint32_t, one_high_ns);
+    m3ApiGetArg(uint32_t, one_low_ns);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
+    uint32_t timing[4] = { zero_high_ns, zero_low_ns, one_high_ns, one_low_ns };
+    uint8_t* data = NULL;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_pulse_send_bits(entry->id, data, length, timing));
+    return os_guest_end();
+}
+
+static m3ApiRawFunction(os_abi_pulse_receive)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, items_address);
+    m3ApiGetArg(uint32_t, max);
+    m3ApiGetArg(uint32_t, idle_ns);
+    m3ApiGetArg(uint32_t, timeout_ms);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
+    uint32_t* items = NULL;
+    uint32_t count = 0U;
+    int32_t result = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    result = os_abi_pulse_items(items_address, max, &items);
+    if (result < 0)
+    {
+        m3ApiReturn(result);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    /* Done at once: the count now; in the background, the wakeup writes it. */
+    status = os_pulse_receive(entry->id, items, max, idle_ns, timeout_ms, &count);
+    *raw_return = status == OS_STATUS_OK ? (int32_t)count : os_abi_error(status);
+    return os_guest_end();
+}
+
+static m3ApiRawFunction(os_abi_pulse_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, property);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    status = os_pulse_get(entry->id, property, &value);
+    m3ApiReturn(os_abi_property(status, value));
+}
+#endif
+
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART
+    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static m3ApiRawFunction(os_abi_unsupported)
 {
@@ -2354,6 +2513,20 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("uart"), "write", "i(iii)", os_abi_unsupported, 4U },
     { WR_MODULE("uart"), "wait-writable", "i(ii)", os_abi_unsupported, 4U },
     { WR_MODULE("uart"), "get", "i(ii)", os_abi_unsupported, 4U },
+#endif
+
+#if OS_HAS_PULSE
+    { WR_MODULE("pulse"), "open", "i(iii)", os_abi_pulse_open, 5U },
+    { WR_MODULE("pulse"), "send", "i(iiii)", os_abi_pulse_send, 5U },
+    { WR_MODULE("pulse"), "send-bits", "i(iiiiiii)", os_abi_pulse_send_bits, 5U },
+    { WR_MODULE("pulse"), "receive", "i(iiiii)", os_abi_pulse_receive, 5U },
+    { WR_MODULE("pulse"), "get", "i(ii)", os_abi_pulse_get, 5U },
+#else
+    { WR_MODULE("pulse"), "open", "i(iii)", os_abi_unsupported, 5U },
+    { WR_MODULE("pulse"), "send", "i(iiii)", os_abi_unsupported, 5U },
+    { WR_MODULE("pulse"), "send-bits", "i(iiiiiii)", os_abi_unsupported, 5U },
+    { WR_MODULE("pulse"), "receive", "i(iiiii)", os_abi_unsupported, 5U },
+    { WR_MODULE("pulse"), "get", "i(ii)", os_abi_unsupported, 5U },
 #endif
 
 #if defined(OS_ABI_HAS_WASI)

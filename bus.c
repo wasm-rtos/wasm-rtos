@@ -180,7 +180,7 @@ static void os_bus_deliver(uint8_t kind, OsBus* bus)
 #endif
     os_bus_report(kind, bus->bus, bus->device, task_id, bus->transfer_hz,
                   kind == OS_BUS_I2C ? (const void*)bus->ops.i2c : (const void*)bus->ops.spi, bus->count, status);
-    os_bus_wait_end(task_id, status);
+    os_transfer_wait_end(task_id, status, 0U);
 }
 
 /*
@@ -219,7 +219,7 @@ static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t
     if (status == OS_STATUS_PENDING)
     {
         bus->busy = 1U;
-        if (os_bus_wait_begin() == OS_STATUS_OK)
+        if (os_transfer_wait_begin() == OS_STATUS_OK)
         {
             return OS_STATUS_PENDING;
         }

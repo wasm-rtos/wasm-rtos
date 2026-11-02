@@ -358,6 +358,18 @@ OsStatus os_gpio_open(const char* name, uint32_t length, uint32_t flags, uint32_
     return OS_STATUS_OK;
 }
 
+OsStatus os_gpio_open_capable(const char* name, uint32_t length, uint32_t capability, uint32_t flags,
+                              uint32_t* out_id)
+{
+    OsGpioName* entry = os_gpio_find_name(name, length);
+
+    if (entry != NULL && (g_gpio.pins[entry->pin - 1U]->capabilities & capability) == 0U)
+    {
+        return OS_STATUS_UNSUPPORTED;
+    }
+    return os_gpio_open(name, length, flags, out_id);
+}
+
 OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low, uint32_t* out_id,
                           uint8_t* out_inverted)
 {

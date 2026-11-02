@@ -22,6 +22,7 @@
  *   OS_HAS_ADC        analog inputs for programs through a platform ADC port
  *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
  *   OS_HAS_UART       serial ports for programs through a platform UART port
+ *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -59,6 +60,13 @@
 #endif
 #ifndef OS_HAS_UART
 #define OS_HAS_UART 1
+#endif
+/* Pulse trains run on GPIO pins: off without GPIO. */
+#ifndef OS_HAS_PULSE
+#define OS_HAS_PULSE OS_HAS_GPIO
+#endif
+#if OS_HAS_PULSE && !OS_HAS_GPIO
+#error "OS_HAS_PULSE needs OS_HAS_GPIO"
 #endif
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
@@ -198,7 +206,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
-#define OS_ABI_VERSION_MINOR 4U
+#define OS_ABI_VERSION_MINOR 5U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -718,7 +726,8 @@ OsStatus os_schedule(void);
 #define OS_GPIO_CAN_OPEN_DRAIN 0x10U
 #define OS_GPIO_CAN_EDGES      0x20U
 #define OS_GPIO_CAN_PWM        0x40U
-#define OS_GPIO_CAN_ALL        0x7FU
+#define OS_GPIO_CAN_PULSE      0x80U
+#define OS_GPIO_CAN_ALL        0xFFU
 
 /* os_gpio_add_pin options: the board inverts the pin, so programs see 1 for "on". */
 #define OS_GPIO_ACTIVE_LOW 0x01U
@@ -1150,6 +1159,64 @@ void os_uart_error(uint32_t uart);
 void os_uart_writable(uint32_t uart);
 /* The id of the task that owns a port, 0 when it is free. */
 uint32_t os_uart_get_owner(uint32_t uart);
+#endif
+
+#if OS_HAS_PULSE
+/*
+ * Timed pulse trains on GPIO pins that have OS_GPIO_CAN_PULSE, for what needs
+ * timing finer than a program can keep: addressable LEDs, infrared remotes,
+ * echo and one-wire-like sensors. Hardware made for it (a remote-control
+ * peripheral, programmable I/O, a timer with DMA) does the work.
+ *
+ * An item is 32 bits: OS_PULSE_HIGH for the level, the low 31 bits the time
+ * in nanoseconds. The port rounds to its resolution.
+ *
+ * send, send_bits and receive may return OS_STATUS_PENDING and report the
+ * end with os_pulse_complete; meanwhile the items and data stay valid and
+ * belong to the port, exactly as for background bus transfers, and finish
+ * must end the work at once. receive writes captured items into the
+ * program's buffer: it starts at the first edge, ends after idle_ns without
+ * one or when the buffer is full, and fails with OS_STATUS_TIMEOUT when no
+ * edge comes within timeout_ms (the port times it, so the buffer is never
+ * left to it after the kernel has moved on).
+ */
+#define OS_PULSE_HIGH       0x80000000U
+#define OS_PULSE_TIME_MASK  0x7FFFFFFFU
+#define OS_PULSE_RECEIVE    0x01U  /* an input that captures; otherwise an output */
+#define OS_PULSE_IDLE_HIGH  0x02U  /* outputs: the level between trains */
+#ifndef OS_PULSE_MAX
+#define OS_PULSE_MAX 4U
+#endif
+
+typedef struct OsPulsePort
+{
+    void* context;
+    /* The pin's direction and idle level; OS_STATUS_LIMIT_REACHED when no channel is free. */
+    OsStatus (*configure)(void* context, uint32_t pin, uint32_t flags);
+    /* carrier_hz 0: plain levels; otherwise high items are that carrier (infrared). */
+    OsStatus (*send)(void* context, uint32_t pin, const uint32_t* items, uint32_t count, uint32_t carrier_hz);
+    /*
+     * Bytes, most significant bit first: a 0 bit is timing[0] ns high then
+     * timing[1] ns low, a 1 bit timing[2] high then timing[3] low. May be
+     * NULL: programs then get -WR_EUNSUPPORTED.
+     */
+    OsStatus (*send_bits)(void* context, uint32_t pin, const uint8_t* data, uint32_t length, const uint32_t timing[4]);
+    /* May be NULL when no pin can capture. Done at once: the items written in *out_count. */
+    OsStatus (*receive)(void* context, uint32_t pin, uint32_t* items, uint32_t max, uint32_t idle_ns,
+                        uint32_t timeout_ms, uint32_t* out_count);
+    void (*finish)(void* context, uint32_t pin);
+    /* The pin goes back to the kernel: stop and free its channel. */
+    void (*release)(void* context, uint32_t pin);
+    /* Nanoseconds of one tick of the hardware, for programs that want to know. */
+    uint32_t resolution_ns;
+} OsPulsePort;
+
+OsStatus os_pulse_port_set(const OsPulsePort* port);
+/*
+ * The end of work a port started with OS_STATUS_PENDING: its result and,
+ * for receive, how many items it wrote. Safe in an interrupt handler.
+ */
+void os_pulse_complete(uint32_t pin, OsStatus status, uint32_t count);
 #endif
 
 uint32_t os_get_task_count(void);
