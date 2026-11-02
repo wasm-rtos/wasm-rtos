@@ -296,3 +296,9 @@ every change, also under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 The kernel is released into the public domain (see `LICENSE`). wasm3 is
 MIT-licensed.
+
+## Arduino
+
+[`arduino/`](arduino/README.md) builds Arduino sketches and libraries into
+programs: `Arduino.h`, `Serial`, `Wire` and `SPI` on top of the guest ABI.
+It is a library inside the program, not part of the kernel.
