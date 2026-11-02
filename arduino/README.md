@@ -29,14 +29,17 @@ GC9A01A (a round TFT over SPI) and an LM75 driver over Wire.
 | `attachInterrupt` | `gpio` watch; handlers run between `loop()` calls and inside `delay()`, never in the middle of other code |
 | `millis`, `micros`, `delay` | WASI clocks and sleep; only the sketch waits, other programs run |
 | `Serial` | standard output: the system keeps it per program or sends it to a UART; input reads nothing |
+| `Serial1`, `Serial2` | `uart` ports `"uart1"`, `"uart2"`, with the classic `SERIAL_8N1`… formats |
+| `analogRead(A0)` | `adc` channel `"a0"` (and `analogRead(0)` too), scaled to `analogReadResolution` (10 bits by default) |
+| `analogWrite`, `tone` | `pwm` on the pin, 1 kHz by default (`analogWriteFrequency`), `analogWriteResolution` 8 bits by default; `digitalWrite` on the pin ends it |
 | `Wire` (`"i2c0"`), `Wire1` (`"i2c1"`) | `i2c`; `endTransmission(false)` and `requestFrom` make one transaction with a repeated start |
 | `SPI` (`"spi0"`) | `spi`, taking the whole bus: libraries drive chip select with `digitalWrite` |
 | `String`, `Print`, `Stream`, `F()`, `PROGMEM` | plain memory: wasm has no separate flash |
 
 ## Limits
 
-- No analog hardware yet: `analogRead` returns 0, `analogWrite` switches the
-  pin on from half scale, `tone` is silent.
+- `analogWrite` on a pin without PWM switches it on from half scale; a
+  channel the device lacks reads 0.
 - The kernel's clock counts milliseconds. `delayMicroseconds` waits at least
   as long by giving other programs a turn; timing a pulse (`pulseIn`) or
   bit-banging a protocol in microseconds is not possible from a program.

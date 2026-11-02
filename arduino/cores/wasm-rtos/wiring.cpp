@@ -13,6 +13,13 @@
 
 static int32_t g_pins[MAX_PINS];
 static uint8_t g_pin_modes[MAX_PINS];
+/* PWM outputs from analogWrite and tone, by pin; a pin is either these or g_pins. */
+static int32_t g_pwm[MAX_PINS];
+static int g_read_bits = 10;
+static int g_write_bits = 8;
+static uint32_t g_write_hz = 1000;
+static uint8_t g_tone_pin = NOT_A_PIN;
+static uint64_t g_tone_end_ms;
 
 typedef struct
 {
@@ -22,6 +29,20 @@ typedef struct
 
 static Interrupt g_interrupts[MAX_INTERRUPTS];
 static bool g_interrupts_off;
+
+extern "C" __attribute__((weak)) const char* wr_arduino_analog_name(uint8_t pin)
+{
+    static char name[12];
+    snprintf(name, sizeof(name), "a%u", (unsigned)(pin >= A0 ? pin - A0 : pin));
+    return name;
+}
+
+static void release_pwm(uint8_t pin)
+{
+    if (g_pwm[pin] > 0)
+        wr_close(g_pwm[pin]);
+    g_pwm[pin] = 0;
+}
 
 extern "C" __attribute__((weak)) const char* wr_arduino_pin_name(uint8_t pin)
 {
@@ -47,6 +68,8 @@ static uint32_t gpio_flags(uint8_t mode)
 /* The pin's handle, opened in mode on first use; 0 when the device has no such pin. */
 static int32_t pin_handle(uint8_t pin, uint8_t mode)
 {
+    /* Digital use of a pin ends its PWM, as on Arduino. */
+    release_pwm(pin);
     if (g_pins[pin] <= 0)
     {
         g_pins[pin] = wr_gpio_open_cstr(wr_arduino_pin_name(pin), gpio_flags(mode));
@@ -57,6 +80,7 @@ static int32_t pin_handle(uint8_t pin, uint8_t mode)
 
 void pinMode(uint8_t pin, uint8_t mode)
 {
+    release_pwm(pin);
     if (g_pins[pin] > 0)
     {
         if (wr_gpio_set_mode(g_pins[pin], gpio_flags(mode)) == 0)
@@ -86,26 +110,110 @@ int digitalRead(uint8_t pin)
     return handle != 0 && wr_gpio_get(handle) == 1 ? HIGH : LOW;
 }
 
-/* No analog hardware in the ABI yet: inputs read 0, outputs are on from half scale. */
+/* Scale a value of from_bits to to_bits, keeping full scale full. */
+static uint32_t rescale(uint32_t value, int from_bits, int to_bits)
+{
+    uint64_t from_max = (1ull << from_bits) - 1u;
+    uint64_t to_max = (1ull << to_bits) - 1u;
+    return from_max == 0 ? 0 : (uint32_t)(((uint64_t)value * to_max + from_max / 2u) / from_max);
+}
+
+/* Channels stay open: reading is shared, and opening again each time would cost a call. */
 int analogRead(uint8_t pin)
 {
-    (void)pin;
-    return 0;
+    static int32_t channels[MAX_PINS];
+    int32_t raw;
+    int32_t bits;
+    if (channels[pin] <= 0)
+        channels[pin] = wr_adc_open_cstr(wr_arduino_analog_name(pin));
+    if (channels[pin] <= 0)
+        return 0;
+    raw = wr_adc_read(channels[pin]);
+    bits = wr_adc_get(channels[pin], WR_ADC_RESOLUTION);
+    return raw < 0 || bits <= 0 ? 0 : (int)rescale((uint32_t)raw, bits, g_read_bits);
 }
 
-void analogReadResolution(int bits) { (void)bits; }
+void analogReadResolution(int bits)
+{
+    if (bits >= 1 && bits <= 16)
+        g_read_bits = bits;
+}
+
 void analogReference(uint8_t mode) { (void)mode; }
 
-void analogWrite(uint8_t pin, int value) { digitalWrite(pin, value >= 128 ? HIGH : LOW); }
-
-void tone(uint8_t pin, unsigned int frequency, unsigned long duration)
+/* The pin's PWM output, opened at frequency_hz on first use; 0 when the pin cannot do PWM. */
+static int32_t pwm_handle(uint8_t pin, uint32_t frequency_hz)
 {
-    (void)pin;
-    (void)frequency;
-    (void)duration;
+    if (g_pwm[pin] > 0)
+        return g_pwm[pin];
+    if (g_pins[pin] > 0)
+    {
+        wr_close(g_pins[pin]);
+        g_pins[pin] = 0;
+    }
+    g_pwm[pin] = wr_pwm_open_cstr(wr_arduino_pin_name(pin), frequency_hz, 0u);
+    return g_pwm[pin] > 0 ? g_pwm[pin] : 0;
 }
 
-void noTone(uint8_t pin) { (void)pin; }
+void analogWrite(uint8_t pin, int value)
+{
+    uint32_t max = (1u << g_write_bits) - 1u;
+    uint32_t level = value < 0 ? 0u : (uint32_t)value > max ? max : (uint32_t)value;
+    int32_t output = pwm_handle(pin, g_write_hz);
+    if (output == 0)
+    {
+        /* No PWM on this pin: on from half scale, as some cores do. */
+        digitalWrite(pin, level >= (max + 1u) / 2u ? HIGH : LOW);
+        return;
+    }
+    wr_pwm_set_duty(output, rescale(level, g_write_bits, 16));
+}
+
+void analogWriteResolution(int bits)
+{
+    if (bits >= 1 && bits <= 16)
+        g_write_bits = bits;
+}
+
+void analogWriteFrequency(uint8_t pin, uint32_t frequency_hz)
+{
+    g_write_hz = frequency_hz;
+    if (g_pwm[pin] > 0)
+        wr_pwm_set_frequency(g_pwm[pin], frequency_hz);
+}
+
+/* A square wave: half duty at the frequency; with a duration it stops by itself. */
+void tone(uint8_t pin, unsigned int frequency, unsigned long duration)
+{
+    int32_t output;
+    if (frequency == 0)
+    {
+        noTone(pin);
+        return;
+    }
+    output = pwm_handle(pin, frequency);
+    if (output == 0)
+        return;
+    wr_pwm_set_frequency(output, frequency);
+    wr_pwm_set_duty(output, WR_PWM_DUTY_MAX / 2u + 1u);
+    g_tone_pin = pin;
+    g_tone_end_ms = duration > 0 ? wr_time_ms() + duration : 0;
+}
+
+void noTone(uint8_t pin)
+{
+    if (g_pwm[pin] > 0)
+        wr_pwm_set_duty(g_pwm[pin], 0u);
+    if (g_tone_pin == pin)
+        g_tone_pin = NOT_A_PIN;
+}
+
+/* A tone with a duration ends here, between loop() calls and in delay(). */
+static void end_tone(void)
+{
+    if (g_tone_pin != NOT_A_PIN && g_tone_end_ms != 0 && wr_time_ms() >= g_tone_end_ms)
+        noTone(g_tone_pin);
+}
 
 unsigned long millis(void) { return (unsigned long)wr_time_ms(); }
 
@@ -119,6 +227,7 @@ unsigned long micros(void)
 /* Run the handlers of pins whose edges arrived; between loop() calls and in delay(), never in between. */
 static void run_interrupts(void)
 {
+    end_tone();
     if (g_interrupts_off)
         return;
     for (int index = 0; index < MAX_INTERRUPTS; ++index)
@@ -144,14 +253,18 @@ void delay(unsigned long ms)
         uint64_t now = wr_time_ms();
         if (now >= deadline)
             break;
+        uint64_t until = deadline;
         for (int index = 0; index < MAX_INTERRUPTS; ++index)
             if (g_interrupts[index].handler != nullptr && !g_interrupts_off)
                 watched[count++] = g_pins[g_interrupts[index].pin];
+        /* A tone that ends during the delay wakes it on time. */
+        if (g_tone_pin != NOT_A_PIN && g_tone_end_ms != 0 && g_tone_end_ms < until)
+            until = g_tone_end_ms > now ? g_tone_end_ms : now;
         /* Sleep until the time is up or a watched pin has an edge, whichever comes first. */
         if (count == 0)
-            wr_sleep_ms((uint32_t)(deadline - now));
+            wr_sleep_ms((uint32_t)(until - now));
         else
-            wr_wait_any(watched, count, (uint32_t)(deadline - now));
+            wr_wait_any(watched, count, (uint32_t)(until - now));
         run_interrupts();
     }
 }

@@ -62,6 +62,9 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_I2C_MAX_BUSES` / `OS_I2C_MAX_DEVICES` | 2 / 16 | I2C buses, and addresses programs hold open at once |
 | `OS_SPI_MAX_BUSES` / `OS_SPI_MAX_DEVICES` | 2 / 8 | SPI buses, and devices programs hold open at once |
 | `OS_BUS_MAX_OPS` | 16 | ops in one transaction |
+| `OS_HAS_ADC` / `OS_ADC_MAX` | 1 / 8 | analog inputs, and channels a platform can register |
+| `OS_HAS_PWM` / `OS_PWM_MAX` | `OS_HAS_GPIO` / 8 | PWM outputs on GPIO pins with `OS_GPIO_CAN_PWM`, and outputs at once |
+| `OS_HAS_UART` / `OS_UART_MAX` / `OS_UART_RX_BUFFER` | 1 / 4 / 256 | serial ports, and received bytes kept per port |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
 | `OS_NATIVE_STACK_BUDGET` | 16 KiB | C stack nested Wasm calls may use in one slice before it ends early (0 = unlimited) |
@@ -221,6 +224,33 @@ void IRAM_ATTR spi_dma_done_isr(void) { os_bus_complete(OS_BUS_SPI, 2, OS_STATUS
 static void lcd_spi_finish(void* context, uint32_t bus) { wait_for_dma_done(bus); }
 ```
 
+### Analog inputs, PWM and serial ports
+
+```c
+static const OsAdcPort adc = { NULL, board_adc_read, board_adc_read_mv };   /* read_mv may be NULL */
+static const OsAdcInfo pot = { .resolution_bits = 12, .full_scale_mv = 3300 };
+os_adc_port_set(&adc);
+os_adc_add_channel("a0", 6, &pot);
+
+static const OsPwmPort pwm = { NULL, ledc_start, ledc_set_duty, ledc_set_frequency, ledc_stop };
+os_pwm_port_set(&pwm);
+os_gpio_add_pin("led", 2, OS_GPIO_CAN_OUTPUT | OS_GPIO_CAN_PWM, OS_GPIO_ACTIVE_LOW);
+
+static const OsUartPort uart = { NULL, uart_configure, uart_write, uart_close };
+os_uart_port_set(&uart);
+os_uart_add("uart1", 1, 921600);
+void IRAM_ATTR uart1_rx_isr(void) { os_uart_receive(1, fifo, count); }
+void IRAM_ATTR uart1_tx_isr(void) { os_uart_writable(1); }
+```
+
+A PWM port gets the duty on the pin, 0 to 65535, after the kernel has
+applied the board's and the program's inversion; it scales to its own
+resolution and may round the frequency, reporting what it set. A UART
+port's `write` takes what fits in its send buffer and returns how many
+bytes; when room comes back it calls `os_uart_writable`. Received bytes go
+to `os_uart_receive`, errors to `os_uart_error`; all three are safe in an
+interrupt handler.
+
 ### Swapping
 
 To move idle programs out of RAM, give the kernel somewhere to put them: a
@@ -273,7 +303,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-child processes, GPIO pins, displays, input devices and I2C and SPI buses. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes, GPIO pins, displays, input devices, I2C and SPI buses, analog inputs, PWM outputs and serial ports. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 

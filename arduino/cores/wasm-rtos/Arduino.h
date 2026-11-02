@@ -4,9 +4,9 @@
  * carries none of it.
  *
  * Pins are named by the device profile: pin N is "gpioN", LED_BUILTIN is
- * "led". Interrupt handlers run between loop() calls and inside delay(),
- * never in the middle of other code. analogRead, analogWrite and tone have
- * no hardware behind them yet.
+ * "led", A0 is "a0". Interrupt handlers run between loop() calls and inside
+ * delay(), never in the middle of other code. analogRead uses adc,
+ * analogWrite and tone pwm, Serial1 and Serial2 uart.
  */
 #ifndef WASM_RTOS_ARDUINO_H
 #define WASM_RTOS_ARDUINO_H
@@ -90,6 +90,8 @@ int digitalRead(uint8_t pin);
 int analogRead(uint8_t pin);
 void analogReadResolution(int bits);
 void analogWrite(uint8_t pin, int value);
+void analogWriteResolution(int bits);
+void analogWriteFrequency(uint8_t pin, uint32_t frequency_hz);
 void analogReference(uint8_t mode);
 
 unsigned long millis(void);
@@ -112,6 +114,8 @@ void loop(void);
 
 /* The device profile's name for an Arduino pin number; programs may override it. */
 const char* wr_arduino_pin_name(uint8_t pin);
+/* The device profile's name for an analog input (A0 -> "a0"); programs may override it. */
+const char* wr_arduino_analog_name(uint8_t pin);
 
 #ifdef __cplusplus
 }
@@ -120,6 +124,7 @@ const char* wr_arduino_pin_name(uint8_t pin);
 #include "Print.h"
 #include "Stream.h"
 #include "Serial.h"
+#include "HardwareSerial.h"
 
 template <class T, class L>
 auto min(const T& a, const L& b) -> decltype((b < a) ? b : a)

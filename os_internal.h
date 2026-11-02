@@ -21,7 +21,10 @@ typedef enum OsObjectType
     OS_OBJECT_DISPLAY,
     OS_OBJECT_INPUT,
     OS_OBJECT_I2C,
-    OS_OBJECT_SPI
+    OS_OBJECT_SPI,
+    OS_OBJECT_ADC,
+    OS_OBJECT_PWM,
+    OS_OBJECT_UART
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -43,6 +46,16 @@ OsStatus os_guest_begin(uint32_t* raw_return);
 M3Result os_guest_end(void);
 /* Address range of the current task's linear memory, or an error. */
 OsStatus os_guest_memory(uint32_t address, uint32_t length, uint8_t** out_memory);
+
+/*
+ * Waits for something outside the kernel's objects, named by a key: the
+ * current task blocks until os_signal_wake(key) or the timeout. Like the
+ * other waits, it starts in an import between os_guest_begin and
+ * os_guest_end.
+ */
+OsStatus os_signal_wait(uint32_t key, uint32_t timeout_ms);
+void os_signal_wake(uint32_t key);
+#define OS_SIGNAL_KEY(type, id) (((uint32_t)(type) << 24) | ((id) & 0x00FFFFFFU))
 
 /* Value the current task's last immediate wait produced (event bits). */
 uint32_t os_guest_last_wait_value(void);
@@ -139,6 +152,14 @@ uint8_t os_gpio_ready(uint32_t id);
 OsStatus os_gpio_open_physical(const char* name, uint32_t length, uint32_t* out_id);
 /* The platform's pin number behind a GPIO id. */
 uint32_t os_gpio_pin_number(uint32_t id);
+/*
+ * A pin for a PWM output: it must have OS_GPIO_CAN_PWM (else
+ * OS_STATUS_UNSUPPORTED); it is owned like any opened pin and starts as a
+ * low output. *out_inverted says whether the program's levels are the
+ * pin's inverted (board and program inversion together).
+ */
+OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low, uint32_t* out_id,
+                          uint8_t* out_inverted);
 /* Deliver edges reported by os_gpio_edge; wakes waiting programs. */
 void os_gpio_poll(void);
 void os_gpio_shutdown(void);
@@ -236,6 +257,50 @@ OsStatus os_spi_open(const char* bus_name, uint32_t bus_length, const char* cs, 
 void os_spi_close(uint32_t id);
 OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count);
 void os_spi_shutdown(void);
+#endif
+
+#if OS_HAS_ADC
+/* ---- Analog inputs for programs (adc.c) ------------------------------------ */
+#define OS_ADC_PROP_RESOLUTION 1U
+#define OS_ADC_PROP_MAX        2U
+#define OS_ADC_PROP_FULL_SCALE 3U
+OsStatus os_adc_open(const char* name, uint32_t length, uint32_t* out_id);
+OsStatus os_adc_read(uint32_t id, uint32_t* out_raw);
+OsStatus os_adc_read_mv(uint32_t id, uint32_t* out_mv);
+OsStatus os_adc_get(uint32_t id, uint32_t property, uint32_t* out_value);
+void os_adc_shutdown(void);
+#endif
+
+#if OS_HAS_PWM
+/* ---- PWM outputs for programs (pwm.c) -------------------------------------- */
+#define OS_PWM_PROP_FREQUENCY 1U
+#define OS_PWM_PROP_DUTY      2U
+#define OS_PWM_ACTIVE_LOW     0x01U
+/* Duty as the program sees it: 0 off .. 65535 fully on. */
+OsStatus os_pwm_open(const char* name, uint32_t length, uint32_t frequency_hz, uint32_t flags, uint32_t* out_id);
+OsStatus os_pwm_set_duty(uint32_t id, uint32_t duty);
+OsStatus os_pwm_set_frequency(uint32_t id, uint32_t frequency_hz);
+OsStatus os_pwm_get(uint32_t id, uint32_t property, uint32_t* out_value);
+void os_pwm_close(uint32_t id);
+void os_pwm_shutdown(void);
+#endif
+
+#if OS_HAS_UART
+/* ---- Serial ports for programs (uart.c) ------------------------------------ */
+#define OS_UART_PROP_BAUD      1U
+#define OS_UART_PROP_AVAILABLE 2U
+#define OS_UART_PROP_ERRORS    3U
+OsStatus os_uart_open(const char* name, uint32_t length, uint32_t baud, uint32_t format, uint32_t* out_id);
+void os_uart_close(uint32_t id);
+uint32_t os_uart_read(uint32_t id, uint8_t* out, uint32_t max);
+OsStatus os_uart_write(uint32_t id, const uint8_t* data, uint32_t size, uint32_t* out_written);
+/* 0 when the port can take bytes again; starts a wait otherwise (OS_STATUS_PENDING). */
+OsStatus os_uart_wait_writable(uint32_t id, uint32_t timeout_ms);
+OsStatus os_uart_get(uint32_t id, uint32_t property, uint32_t* out_value);
+uint8_t os_uart_ready(uint32_t id);
+/* Deliver what ports reported from interrupt handlers. */
+void os_uart_poll(void);
+void os_uart_shutdown(void);
 #endif
 
 #if OS_HAS_I2C || OS_HAS_SPI

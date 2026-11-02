@@ -1,4 +1,4 @@
-# wasm-rtos ABI 1.3
+# wasm-rtos ABI 1.4
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
@@ -11,6 +11,7 @@ remove anything here.
 | 1.1 | `gpio`, error `WR_EINUSE` |
 | 1.2 | `display`, `input` |
 | 1.3 | `i2c`, `spi`, errors `WR_ENACK`, `WR_EBUS` |
+| 1.4 | `adc`, `pwm`, `uart` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -315,6 +316,55 @@ and the call returns when the transfer has ended. A wait for a transfer is
 not cut short: when the program is paused or its wait is aborted, the
 transfer still ends and the program gets its result.
 
+### `adc` (1.4)
+Analog inputs, named as the device profile names them (`"a0"`,
+`"battery"`).
+
+- `open(name, flags)` returns a handle; flags are 0. Reading changes
+  nothing, so programs share a channel (no `-WR_EINUSE`).
+- `read(channel)` is the raw value, 0 to `max`; `read-mv(channel)` the
+  voltage in millivolts, calibrated by the device where it can.
+- `get(channel, property)`: 1 `resolution` (bits), 2 `max` (the largest raw
+  value), 3 `full-scale-mv` (its voltage). Unknown properties are
+  `-WR_EUNSUPPORTED`.
+
+### `pwm` (1.4)
+Pulse-width outputs on GPIO pins, by the pin's name (`"led"`, `"gpio5"`):
+LED brightness, motor speed, servos, tones.
+
+- `open(name, frequency_hz, flags)` returns a handle and owns the pin as
+  `gpio.open` does (`-WR_EINUSE`); it starts off. A pin that cannot do PWM is
+  `-WR_EUNSUPPORTED`; no free PWM channel, `-WR_ELIMIT`. Flag
+  `WR_PWM_ACTIVE_LOW` (1) makes "on" the pin's low; a pin the board wires
+  active-low is inverted already, as with `gpio`.
+- `set-duty(output, duty)`: 0 (off) to 65535 (fully on), whatever the
+  hardware's resolution, so the same value means the same on every chip.
+- `set-frequency(output, hz)`; `get(output, property)`: 1 `frequency` (what
+  the hardware runs at, which may be rounded), 2 `duty` (the last one set).
+- Closing the handle, or ending the program, stops the output and gives the
+  pin back as an input.
+
+### `uart` (1.4)
+Serial ports, named as the device profile names them (`"uart1"`, `"gps"`).
+
+- `open(name, baud, format)` returns a handle; one program per port
+  (`-WR_EINUSE`). `format` 0 is 8 data bits, no parity, one stop bit;
+  `WR_UART_PARITY_EVEN` (1), `_ODD` (2), `_STOP_2` (4), `_DATA_7` (8),
+  `_FLOW_RTS_CTS` (16). A speed above the port's maximum is
+  `-WR_EUNSUPPORTED`; the speed the port runs at is `get(port, 1)`.
+- Received bytes wait in the kernel, 256 per port; more are dropped and
+  counted. The handle is ready for `wait.any` while bytes wait;
+  `read(port, buffer, max)` takes up to `max` and returns how many, 0 when
+  nothing has arrived.
+- `write(port, data, length)` hands the port what fits in its send buffer
+  and returns how many bytes that was. After a short write,
+  `wait-writable(port, timeout)` waits until there is room again (0 at once
+  when there is; with timeout 0, `-WR_EFULL` when there is not). C:
+  `wr_uart_write_all` loops over both.
+- `get(port, property)`: 1 `baud`, 2 `available` (bytes waiting), 3
+  `errors` (frame, parity and overrun errors and dropped bytes since the
+  last time the program asked).
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -344,7 +394,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.3 states 65539 (1.3); kernels refuse only another major.
+A program for 1.4 states 65540 (1.4); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
@@ -357,7 +407,8 @@ These names are taken; their shape will follow the rules above.
   descriptors.
 - `wasm-rtos:kernel/device`: what the device offers (display size and shape,
   inputs, sensors), so programs ask instead of assuming.
-- `wasm-rtos:kernel/uart`, `adc`, `pwm`: the same way as `i2c` and `spi`.
+- `wasm-rtos:kernel/dac`, `pulse`, `onewire`: analog outputs, timed pulse
+  trains (addressable LEDs, infrared) and 1-Wire buses.
 - `wasm-rtos:kernel/power`, `system`, `ui`: sleep and wake sources, battery
   and indicators, windows and dialogs. `ui` will hand programs windows that
   behave like `display` and `input` devices.

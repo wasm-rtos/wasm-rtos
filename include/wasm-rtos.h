@@ -2,7 +2,7 @@
 #define WASM_RTOS_H_GUEST
 
 /*
- * wasm-rtos ABI 1.3 for programs written in C or C++ (wasm32).
+ * wasm-rtos ABI 1.4 for programs written in C or C++ (wasm32).
  *
  * Every call returns an int32_t: zero or a value on success, a negative WR_E*
  * error otherwise. Handles belong to the calling program and close when it
@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define WR_ABI_VERSION_MAJOR 1
-#define WR_ABI_VERSION_MINOR 3
+#define WR_ABI_VERSION_MINOR 4
 
 /* Errors; calls return their negatives. */
 #define WR_EFAULT       1   /* a pointer or range lies outside the program's memory */
@@ -171,6 +171,28 @@ typedef struct wr_spi_op
 #define WR_SPI_MODE_2 WR_SPI_CPOL
 #define WR_SPI_MODE_3 (WR_SPI_CPOL | WR_SPI_CPHA)
 
+/* adc-get properties (1.4). */
+#define WR_ADC_RESOLUTION    1u  /* bits of a raw value */
+#define WR_ADC_MAX           2u  /* the largest raw value */
+#define WR_ADC_FULL_SCALE_MV 3u  /* the voltage of the largest raw value */
+
+/* pwm (1.4): duty runs from 0 (off) to WR_PWM_DUTY_MAX (fully on) on every chip. */
+#define WR_PWM_DUTY_MAX   65535u
+#define WR_PWM_ACTIVE_LOW 0x01u  /* pwm-open: "on" is the pin's low */
+#define WR_PWM_FREQUENCY  1u     /* pwm-get: the frequency the hardware runs at */
+#define WR_PWM_DUTY       2u     /* pwm-get: the duty last set */
+
+/* uart-open frame format (1.4); 0 is 8 data bits, no parity, 1 stop bit. */
+#define WR_UART_PARITY_EVEN  0x01u
+#define WR_UART_PARITY_ODD   0x02u
+#define WR_UART_STOP_2       0x04u
+#define WR_UART_DATA_7       0x08u
+#define WR_UART_FLOW_RTS_CTS 0x10u
+/* uart-get properties. */
+#define WR_UART_BAUD      1u  /* the speed the port runs at */
+#define WR_UART_AVAILABLE 2u  /* received bytes waiting to be read */
+#define WR_UART_ERRORS    3u  /* frame, parity and overrun errors and lost bytes since the last ask */
+
 /* One string argument for spawn: matches the ABI's (pointer, length) pair. */
 typedef struct wr_str
 {
@@ -179,7 +201,7 @@ typedef struct wr_str
 } wr_str;
 
 #define WR_IMPORT(interface, name) \
-    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.3.0"), import_name(name)))
+    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.4.0"), import_name(name)))
 
 /* handle */
 WR_IMPORT("handle", "close") int32_t wr_close(int32_t handle);
@@ -273,6 +295,33 @@ WR_IMPORT("spi", "open") int32_t wr_spi_open(const char* bus, uint32_t bus_lengt
                                              uint32_t mode, uint32_t frequency_hz);
 WR_IMPORT("spi", "transaction") int32_t wr_spi_transaction(int32_t device, const wr_spi_op* ops, uint32_t count);
 
+/* adc (1.4): analog inputs by the device profile's names ("a0", "battery").
+ * Reading changes nothing, so programs share a channel. adc-read gives the
+ * raw value, adc-read-mv millivolts. flags are 0. */
+WR_IMPORT("adc", "open") int32_t wr_adc_open(const char* name, uint32_t name_length, uint32_t flags);
+WR_IMPORT("adc", "read") int32_t wr_adc_read(int32_t channel);
+WR_IMPORT("adc", "read-mv") int32_t wr_adc_read_mv(int32_t channel);
+WR_IMPORT("adc", "get") int32_t wr_adc_get(int32_t channel, uint32_t property);
+
+/* pwm (1.4): a pulse-width output on a GPIO pin, by its name; the pin is
+ * owned as with gpio-open and starts off. */
+WR_IMPORT("pwm", "open") int32_t wr_pwm_open(const char* name, uint32_t name_length, uint32_t frequency_hz,
+                                             uint32_t flags);
+WR_IMPORT("pwm", "set-duty") int32_t wr_pwm_set_duty(int32_t output, uint32_t duty);
+WR_IMPORT("pwm", "set-frequency") int32_t wr_pwm_set_frequency(int32_t output, uint32_t frequency_hz);
+WR_IMPORT("pwm", "get") int32_t wr_pwm_get(int32_t output, uint32_t property);
+
+/* uart (1.4): serial ports by the device profile's names ("uart1"), one
+ * owner each. The handle is ready for wait.any while received bytes wait;
+ * uart-read takes what is there (0: nothing yet). uart-write hands the port
+ * what fits and returns how many; uart-wait-writable waits until it has
+ * room again. */
+WR_IMPORT("uart", "open") int32_t wr_uart_open(const char* name, uint32_t name_length, uint32_t baud, uint32_t format);
+WR_IMPORT("uart", "read") int32_t wr_uart_read(int32_t port, void* buffer, uint32_t max);
+WR_IMPORT("uart", "write") int32_t wr_uart_write(int32_t port, const void* data, uint32_t length);
+WR_IMPORT("uart", "wait-writable") int32_t wr_uart_wait_writable(int32_t port, uint32_t timeout_ms);
+WR_IMPORT("uart", "get") int32_t wr_uart_get(int32_t port, uint32_t property);
+
 /* Time, sleep and yield through WASI, for programs without a C library. */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
 int32_t wr_wasi_clock_time_get_(uint32_t clock, uint64_t precision, uint64_t* out_time);
@@ -325,6 +374,29 @@ static inline wr_str wr_cstr(const char* text)
 #define wr_queue_open(name, item_size, capacity) wr_queue_create((name), wr_strlen(name), (item_size), (capacity))
 #define wr_gpio_open_cstr(name, flags) wr_gpio_open((name), wr_strlen(name), (flags))
 #define wr_display_open_cstr(name) wr_display_open((name), wr_strlen(name), 0)
+#define wr_adc_open_cstr(name) wr_adc_open((name), wr_strlen(name), 0)
+#define wr_pwm_open_cstr(name, frequency_hz, flags) wr_pwm_open((name), wr_strlen(name), (frequency_hz), (flags))
+#define wr_uart_open_cstr(name, baud, format) wr_uart_open((name), wr_strlen(name), (baud), (format))
+
+/* Send all of data, waiting for room as needed: the count sent, or an error. */
+static inline int32_t wr_uart_write_all(int32_t port, const void* data, uint32_t length, uint32_t timeout_ms)
+{
+    uint32_t sent = 0;
+    while (sent < length)
+    {
+        int32_t written = wr_uart_write(port, (const uint8_t*)data + sent, length - sent);
+        if (written < 0)
+            return written;
+        sent += (uint32_t)written;
+        if (sent < length)
+        {
+            int32_t ready = wr_uart_wait_writable(port, timeout_ms);
+            if (ready < 0)
+                return ready == -WR_ETIMEOUT || ready == -WR_EFULL ? (int32_t)sent : ready;
+        }
+    }
+    return (int32_t)sent;
+}
 #define wr_i2c_open_cstr(bus, address) wr_i2c_open((bus), wr_strlen(bus), (address), 0)
 #define wr_spi_open_cstr(bus, cs, mode, frequency_hz) \
     wr_spi_open((bus), wr_strlen(bus), (cs), wr_strlen(cs), (mode), (frequency_hz))
@@ -375,7 +447,7 @@ static inline int32_t wr_spi_transfer(int32_t device, const void* out, void* in,
     __asm__(WR_APP_SECTION_ ".int8 " #key "\n.uleb128 2f-1f\n1:\n.ascii \"" text "\"\n2:\n.text\n")
 
 /* The ABI version the program was written for (major << 16 | minor). */
-#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65539)
+#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65540)
 /* Interpreter stack in bytes, unless whoever starts the program picks one. */
 #define WR_APP_STACK_SIZE(bytes) WR_APP_U32_(2, bytes)
 /* Name shown for the program. */

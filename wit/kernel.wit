@@ -1,4 +1,4 @@
-// wasm-rtos ABI 1.3: what a program imports from the kernel.
+// wasm-rtos ABI 1.4: what a program imports from the kernel.
 //
 // Lowered to core wasm imports by hand ("canonical ABI lite"): every function
 // returns s32, zero or a value on success and a negative `error` otherwise;
@@ -7,7 +7,7 @@
 // interface is "wasm-rtos:kernel/<interface>@1.<minor>.0", the minor version
 // the program was built for. docs/abi.md has the rules.
 
-package wasm-rtos:kernel@1.3.0;
+package wasm-rtos:kernel@1.4.0;
 
 interface types {
     // A handle to a kernel object; it belongs to the calling program.
@@ -183,6 +183,48 @@ interface spi {
     transaction: func(device: handle, ops: u32, count: u32) -> s32;
 }
 
+// Analog inputs by the device profile's names ("a0", "battery"); programs share them.
+@since(version = 1.4.0)
+interface adc {
+    use types.{handle};
+    enum property { reserved, resolution, max, full-scale-mv }
+    // flags must be 0.
+    open: func(name: string, %flags: u32) -> handle;
+    read: func(channel: handle) -> s32;       // raw, 0 .. max
+    read-mv: func(channel: handle) -> s32;    // millivolts
+    get: func(channel: handle, property: property) -> s32;
+}
+
+// A pulse-width output on a GPIO pin, owned like an opened pin.
+@since(version = 1.4.0)
+interface pwm {
+    use types.{handle};
+    flags pwm-flags { active-low }
+    enum property { reserved, frequency, duty }
+    open: func(name: string, frequency-hz: u32, %flags: pwm-flags) -> handle;
+    // 0 off .. 65535 fully on.
+    set-duty: func(output: handle, duty: u32) -> s32;
+    set-frequency: func(output: handle, frequency-hz: u32) -> s32;
+    get: func(output: handle, property: property) -> s32;
+}
+
+// Serial ports by the device profile's names ("uart1"), one owner each. The
+// handle is ready for wait.any while received bytes wait.
+@since(version = 1.4.0)
+interface uart {
+    use types.{handle, timeout-ms};
+    flags format { parity-even, parity-odd, stop-2, data-7, flow-rts-cts }
+    enum property { reserved, baud, available, errors }
+    open: func(name: string, baud: u32, format: format) -> handle;
+    // What has arrived, up to max bytes; 0 when nothing has.
+    read: func(port: handle, buffer: u32, max: u32) -> s32;
+    // Hands the port what fits; returns how many bytes.
+    write: func(port: handle, data: list<u8>) -> s32;
+    // Until the port has room again after a short write; -full with timeout 0.
+    wait-writable: func(port: handle, timeout: timeout-ms) -> s32;
+    get: func(port: handle, property: property) -> s32;
+}
+
 world program {
     import handle;
     import sync;
@@ -199,4 +241,10 @@ world program {
     import i2c;
     @since(version = 1.3.0)
     import spi;
+    @since(version = 1.4.0)
+    import adc;
+    @since(version = 1.4.0)
+    import pwm;
+    @since(version = 1.4.0)
+    import uart;
 }
