@@ -26,7 +26,8 @@ typedef enum OsObjectType
     OS_OBJECT_PWM,
     OS_OBJECT_UART,
     OS_OBJECT_PULSE,
-    OS_OBJECT_ONEWIRE
+    OS_OBJECT_ONEWIRE,
+    OS_OBJECT_COUNTER
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -293,6 +294,27 @@ typedef struct OsOneWireSearch
 OsStatus os_onewire_search(const char* bus_name, uint32_t length, OsOneWireSearch* state, uint32_t flags,
                            uint8_t* out_found);
 void os_onewire_shutdown(void);
+#endif
+
+#if OS_HAS_COUNTER
+/* ---- Counters for programs (counter.c) ------------------------------------- */
+#define OS_COUNTER_PROP_KIND      1U
+#define OS_COUNTER_PROP_MAX_HZ    2U
+#define OS_COUNTER_PROP_FILTER_NS 3U
+/* OS_STATUS_INVALID_ARGUMENT for a mode of the other kind. */
+OsStatus os_counter_open(const char* name, uint32_t length, uint32_t mode, uint32_t filter_ns, uint32_t* out_id);
+void os_counter_close(uint32_t id);
+OsStatus os_counter_read(uint32_t id, int32_t* out_count);
+OsStatus os_counter_write(uint32_t id, int32_t count);
+/* Ready for wait.any while the count is below low or above high; INT32_MIN, INT32_MAX stops watching. */
+OsStatus os_counter_watch(uint32_t id, int32_t low, int32_t high);
+OsStatus os_counter_get(uint32_t id, uint32_t property, uint32_t* out_value);
+uint8_t os_counter_ready(uint32_t id);
+/* Events from interrupt handlers, and watched counters read by the kernel. */
+void os_counter_poll(void);
+/* When the kernel next reads a watched counter, in ms from now (OS_WAIT_FOREVER: none). */
+uint32_t os_counter_next_deadline_ms(void);
+void os_counter_shutdown(void);
 #endif
 
 #if OS_HAS_ADC

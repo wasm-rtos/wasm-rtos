@@ -24,6 +24,7 @@
  *   OS_HAS_UART       serial ports for programs through a platform UART port
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
+ *   OS_HAS_COUNTER    pulse counters and quadrature encoders through a platform port
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -71,6 +72,9 @@
 #endif
 #ifndef OS_HAS_ONEWIRE
 #define OS_HAS_ONEWIRE 1
+#endif
+#ifndef OS_HAS_COUNTER
+#define OS_HAS_COUNTER 1
 #endif
 /* Buses of any kind: the shared machinery of bus.c. */
 #define OS_HAS_BUSES (OS_HAS_I2C || OS_HAS_SPI || OS_HAS_ONEWIRE)
@@ -212,7 +216,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
-#define OS_ABI_VERSION_MINOR 6U
+#define OS_ABI_VERSION_MINOR 7U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -1237,6 +1241,69 @@ void os_uart_error(uint32_t uart);
 void os_uart_writable(uint32_t uart);
 /* The id of the task that owns a port, 0 when it is free. */
 uint32_t os_uart_get_owner(uint32_t uart);
+#endif
+
+#if OS_HAS_COUNTER
+/*
+ * Counters, registered under the device profile's names ("enc0", "flow"):
+ * a pulse counter on one pin, or a quadrature encoder on two. Hardware
+ * counts (a pulse counter unit, a timer in encoder mode), so no edge is
+ * lost to a busy program; one owner each.
+ *
+ * start begins counting from 0 in a mode (the edges counted, or the
+ * encoder's resolution) with a glitch filter the port rounds to what it has
+ * (0: none) and reports. read returns the count as 32 bits that wrap: a
+ * port with a 16-bit counter extends it on its overflow interrupt. write
+ * sets the count.
+ *
+ * watch, when the port has it, arms the hardware to call
+ * os_counter_event once the count goes below low or above high (extra
+ * calls are harmless: the kernel reads the count again). Without it the
+ * kernel reads watched counters every OS_COUNTER_POLL_MS.
+ */
+#ifndef OS_COUNTER_MAX
+#define OS_COUNTER_MAX 4U
+#endif
+#ifndef OS_COUNTER_POLL_MS
+#define OS_COUNTER_POLL_MS 10U
+#endif
+#define OS_COUNTER_NAME_MAX 32U
+
+#define OS_COUNTER_PULSE      1U  /* one pin */
+#define OS_COUNTER_QUADRATURE 2U  /* two pins, A and B */
+
+/* Modes: the edges a pulse counter counts, or an encoder's steps per cycle. */
+#define OS_COUNTER_RISING  1U
+#define OS_COUNTER_FALLING 2U
+#define OS_COUNTER_BOTH    3U
+#define OS_COUNTER_X1      4U
+#define OS_COUNTER_X2      5U
+#define OS_COUNTER_X4      6U
+
+typedef struct OsCounterInfo
+{
+    uint8_t kind;      /* OS_COUNTER_PULSE or OS_COUNTER_QUADRATURE */
+    uint32_t max_hz;   /* the fastest edges it counts, 0 when unknown */
+} OsCounterInfo;
+
+typedef struct OsCounterPort
+{
+    void* context;
+    OsStatus (*start)(void* context, uint32_t unit, uint32_t mode, uint32_t filter_ns, uint32_t* out_filter_ns);
+    OsStatus (*read)(void* context, uint32_t unit, int32_t* out_count);
+    OsStatus (*write)(void* context, uint32_t unit, int32_t count);
+    /* May be NULL. */
+    OsStatus (*watch)(void* context, uint32_t unit, int32_t low, int32_t high);
+    void (*stop)(void* context, uint32_t unit);
+} OsCounterPort;
+
+OsStatus os_counter_port_set(const OsCounterPort* port);
+/* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_COUNTER_MAX. */
+OsStatus os_counter_add(const char* name, uint32_t unit, const OsCounterInfo* info);
+/* The count left the window given to watch. Safe in an interrupt handler. */
+void os_counter_event(uint32_t unit);
+/* The id of the task that owns a counter, 0 when it is free. */
+uint32_t os_counter_get_owner(uint32_t unit);
 #endif
 
 #if OS_HAS_PULSE
