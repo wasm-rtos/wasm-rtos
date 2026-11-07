@@ -61,6 +61,7 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_HAS_I2C` / `OS_HAS_SPI` | 1 / 1 | I2C and SPI buses for programs through ports (without them, the calls return `-WR_EUNSUPPORTED`) |
 | `OS_I2C_MAX_BUSES` / `OS_I2C_MAX_DEVICES` | 2 / 16 | I2C buses, and addresses programs hold open at once |
 | `OS_SPI_MAX_BUSES` / `OS_SPI_MAX_DEVICES` | 2 / 8 | SPI buses, and devices programs hold open at once |
+| `OS_HAS_ONEWIRE` / `OS_ONEWIRE_MAX_BUSES` / `OS_ONEWIRE_MAX_DEVICES` | 1 / 2 / 8 | 1-Wire buses, and devices programs hold open at once |
 | `OS_BUS_MAX_OPS` | 16 | ops in one transaction |
 | `OS_HAS_ADC` / `OS_ADC_MAX` | 1 / 8 | analog inputs, and channels a platform can register |
 | `OS_HAS_PWM` / `OS_PWM_MAX` | `OS_HAS_GPIO` / 8 | PWM outputs on GPIO pins with `OS_GPIO_CAN_PWM`, and outputs at once |
@@ -279,6 +280,24 @@ os_gpio_add_pin("strip", 18, OS_GPIO_CAN_OUTPUT | OS_GPIO_CAN_PULSE, 0);
 os_gpio_add_pin("ir-in", 19, OS_GPIO_CAN_INPUT | OS_GPIO_CAN_PULSE, 0);
 ```
 
+### 1-Wire
+
+A 1-Wire port gets the same whole transactions, with ops for resets, bytes,
+single time slots and the strong pull-up of parasite power: what the
+ESP32's RMT, a UART wired for 1-Wire or a DS2482 bridge can do. For a
+program's device the kernel puts the reset and match ROM in front. Searches
+run in the kernel with the port's `triplet` (one search step: two reads and
+the write chosen, as a DS2482 does it in hardware), or with single time
+slots when the port has none. A port that cannot drive the line high
+returns `OS_STATUS_UNSUPPORTED` for power ops; no presence pulse is
+`OS_STATUS_NACK`.
+
+```c
+static const OsOneWirePort onewire = { NULL, board_onewire_transaction, board_onewire_triplet, NULL };
+os_onewire_port_set(&onewire);
+os_onewire_add_bus("gpio4", 4);  /* Arduino's OneWire(4) finds it by the pin's name */
+```
+
 ### Swapping
 
 To move idle programs out of RAM, give the kernel somewhere to put them: a
@@ -331,7 +350,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-child processes, GPIO pins, displays, input devices, I2C and SPI buses, analog inputs, PWM outputs, serial ports and pulse trains. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes, GPIO pins, displays, input devices, I2C, SPI and 1-Wire buses, analog inputs, PWM outputs, serial ports and pulse trains. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 

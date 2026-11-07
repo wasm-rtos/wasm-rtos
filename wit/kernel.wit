@@ -1,4 +1,4 @@
-// wasm-rtos ABI 1.5: what a program imports from the kernel.
+// wasm-rtos ABI 1.6: what a program imports from the kernel.
 //
 // Lowered to core wasm imports by hand ("canonical ABI lite"): every function
 // returns s32, zero or a value on success and a negative `error` otherwise;
@@ -7,7 +7,7 @@
 // interface is "wasm-rtos:kernel/<interface>@1.<minor>.0", the minor version
 // the program was built for. docs/abi.md has the rules.
 
-package wasm-rtos:kernel@1.5.0;
+package wasm-rtos:kernel@1.6.0;
 
 interface types {
     // A handle to a kernel object; it belongs to the calling program.
@@ -244,6 +244,24 @@ interface pulse {
     get: func(channel: handle, property: property) -> s32;
 }
 
+// 1-Wire buses: devices by 64-bit ROM code, or the whole bus with rom 0.
+@since(version = 1.6.0)
+interface onewire {
+    use types.{handle};
+    // flags must be 0. A ROM with a wrong CRC is -invalid.
+    open: func(bus: string, rom: u64, %flags: u32) -> handle;
+    // ops points to count records of 12 bytes, little-endian:
+    //   u32 kind, u32 data, u32 length
+    // kinds: 1 write, 2 read (bytes), 3 write-bits, 4 read-bits (length in
+    // bits), 5 power (strong pull-up after a write, length ms; 0 until the
+    // next transaction), 6 reset (whole bus only). A device's transaction
+    // starts with the kernel's reset and match ROM. -nack: no presence.
+    transaction: func(device: handle, ops: u32, count: u32) -> s32;
+    // state points to 16 bytes: u64 rom, u32 discrepancy, u32 done; zero to
+    // start. 1 and the next ROM in state, 0 when there are no more.
+    search: func(bus: string, state: u32, %flags: u32) -> s32;
+}
+
 world program {
     import handle;
     import sync;
@@ -268,4 +286,6 @@ world program {
     import uart;
     @since(version = 1.5.0)
     import pulse;
+    @since(version = 1.6.0)
+    import onewire;
 }

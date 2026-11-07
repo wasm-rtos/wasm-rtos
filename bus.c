@@ -1,12 +1,12 @@
 /*
- * Buses: I2C and SPI buses the platform registers by name. Programs open a
- * device on a bus (an I2C address, an SPI chip select) and run whole
- * transactions; the platform's port moves the bytes.
+ * Buses: I2C, SPI and 1-Wire buses the platform registers by name. Programs
+ * open a device on a bus (an I2C address, an SPI chip select, a 1-Wire ROM
+ * code) and run whole transactions; the platform's port moves the bytes.
  */
 
 #include "os_internal.h"
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_BUSES
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,9 +52,19 @@ typedef struct OsBus
     {
         OsI2cOp i2c[OS_BUS_MAX_OPS];
         OsSpiOp spi[OS_BUS_MAX_OPS];
+#if OS_HAS_ONEWIRE
+        /* The kernel's RESET and match ROM come first. */
+        OsOneWireOp onewire[OS_BUS_MAX_OPS + 2U];
+#endif
     } ops;
     OsBusFlag done;
     volatile OsStatus result;
+#if OS_HAS_ONEWIRE
+    /* Match ROM and the code, which the port reads during the transfer. */
+    uint8_t select[9];
+    /* A strong pull-up was left on (POWER 0 last). */
+    uint8_t powered;
+#endif
 } OsBus;
 
 static struct
@@ -70,7 +80,7 @@ static OsStatus os_bus_add(OsBus** buses, uint32_t max, const char* name, uint32
     uint32_t free_index = max;
     uint32_t index = 0U;
 
-    if (length == 0U || length > OS_BUS_NAME_MAX || frequency_hz == 0U)
+    if (length == 0U || length > OS_BUS_NAME_MAX)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
@@ -162,6 +172,24 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context)
 
 static void os_bus_finish(uint8_t kind, OsBus* bus);
 static OsBus* os_bus_by_number(uint8_t kind, uint32_t number);
+
+/* The kernel's copy of a transfer's ops, of the bus's kind. */
+static const void* os_bus_ops(uint8_t kind, const OsBus* bus)
+{
+#if OS_HAS_ONEWIRE
+    if (kind == OS_BUS_ONEWIRE)
+    {
+        return bus->ops.onewire;
+    }
+#endif
+    return kind == OS_BUS_I2C ? (const void*)bus->ops.i2c : (const void*)bus->ops.spi;
+}
+
+static size_t os_bus_op_size(uint8_t kind)
+{
+    return kind == OS_BUS_I2C ? sizeof(OsI2cOp) : kind == OS_BUS_SPI ? sizeof(OsSpiOp) : sizeof(OsOneWireOp);
+}
+
 static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t);
 static void* os_bus_port_context(uint8_t kind);
 
@@ -178,18 +206,18 @@ static void os_bus_deliver(uint8_t kind, OsBus* bus)
         (void)os_gpio_set(bus->cs, 1U);
     }
 #endif
-    os_bus_report(kind, bus->bus, bus->device, task_id, bus->transfer_hz,
-                  kind == OS_BUS_I2C ? (const void*)bus->ops.i2c : (const void*)bus->ops.spi, bus->count, status);
+    os_bus_report(kind, bus->bus, bus->device, task_id, bus->transfer_hz, os_bus_ops(kind, bus), bus->count, status);
     os_transfer_wait_end(task_id, status, 0U);
 }
 
 /*
  * Start a transaction on a bus: wait out another program's transfer, let
  * the port run it on the kernel's copy of the ops, and either finish here
- * or leave the calling program waiting (OS_STATUS_PENDING).
+ * or, when wait allows, leave the calling program waiting
+ * (OS_STATUS_PENDING).
  */
 static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t frequency_hz, uint32_t mode,
-                             uint32_t cs, const void* ops, uint32_t count, OsStatus (*run)(OsBus* bus))
+                             uint32_t cs, const void* ops, uint32_t count, OsStatus (*run)(OsBus* bus), uint8_t wait)
 {
     OsStatus status = OS_STATUS_OK;
 
@@ -197,7 +225,10 @@ static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t
     {
         os_bus_finish(kind, bus);
     }
-    memcpy(&bus->ops, ops, count * (kind == OS_BUS_I2C ? sizeof(OsI2cOp) : sizeof(OsSpiOp)));
+    if (count > 0U)
+    {
+        memcpy(&bus->ops, ops, count * os_bus_op_size(kind));
+    }
     bus->task_id = os_task_get_id(os_task_get_current());
     bus->device = device;
     bus->transfer_hz = frequency_hz;
@@ -219,11 +250,11 @@ static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t
     if (status == OS_STATUS_PENDING)
     {
         bus->busy = 1U;
-        if (os_transfer_wait_begin() == OS_STATUS_OK)
+        if (wait && os_transfer_wait_begin() == OS_STATUS_OK)
         {
             return OS_STATUS_PENDING;
         }
-        /* Nobody to wait (a call from the host): finish now. */
+        /* Nobody to wait (a call from the host), or needed now: finish here. */
         os_bus_finish(kind, bus);
         return bus->result;
     }
@@ -233,8 +264,7 @@ static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t
         (void)os_gpio_set(cs, 1U);
     }
 #endif
-    os_bus_report(kind, bus->bus, device, bus->task_id, frequency_hz,
-                  kind == OS_BUS_I2C ? (const void*)bus->ops.i2c : (const void*)bus->ops.spi, count, status);
+    os_bus_report(kind, bus->bus, device, bus->task_id, frequency_hz, os_bus_ops(kind, bus), count, status);
     return status;
 }
 
@@ -324,6 +354,10 @@ OsStatus os_i2c_port_set(const OsI2cPort* port)
 
 OsStatus os_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz)
 {
+    if (frequency_hz == 0U)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
     return os_bus_add(g_i2c.buses, OS_I2C_MAX_BUSES, name, bus, frequency_hz);
 }
 
@@ -422,7 +456,7 @@ OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count)
         }
     }
     return os_bus_start(OS_BUS_I2C, device->bus, device->address, device->bus->frequency_hz, 0U, 0U, ops, count,
-                        os_i2c_run);
+                        os_i2c_run, 1U);
 }
 
 void os_i2c_shutdown(void)
@@ -481,6 +515,10 @@ OsStatus os_spi_port_set(const OsSpiPort* port)
 
 OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz)
 {
+    if (max_hz == 0U)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
     return os_bus_add(g_spi.buses, OS_SPI_MAX_BUSES, name, bus, max_hz);
 }
 
@@ -610,13 +648,399 @@ OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count)
     }
 
     return os_bus_start(OS_BUS_SPI, device->bus, device->cs_pin, device->frequency_hz, device->mode, device->cs, ops,
-                        count, os_spi_run);
+                        count, os_spi_run, 1U);
 }
 
 void os_spi_shutdown(void)
 {
     os_bus_free_all(g_spi.buses, OS_SPI_MAX_BUSES);
     memset(&g_spi, 0, sizeof(g_spi));
+}
+#endif
+
+/* ---------------------------------------------------------------------------
+ * 1-Wire
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_ONEWIRE
+#define OS_ONEWIRE_MATCH_ROM 0x55U
+#define OS_ONEWIRE_SEARCH_ROM 0xF0U
+#define OS_ONEWIRE_ALARM_SEARCH 0xECU
+
+typedef struct OsOneWireDevice
+{
+    OsBus* bus;
+    /* OS_ONEWIRE_WHOLE_BUS: the program holds the bus. */
+    uint64_t rom;
+    /* Owning task id, 0 when the slot is free. */
+    uint32_t owner;
+} OsOneWireDevice;
+
+static struct
+{
+    OsOneWirePort port;
+    uint8_t has_port;
+    OsBus* buses[OS_ONEWIRE_MAX_BUSES];
+    OsOneWireDevice devices[OS_ONEWIRE_MAX_DEVICES];
+} g_onewire;
+
+static OsOneWireDevice* os_onewire_device(uint32_t id)
+{
+    return id >= 1U && id <= OS_ONEWIRE_MAX_DEVICES && g_onewire.devices[id - 1U].owner != 0U
+               ? &g_onewire.devices[id - 1U]
+               : NULL;
+}
+
+uint8_t os_onewire_crc8(const uint8_t* data, uint32_t length)
+{
+    uint8_t crc = 0U;
+    uint32_t index = 0U;
+    uint8_t bit = 0U;
+
+    for (index = 0U; index < length; ++index)
+    {
+        crc ^= data[index];
+        for (bit = 0U; bit < 8U; ++bit)
+        {
+            crc = (uint8_t)((crc & 1U) != 0U ? (crc >> 1) ^ 0x8CU : crc >> 1);
+        }
+    }
+    return crc;
+}
+
+/* A ROM code as it goes over the wire: family code first. */
+static void os_onewire_rom_bytes(uint64_t rom, uint8_t bytes[8])
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < 8U; ++index)
+    {
+        bytes[index] = (uint8_t)(rom >> (index * 8U));
+    }
+}
+
+OsStatus os_onewire_port_set(const OsOneWirePort* port)
+{
+    if (port == NULL)
+    {
+        memset(&g_onewire.port, 0, sizeof(g_onewire.port));
+        g_onewire.has_port = 0U;
+        return OS_STATUS_OK;
+    }
+    if (port->transaction == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    g_onewire.port = *port;
+    g_onewire.has_port = 1U;
+    return OS_STATUS_OK;
+}
+
+OsStatus os_onewire_add_bus(const char* name, uint32_t bus)
+{
+    /* The speed is the standard one; the field only matters to the other kinds. */
+    return os_bus_add(g_onewire.buses, OS_ONEWIRE_MAX_BUSES, name, bus, 0U);
+}
+
+uint32_t os_onewire_get_owner(uint32_t bus, uint64_t rom)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_ONEWIRE_MAX_DEVICES; ++index)
+    {
+        const OsOneWireDevice* device = &g_onewire.devices[index];
+        if (device->owner != 0U && device->bus->bus == bus && device->rom == rom)
+        {
+            return device->owner;
+        }
+    }
+    return 0U;
+}
+
+/* The program holding the whole bus, 0 when none does. */
+static uint32_t os_onewire_holder(const OsBus* bus)
+{
+    return os_onewire_get_owner(bus->bus, OS_ONEWIRE_WHOLE_BUS);
+}
+
+OsStatus os_onewire_open(const char* bus_name, uint32_t length, uint64_t rom, uint32_t* out_id)
+{
+    OsBus* bus = NULL;
+    OsOneWireDevice* slot = NULL;
+    OsStatus status = OS_STATUS_OK;
+    uint8_t bytes[8];
+    uint32_t index = 0U;
+
+    if (!g_onewire.has_port)
+    {
+        return OS_STATUS_UNSUPPORTED;
+    }
+    status = os_bus_find(g_onewire.buses, OS_ONEWIRE_MAX_BUSES, bus_name, length, &bus);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    os_onewire_rom_bytes(rom, bytes);
+    if (rom != OS_ONEWIRE_WHOLE_BUS && os_onewire_crc8(bytes, 7U) != bytes[7])
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    /* The whole bus excludes every device on it, and the other way round. */
+    for (index = 0U; index < OS_ONEWIRE_MAX_DEVICES; ++index)
+    {
+        OsOneWireDevice* device = &g_onewire.devices[index];
+        if (device->owner != 0U && device->bus == bus &&
+            (device->rom == rom || device->rom == OS_ONEWIRE_WHOLE_BUS || rom == OS_ONEWIRE_WHOLE_BUS))
+        {
+            return OS_STATUS_BUSY;
+        }
+        if (device->owner == 0U && slot == NULL)
+        {
+            slot = device;
+        }
+    }
+    if (slot == NULL)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
+    slot->bus = bus;
+    slot->rom = rom;
+    slot->owner = os_task_get_id(os_task_get_current());
+    *out_id = (uint32_t)(slot - g_onewire.devices + 1);
+    return OS_STATUS_OK;
+}
+
+static OsStatus os_onewire_run(OsBus* bus)
+{
+    return g_onewire.port.transaction(g_onewire.port.context, bus->bus, bus->ops.onewire, bus->count);
+}
+
+/* Ops on a bus, done when this returns (a search, a pull-up to end). */
+static OsStatus os_onewire_now(OsBus* bus, const OsOneWireOp* ops, uint32_t count)
+{
+    bus->powered = 0U;
+    return os_bus_start(OS_BUS_ONEWIRE, bus, 0U, 0U, 0U, 0U, ops, count, os_onewire_run, 0U);
+}
+
+void os_onewire_close(uint32_t id)
+{
+    OsOneWireDevice* device = os_onewire_device(id);
+    OsBus* bus = NULL;
+
+    if (device == NULL)
+    {
+        return;
+    }
+    bus = device->bus;
+    memset(device, 0, sizeof(*device));
+    /* A pull-up the program left on ends with it. */
+    if (bus->powered && g_onewire.has_port)
+    {
+        (void)os_onewire_now(bus, NULL, 0U);
+    }
+}
+
+OsStatus os_onewire_transaction(uint32_t id, const OsOneWireOp* ops, uint32_t count)
+{
+    OsOneWireDevice* device = os_onewire_device(id);
+    OsOneWireOp all[OS_BUS_MAX_OPS + 2U];
+    uint32_t first = 0U;
+    uint32_t index = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OsBus* bus = NULL;
+
+    if (device == NULL || count > OS_BUS_MAX_OPS)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    if (!g_onewire.has_port)
+    {
+        return OS_STATUS_UNSUPPORTED;
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        const OsOneWireOp* op = &ops[index];
+        uint8_t after_write = index > 0U && (ops[index - 1U].kind == OS_ONEWIRE_WRITE ||
+                                             ops[index - 1U].kind == OS_ONEWIRE_WRITE_BITS);
+        if (op->kind < OS_ONEWIRE_WRITE || op->kind > OS_ONEWIRE_RESET ||
+            /* A device's transaction starts with the kernel's reset and ROM command. */
+            (op->kind == OS_ONEWIRE_RESET && device->rom != OS_ONEWIRE_WHOLE_BUS) ||
+            (op->kind == OS_ONEWIRE_POWER &&
+             (!after_write || op->length > OS_ONEWIRE_MAX_POWER_MS || (op->length == 0U && index + 1U != count))))
+        {
+            return OS_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    bus = device->bus;
+    /* select is the port's until a background transfer ends. */
+    if (bus->busy)
+    {
+        os_bus_finish(OS_BUS_ONEWIRE, bus);
+    }
+    if (device->rom != OS_ONEWIRE_WHOLE_BUS)
+    {
+        bus->select[0] = OS_ONEWIRE_MATCH_ROM;
+        os_onewire_rom_bytes(device->rom, bus->select + 1U);
+        all[0].kind = OS_ONEWIRE_RESET;
+        all[0].data = NULL;
+        all[0].length = 0U;
+        all[1].kind = OS_ONEWIRE_WRITE;
+        all[1].data = bus->select;
+        all[1].length = sizeof(bus->select);
+        first = 2U;
+    }
+    if (count > 0U)
+    {
+        memcpy(all + first, ops, count * sizeof(OsOneWireOp));
+    }
+    bus->powered = count > 0U && ops[count - 1U].kind == OS_ONEWIRE_POWER && ops[count - 1U].length == 0U;
+    status = os_bus_start(OS_BUS_ONEWIRE, bus, 0U, 0U, 0U, 0U, all, first + count, os_onewire_run, 1U);
+    if (status != OS_STATUS_OK && status != OS_STATUS_PENDING)
+    {
+        bus->powered = 0U;
+    }
+    return status;
+}
+
+/* One step of a search: the bit, its complement and the direction taken. */
+static OsStatus os_onewire_triplet(OsBus* bus, uint8_t direction, uint8_t* out_bits)
+{
+    OsOneWireOp op;
+    uint8_t bits = 0U;
+    OsStatus status = OS_STATUS_OK;
+
+    if (g_onewire.port.triplet != NULL)
+    {
+        return g_onewire.port.triplet(g_onewire.port.context, bus->bus, direction, out_bits);
+    }
+    op.kind = OS_ONEWIRE_READ_BITS;
+    op.data = &bits;
+    op.length = 2U;
+    status = os_onewire_now(bus, &op, 1U);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    bits &= 3U;
+    /* Devices agree on the bit: follow it. Both bits 1: nobody answered, nothing to write. */
+    if (bits == 1U || bits == 2U)
+    {
+        direction = bits & 1U;
+    }
+    if (bits != 3U)
+    {
+        op.kind = OS_ONEWIRE_WRITE_BITS;
+        op.data = &direction;
+        op.length = 1U;
+        status = os_onewire_now(bus, &op, 1U);
+    }
+    *out_bits = (uint8_t)(bits | (direction << 2));
+    return status;
+}
+
+OsStatus os_onewire_search(const char* bus_name, uint32_t length, OsOneWireSearch* state, uint32_t flags,
+                           uint8_t* out_found)
+{
+    static const uint8_t commands[2] = { OS_ONEWIRE_SEARCH_ROM, OS_ONEWIRE_ALARM_SEARCH };
+    OsBus* bus = NULL;
+    OsOneWireOp ops[2];
+    uint8_t rom[8];
+    uint32_t holder = 0U;
+    uint32_t bit = 0U;
+    uint32_t last_zero = 0U;
+    OsStatus status = OS_STATUS_OK;
+
+    *out_found = 0U;
+    if (!g_onewire.has_port)
+    {
+        return OS_STATUS_UNSUPPORTED;
+    }
+    status = os_bus_find(g_onewire.buses, OS_ONEWIRE_MAX_BUSES, bus_name, length, &bus);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    if ((flags & ~OS_ONEWIRE_SEARCH_ALARM) != 0U || state->discrepancy > 64U)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    /* A program holding the bus is in the middle of its own commands. */
+    holder = os_onewire_holder(bus);
+    if (holder != 0U && holder != os_task_get_id(os_task_get_current()))
+    {
+        return OS_STATUS_BUSY;
+    }
+    if (state->done)
+    {
+        memset(state, 0, sizeof(*state));
+        return OS_STATUS_OK;
+    }
+
+    ops[0].kind = OS_ONEWIRE_RESET;
+    ops[0].data = NULL;
+    ops[0].length = 0U;
+    ops[1].kind = OS_ONEWIRE_WRITE;
+    ops[1].data = (uint8_t*)&commands[(flags & OS_ONEWIRE_SEARCH_ALARM) != 0U ? 1 : 0];
+    ops[1].length = 1U;
+    status = os_onewire_now(bus, ops, 2U);
+    if (status == OS_STATUS_NACK)
+    {
+        /* No device on the bus. */
+        memset(state, 0, sizeof(*state));
+        return OS_STATUS_OK;
+    }
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+
+    os_onewire_rom_bytes(state->rom, rom);
+    for (bit = 1U; bit <= 64U; ++bit)
+    {
+        uint8_t mask = (uint8_t)(1U << ((bit - 1U) % 8U));
+        uint8_t* byte = &rom[(bit - 1U) / 8U];
+        /* Up to the last branch, the way the last ROM went; at it, the other way; past it, 0 first. */
+        uint8_t direction = bit < state->discrepancy ? (uint8_t)((*byte & mask) != 0U) : (uint8_t)(bit == state->discrepancy);
+        uint8_t bits = 0U;
+
+        status = os_onewire_triplet(bus, direction, &bits);
+        if (status != OS_STATUS_OK)
+        {
+            return status;
+        }
+        if ((bits & 3U) == 3U)
+        {
+            /* Every device fell silent: they left the bus. */
+            memset(state, 0, sizeof(*state));
+            return OS_STATUS_OK;
+        }
+        if ((bits & 3U) == 0U && (bits & 4U) == 0U)
+        {
+            last_zero = bit;
+        }
+        *byte = (uint8_t)((bits & 4U) != 0U ? *byte | mask : *byte & ~mask);
+    }
+    /* Noise on the line shows as a code that fails its CRC (or the family 0 no device has). */
+    if (os_onewire_crc8(rom, 7U) != rom[7] || rom[0] == 0U)
+    {
+        return OS_STATUS_BUS_ERROR;
+    }
+    state->rom = 0U;
+    for (bit = 0U; bit < 8U; ++bit)
+    {
+        state->rom |= (uint64_t)rom[bit] << (bit * 8U);
+    }
+    state->discrepancy = last_zero;
+    state->done = last_zero == 0U;
+    *out_found = 1U;
+    return OS_STATUS_OK;
+}
+
+void os_onewire_shutdown(void)
+{
+    os_bus_free_all(g_onewire.buses, OS_ONEWIRE_MAX_BUSES);
+    memset(&g_onewire, 0, sizeof(g_onewire));
 }
 #endif
 
@@ -638,6 +1062,13 @@ static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
     {
         buses = g_spi.buses;
         max = OS_SPI_MAX_BUSES;
+    }
+#endif
+#if OS_HAS_ONEWIRE
+    if (kind == OS_BUS_ONEWIRE)
+    {
+        buses = g_onewire.buses;
+        max = OS_ONEWIRE_MAX_BUSES;
     }
 #endif
     for (index = 0U; index < max; ++index)
@@ -664,6 +1095,12 @@ static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t)
         return g_spi.port.finish;
     }
 #endif
+#if OS_HAS_ONEWIRE
+    if (kind == OS_BUS_ONEWIRE)
+    {
+        return g_onewire.port.finish;
+    }
+#endif
     return NULL;
 }
 
@@ -681,10 +1118,16 @@ static void* os_bus_port_context(uint8_t kind)
         return g_spi.port.context;
     }
 #endif
+#if OS_HAS_ONEWIRE
+    if (kind == OS_BUS_ONEWIRE)
+    {
+        return g_onewire.port.context;
+    }
+#endif
     return NULL;
 }
 
-/* Every bus of both kinds, for the loops below. */
+/* Every bus of every kind, for the loops below. */
 static void os_bus_each(void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id), uint32_t task_id)
 {
     uint32_t index = 0U;
@@ -703,6 +1146,15 @@ static void os_bus_each(void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id
         if (g_spi.buses[index] != NULL)
         {
             visit(OS_BUS_SPI, g_spi.buses[index], task_id);
+        }
+    }
+#endif
+#if OS_HAS_ONEWIRE
+    for (index = 0U; index < OS_ONEWIRE_MAX_BUSES; ++index)
+    {
+        if (g_onewire.buses[index] != NULL)
+        {
+            visit(OS_BUS_ONEWIRE, g_onewire.buses[index], task_id);
         }
     }
 #endif
@@ -748,6 +1200,9 @@ void os_bus_shutdown(void)
 #endif
 #if OS_HAS_SPI
     os_spi_shutdown();
+#endif
+#if OS_HAS_ONEWIRE
+    os_onewire_shutdown();
 #endif
     memset(&g_bus_trace, 0, sizeof(g_bus_trace));
 }

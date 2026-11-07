@@ -202,6 +202,13 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
+#if OS_HAS_ONEWIRE
+    if (handle->type == OS_OBJECT_ONEWIRE)
+    {
+        os_onewire_close(handle->id);
+    }
+    else
+#endif
     if (handle->type != OS_OBJECT_TASK)
     {
         os_object_release(handle->type, handle->id);
@@ -342,6 +349,30 @@ static uint32_t os_abi_read_le32(const uint8_t* bytes)
     return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) |
            ((uint32_t)bytes[2] << 16U) | ((uint32_t)bytes[3] << 24U);
 }
+
+#if defined(OS_ABI_HAS_WASI) || OS_HAS_ONEWIRE
+static void os_abi_write_le32(uint8_t* out, uint32_t value)
+{
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8U);
+    out[2] = (uint8_t)(value >> 16U);
+    out[3] = (uint8_t)(value >> 24U);
+}
+
+static void os_abi_write_le64(uint8_t* out, uint64_t value)
+{
+    uint32_t index = 0U;
+    for (index = 0U; index < 8U; ++index)
+    {
+        out[index] = (uint8_t)(value >> (8U * index));
+    }
+}
+
+static uint64_t os_abi_read_le64(const uint8_t* bytes)
+{
+    return (uint64_t)os_abi_read_le32(bytes) | ((uint64_t)os_abi_read_le32(bytes + 4U) << 32U);
+}
+#endif
 
 #define OS_ABI_UNUSED() (void)runtime; (void)_ctx; (void)_mem
 
@@ -874,7 +905,7 @@ static m3ApiRawFunction(os_abi_wait_any)
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX || entry->type == OS_OBJECT_DISPLAY ||
             entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI || entry->type == OS_OBJECT_ADC ||
-            entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE)
+            entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE)
         {
             m3ApiReturn(-WR_EBADH);
         }
@@ -1432,7 +1463,7 @@ static m3ApiRawFunction(os_abi_input_read)
  * i2c and spi
  * ------------------------------------------------------------------------ */
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_BUSES
 /* Program memory for a data range of an op; length 0 needs no memory. */
 static int32_t os_abi_bus_data(uint32_t address, uint32_t length, uint8_t** out_data)
 {
@@ -2111,8 +2142,149 @@ static m3ApiRawFunction(os_abi_pulse_get)
 }
 #endif
 
+/* ---------------------------------------------------------------------------
+ * onewire
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_ONEWIRE
+static m3ApiRawFunction(os_abi_onewire_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, bus_address);
+    m3ApiGetArg(uint32_t, bus_length);
+    m3ApiGetArg(uint64_t, rom);
+    m3ApiGetArg(uint32_t, flags);
+    const char* bus = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    if (handle < 0)
+    {
+        m3ApiReturn(handle);
+    }
+    if (bus == NULL || flags != 0U)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    status = os_onewire_open(bus, bus_length, rom, &id);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_abi_handle_new(OS_OBJECT_ONEWIRE, id);
+    if (handle < 0)
+    {
+        os_onewire_close(id);
+    }
+    m3ApiReturn(handle);
+}
+
+/* ops: count records of 12 bytes, u32 kind, u32 data, u32 length (bits for the _BITS kinds, ms for POWER). */
+static m3ApiRawFunction(os_abi_onewire_transaction)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, ops_address);
+    m3ApiGetArg(uint32_t, count);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ONEWIRE);
+    OsOneWireOp ops[OS_BUS_MAX_OPS];
+    uint8_t* records = NULL;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (count > OS_BUS_MAX_OPS)
+    {
+        m3ApiReturn(-WR_ELIMIT);
+    }
+    if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        const uint8_t* record = records + index * 12U;
+        uint32_t kind = os_abi_read_le32(record);
+        uint32_t length = os_abi_read_le32(record + 8U);
+        /* Bit ops use whole bytes, a pull-up and a reset none. */
+        uint32_t bytes = kind == OS_ONEWIRE_WRITE || kind == OS_ONEWIRE_READ ? length
+                         : kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS ? (length + 7U) / 8U
+                                                                                         : 0U;
+        int32_t result = 0;
+        if (kind < OS_ONEWIRE_WRITE || kind > OS_ONEWIRE_RESET ||
+            ((kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS) && length > 0xFFFFFFF8U))
+        {
+            m3ApiReturn(-WR_EINVAL);
+        }
+        result = os_abi_bus_data(os_abi_read_le32(record + 4U), bytes, &ops[index].data);
+        if (result < 0)
+        {
+            m3ApiReturn(result);
+        }
+        ops[index].kind = (uint8_t)kind;
+        ops[index].length = length;
+    }
+    /* A port working in the background leaves the program waiting; the end writes the result. */
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_onewire_transaction(entry->id, ops, count));
+    return os_guest_end();
+}
+
+/* state: 16 bytes, u64 rom, u32 discrepancy, u32 done. 1 and the next ROM, or 0 when there are no more. */
+static m3ApiRawFunction(os_abi_onewire_search)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, bus_address);
+    m3ApiGetArg(uint32_t, bus_length);
+    m3ApiGetArg(uint32_t, state_address);
+    m3ApiGetArg(uint32_t, flags);
+    const char* bus = NULL;
+    uint8_t* memory = NULL;
+    OsOneWireSearch state;
+    uint8_t found = 0U;
+    int32_t result = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    result = os_abi_read_name(bus_address, bus_length, &bus);
+    if (result < 0)
+    {
+        m3ApiReturn(result);
+    }
+    if (bus == NULL)
+    {
+        m3ApiReturn(-WR_EINVAL);
+    }
+    if (os_guest_memory(state_address, 16U, &memory) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    state.rom = os_abi_read_le64(memory);
+    state.discrepancy = os_abi_read_le32(memory + 8U);
+    state.done = os_abi_read_le32(memory + 12U);
+    status = os_onewire_search(bus, bus_length, &state, flags, &found);
+    if (status != OS_STATUS_OK)
+    {
+        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    os_abi_write_le64(memory, state.rom);
+    os_abi_write_le32(memory + 8U, state.discrepancy);
+    os_abi_write_le32(memory + 12U, state.done);
+    m3ApiReturn((int32_t)found);
+}
+#endif
+
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE
+    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static m3ApiRawFunction(os_abi_unsupported)
 {
@@ -2128,28 +2300,6 @@ static m3ApiRawFunction(os_abi_unsupported)
  * ------------------------------------------------------------------------ */
 
 #if defined(OS_ABI_HAS_WASI)
-static void os_abi_write_le32(uint8_t* out, uint32_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8U);
-    out[2] = (uint8_t)(value >> 16U);
-    out[3] = (uint8_t)(value >> 24U);
-}
-
-static void os_abi_write_le64(uint8_t* out, uint64_t value)
-{
-    uint32_t index = 0U;
-    for (index = 0U; index < 8U; ++index)
-    {
-        out[index] = (uint8_t)(value >> (8U * index));
-    }
-}
-
-static uint64_t os_abi_read_le64(const uint8_t* bytes)
-{
-    return (uint64_t)os_abi_read_le32(bytes) | ((uint64_t)os_abi_read_le32(bytes + 4U) << 32U);
-}
-
 static m3ApiRawFunction(os_abi_wasi_clock_res_get)
 {
     m3ApiReturnType(uint32_t);
@@ -2527,6 +2677,16 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("pulse"), "send-bits", "i(iiiiiii)", os_abi_unsupported, 5U },
     { WR_MODULE("pulse"), "receive", "i(iiiii)", os_abi_unsupported, 5U },
     { WR_MODULE("pulse"), "get", "i(ii)", os_abi_unsupported, 5U },
+#endif
+
+#if OS_HAS_ONEWIRE
+    { WR_MODULE("onewire"), "open", "i(iiIi)", os_abi_onewire_open, 6U },
+    { WR_MODULE("onewire"), "transaction", "i(iii)", os_abi_onewire_transaction, 6U },
+    { WR_MODULE("onewire"), "search", "i(iiii)", os_abi_onewire_search, 6U },
+#else
+    { WR_MODULE("onewire"), "open", "i(iiIi)", os_abi_unsupported, 6U },
+    { WR_MODULE("onewire"), "transaction", "i(iii)", os_abi_unsupported, 6U },
+    { WR_MODULE("onewire"), "search", "i(iiii)", os_abi_unsupported, 6U },
 #endif
 
 #if defined(OS_ABI_HAS_WASI)

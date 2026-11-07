@@ -2,7 +2,7 @@
 #define WASM_RTOS_H_GUEST
 
 /*
- * wasm-rtos ABI 1.5 for programs written in C or C++ (wasm32).
+ * wasm-rtos ABI 1.6 for programs written in C or C++ (wasm32).
  *
  * Every call returns an int32_t: zero or a value on success, a negative WR_E*
  * error otherwise. Handles belong to the calling program and close when it
@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define WR_ABI_VERSION_MAJOR 1
-#define WR_ABI_VERSION_MINOR 5
+#define WR_ABI_VERSION_MINOR 6
 
 /* Errors; calls return their negatives. */
 #define WR_EFAULT       1   /* a pointer or range lies outside the program's memory */
@@ -43,7 +43,7 @@ extern "C" {
 #define WR_ETRAPPED     20  /* proc wait: the child trapped */
 #define WR_EKILLED      21  /* proc wait: the child was killed */
 #define WR_EINUSE       22  /* another program uses it (1.1) */
-#define WR_ENACK        23  /* i2c: the address or a byte was not acknowledged (1.3) */
+#define WR_ENACK        23  /* i2c: the address or a byte was not acknowledged; onewire: no presence pulse (1.3) */
 #define WR_EBUS         24  /* the bus failed: lost arbitration, stuck lines (1.3) */
 
 #define WR_WAIT_FOREVER 0xFFFFFFFFu
@@ -202,6 +202,35 @@ typedef struct wr_spi_op
 #define WR_PULSE_RESOLUTION 1u     /* pulse-get: nanoseconds of one hardware tick */
 #define WR_PULSE_ITEM(high, ns) ((uint32_t)((high) ? WR_PULSE_HIGH : 0u) | ((uint32_t)(ns) & WR_PULSE_TIME_MASK))
 
+/* onewire (1.6): ops of a transaction, 12 bytes on wasm32. Bytes go least
+ * significant bit first; the _BITS kinds move length single bits, packed
+ * least significant first. POWER right after a write holds the line high
+ * with a strong pull-up for length ms (0: until the next transaction, and
+ * then it comes last); RESET only on the whole bus. */
+#define WR_ONEWIRE_WRITE      1u
+#define WR_ONEWIRE_READ       2u
+#define WR_ONEWIRE_WRITE_BITS 3u
+#define WR_ONEWIRE_READ_BITS  4u
+#define WR_ONEWIRE_POWER      5u
+#define WR_ONEWIRE_RESET      6u
+typedef struct wr_onewire_op
+{
+    uint32_t kind;
+    void* data;
+    uint32_t length;
+} wr_onewire_op;
+/* onewire-open rom: the whole bus, no other program on it. */
+#define WR_ONEWIRE_WHOLE_BUS 0u
+/* onewire-search flags: only devices in alarm. */
+#define WR_ONEWIRE_ALARM 0x01u
+/* Where a ROM search stands; zero it to start. 16 bytes. */
+typedef struct wr_onewire_search_state
+{
+    uint64_t rom;          /* the ROM found last: family code in the low byte */
+    uint32_t discrepancy;
+    uint32_t done;
+} wr_onewire_search_state;
+
 /* One string argument for spawn: matches the ABI's (pointer, length) pair. */
 typedef struct wr_str
 {
@@ -210,7 +239,7 @@ typedef struct wr_str
 } wr_str;
 
 #define WR_IMPORT(interface, name) \
-    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.5.0"), import_name(name)))
+    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.6.0"), import_name(name)))
 
 /* handle */
 WR_IMPORT("handle", "close") int32_t wr_close(int32_t handle);
@@ -349,6 +378,23 @@ WR_IMPORT("pulse", "receive") int32_t wr_pulse_receive(int32_t channel, uint32_t
                                                        uint32_t idle_ns, uint32_t timeout_ms);
 WR_IMPORT("pulse", "get") int32_t wr_pulse_get(int32_t channel, uint32_t property);
 
+/* onewire (1.6): a device is a 64-bit ROM code on a bus named by the device
+ * profile ("ow0", or a pin's name such as "gpio4"); one program per ROM
+ * (-WR_EINUSE), the bus is shared, and each transaction starts with a reset
+ * and match ROM the kernel sends. No ops: only that, -WR_ENACK when no
+ * device is present. A ROM whose CRC is wrong is -WR_EINVAL. rom
+ * WR_ONEWIRE_WHOLE_BUS takes the bus alone: the program sends RESET and ROM
+ * commands itself, between as many transactions as it likes.
+ * onewire-search finds the next ROM on the bus into state and returns 1, or
+ * 0 when there are no more (state then starts over); -WR_EBUS when a code
+ * arrives broken. flags of onewire-open are 0. */
+WR_IMPORT("onewire", "open") int32_t wr_onewire_open(const char* bus, uint32_t bus_length, uint64_t rom,
+                                                     uint32_t flags);
+WR_IMPORT("onewire", "transaction") int32_t wr_onewire_transaction(int32_t device, const wr_onewire_op* ops,
+                                                                   uint32_t count);
+WR_IMPORT("onewire", "search") int32_t wr_onewire_search(const char* bus, uint32_t bus_length,
+                                                         wr_onewire_search_state* state, uint32_t flags);
+
 /* Time, sleep and yield through WASI, for programs without a C library. */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
 int32_t wr_wasi_clock_time_get_(uint32_t clock, uint64_t precision, uint64_t* out_time);
@@ -405,6 +451,8 @@ static inline wr_str wr_cstr(const char* text)
 #define wr_pwm_open_cstr(name, frequency_hz, flags) wr_pwm_open((name), wr_strlen(name), (frequency_hz), (flags))
 #define wr_uart_open_cstr(name, baud, format) wr_uart_open((name), wr_strlen(name), (baud), (format))
 #define wr_pulse_open_cstr(name, flags) wr_pulse_open((name), wr_strlen(name), (flags))
+#define wr_onewire_open_cstr(bus, rom) wr_onewire_open((bus), wr_strlen(bus), (rom), 0)
+#define wr_onewire_search_cstr(bus, state, flags) wr_onewire_search((bus), wr_strlen(bus), (state), (flags))
 
 /* Addressable LEDs (WS2812 and alike): 3 bytes per LED in green, red, blue
  * order, then the low reset time that latches the colors. */
@@ -464,6 +512,60 @@ static inline int32_t wr_nec_decode(const uint32_t* items, uint32_t count, uint8
         return -1;
     *address = (uint8_t)code;
     *command = (uint8_t)(code >> 16);
+    return 0;
+}
+
+/* The 1-Wire CRC-8 of ROM codes and scratchpads (x^8 + x^5 + x^4 + 1). */
+static inline uint8_t wr_onewire_crc8(const void* data, uint32_t length)
+{
+    const uint8_t* bytes = (const uint8_t*)data;
+    uint8_t crc = 0;
+    for (uint32_t index = 0; index < length; ++index)
+    {
+        crc ^= bytes[index];
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (uint8_t)(crc & 1u ? (crc >> 1) ^ 0x8Cu : crc >> 1);
+    }
+    return crc;
+}
+
+static inline int32_t wr_onewire_write_read(int32_t device, const void* out, uint32_t out_length, void* in,
+                                            uint32_t in_length)
+{
+    wr_onewire_op ops[2] = { { WR_ONEWIRE_WRITE, (void*)out, out_length }, { WR_ONEWIRE_READ, in, in_length } };
+    return wr_onewire_transaction(device, ops, in_length > 0u ? 2u : 1u);
+}
+
+/* DS18B20 and alike (family 0x28): start a 12-bit conversion and wait the
+ * 750 ms it takes, powering parasite-powered sensors through the strong
+ * pull-up where the bus has one. */
+#define WR_DS18B20_FAMILY 0x28u
+static inline int32_t wr_ds18b20_convert(int32_t device)
+{
+    static const uint8_t convert = 0x44;
+    wr_onewire_op ops[2] = { { WR_ONEWIRE_WRITE, (void*)&convert, 1u }, { WR_ONEWIRE_POWER, 0, 750u } };
+    int32_t result = wr_onewire_transaction(device, ops, 2u);
+    if (result != -WR_EUNSUPPORTED)
+        return result;
+    result = wr_onewire_transaction(device, ops, 1u);
+    if (result == 0)
+        wr_sleep_ms(750u);
+    return result;
+}
+
+/* The temperature of the last conversion in thousandths of a degree
+ * Celsius; -WR_EBUS when the scratchpad fails its CRC or is not one (a
+ * shorted line reads zeros: the configuration's low 5 bits are always 1). */
+static inline int32_t wr_ds18b20_read(int32_t device, int32_t* millicelsius)
+{
+    static const uint8_t read = 0xBE;
+    uint8_t scratchpad[9];
+    int32_t result = wr_onewire_write_read(device, &read, 1u, scratchpad, 9u);
+    if (result < 0)
+        return result;
+    if (wr_onewire_crc8(scratchpad, 8u) != scratchpad[8] || (scratchpad[4] & 0x1Fu) != 0x1Fu)
+        return -WR_EBUS;
+    *millicelsius = (int32_t)(int16_t)(scratchpad[0] | (scratchpad[1] << 8)) * 125 / 2;
     return 0;
 }
 
@@ -536,7 +638,7 @@ static inline int32_t wr_spi_transfer(int32_t device, const void* out, void* in,
     __asm__(WR_APP_SECTION_ ".int8 " #key "\n.uleb128 2f-1f\n1:\n.ascii \"" text "\"\n2:\n.text\n")
 
 /* The ABI version the program was written for (major << 16 | minor). */
-#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65541)
+#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65542)
 /* Interpreter stack in bytes, unless whoever starts the program picks one. */
 #define WR_APP_STACK_SIZE(bytes) WR_APP_U32_(2, bytes)
 /* Name shown for the program. */

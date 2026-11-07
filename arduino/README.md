@@ -18,7 +18,8 @@ generated prototypes are not made.
 
 Unmodified libraries work when they use the Arduino API rather than a
 chip's registers: checked with Adafruit GFX, Adafruit BusIO, Adafruit
-GC9A01A (a round TFT over SPI) and an LM75 driver over Wire.
+GC9A01A (a round TFT over SPI), an LM75 driver over Wire and
+DallasTemperature (DS18B20 sensors, also on parasite power) over OneWire.
 
 ## What maps to what
 
@@ -34,6 +35,7 @@ GC9A01A (a round TFT over SPI) and an LM75 driver over Wire.
 | `analogWrite`, `tone` | `pwm` on the pin, 1 kHz by default (`analogWriteFrequency`), `analogWriteResolution` 8 bits by default; `digitalWrite` on the pin ends it |
 | `Wire` (`"i2c0"`), `Wire1` (`"i2c1"`) | `i2c`; `endTransmission(false)` and `requestFrom` make one transaction with a repeated start |
 | `SPI` (`"spi0"`) | `spi`, taking the whole bus: libraries drive chip select with `digitalWrite` |
+| `OneWire(N)` | `onewire` bus `"gpioN"`, taking the whole bus: each call is one transaction, `write(v, 1)` leaves the strong pull-up on until the next call or `depower()`, `search()` runs in the kernel |
 | `String`, `Print`, `Stream`, `F()`, `PROGMEM` | plain memory: wasm has no separate flash |
 
 ## Limits
