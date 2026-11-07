@@ -586,6 +586,9 @@ void os_shutdown(void)
 #if OS_HAS_PULSE
     os_pulse_shutdown();
 #endif
+#if OS_HAS_COUNTER
+    os_counter_shutdown();
+#endif
 #if OS_HAS_ADC
     os_adc_shutdown();
 #endif
@@ -3715,6 +3718,16 @@ uint32_t os_get_next_wakeup_ms(void)
         }
     }
 #endif
+#if OS_HAS_COUNTER
+    {
+        /* The next read of a watched counter whose hardware cannot watch. */
+        uint32_t counter_ms = os_counter_next_deadline_ms();
+        if (counter_ms < next_wakeup_ms)
+        {
+            next_wakeup_ms = counter_ms;
+        }
+    }
+#endif
 
     return next_wakeup_ms;
 }
@@ -3745,6 +3758,10 @@ OsStatus os_schedule(void)
 #if OS_HAS_UART
     /* Bytes received and room to send, reported from interrupt handlers. */
     os_uart_poll();
+#endif
+#if OS_HAS_COUNTER
+    /* Counts that left their window, by watch point or read by the kernel. */
+    os_counter_poll();
 #endif
 
     if (g_os.clock_port.now_ms != NULL)
@@ -7103,6 +7120,10 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target)
 #if OS_HAS_UART
         case OS_OBJECT_UART:
             return os_uart_ready(target->id);
+#endif
+#if OS_HAS_COUNTER
+        case OS_OBJECT_COUNTER:
+            return os_counter_ready(target->id);
 #endif
         default:
             return 0U;

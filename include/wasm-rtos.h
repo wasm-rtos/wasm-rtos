@@ -2,7 +2,7 @@
 #define WASM_RTOS_H_GUEST
 
 /*
- * wasm-rtos ABI 1.6 for programs written in C or C++ (wasm32).
+ * wasm-rtos ABI 1.7 for programs written in C or C++ (wasm32).
  *
  * Every call returns an int32_t: zero or a value on success, a negative WR_E*
  * error otherwise. Handles belong to the calling program and close when it
@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define WR_ABI_VERSION_MAJOR 1
-#define WR_ABI_VERSION_MINOR 6
+#define WR_ABI_VERSION_MINOR 7
 
 /* Errors; calls return their negatives. */
 #define WR_EFAULT       1   /* a pointer or range lies outside the program's memory */
@@ -231,6 +231,21 @@ typedef struct wr_onewire_search_state
     uint32_t done;
 } wr_onewire_search_state;
 
+/* counter-open modes (1.7): the edges a pulse counter counts, or the steps
+ * an encoder counts per cycle of its A and B signals. */
+#define WR_COUNTER_RISING  1u
+#define WR_COUNTER_FALLING 2u
+#define WR_COUNTER_BOTH    3u
+#define WR_COUNTER_X1      4u
+#define WR_COUNTER_X2      5u
+#define WR_COUNTER_X4      6u
+/* counter-get properties. */
+#define WR_COUNTER_KIND      1u  /* WR_COUNTER_PULSE or WR_COUNTER_QUADRATURE */
+#define WR_COUNTER_MAX_HZ    2u  /* the fastest edges it counts, 0 when unknown */
+#define WR_COUNTER_FILTER_NS 3u  /* the glitch filter the hardware set */
+#define WR_COUNTER_PULSE      1u
+#define WR_COUNTER_QUADRATURE 2u
+
 /* One string argument for spawn: matches the ABI's (pointer, length) pair. */
 typedef struct wr_str
 {
@@ -239,7 +254,7 @@ typedef struct wr_str
 } wr_str;
 
 #define WR_IMPORT(interface, name) \
-    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.6.0"), import_name(name)))
+    __attribute__((import_module("wasm-rtos:kernel/" interface "@1.7.0"), import_name(name)))
 
 /* handle */
 WR_IMPORT("handle", "close") int32_t wr_close(int32_t handle);
@@ -395,6 +410,21 @@ WR_IMPORT("onewire", "transaction") int32_t wr_onewire_transaction(int32_t devic
 WR_IMPORT("onewire", "search") int32_t wr_onewire_search(const char* bus, uint32_t bus_length,
                                                          wr_onewire_search_state* state, uint32_t flags);
 
+/* counter (1.7): pulse counters and quadrature encoders by the device
+ * profile's names ("enc0", "flow"), one owner each; the hardware counts,
+ * so no edge is lost while the program is busy. filter_ns is the shortest
+ * pulse that counts (0: no filter); a mode of the other kind is -WR_EINVAL.
+ * counter-read writes the count (32 bits that wrap: subtract two reads for
+ * a distance) to *count. counter-watch makes the handle ready for wait.any
+ * while the count is below low or above high; watch(c, n, n) wakes when it
+ * moves from n, and INT32_MIN, INT32_MAX stops watching. */
+WR_IMPORT("counter", "open") int32_t wr_counter_open(const char* name, uint32_t name_length, uint32_t mode,
+                                                     uint32_t filter_ns);
+WR_IMPORT("counter", "read") int32_t wr_counter_read(int32_t counter, int32_t* count);
+WR_IMPORT("counter", "set") int32_t wr_counter_set(int32_t counter, int32_t count);
+WR_IMPORT("counter", "watch") int32_t wr_counter_watch(int32_t counter, int32_t low, int32_t high);
+WR_IMPORT("counter", "get") int32_t wr_counter_get(int32_t counter, uint32_t property);
+
 /* Time, sleep and yield through WASI, for programs without a C library. */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
 int32_t wr_wasi_clock_time_get_(uint32_t clock, uint64_t precision, uint64_t* out_time);
@@ -453,6 +483,7 @@ static inline wr_str wr_cstr(const char* text)
 #define wr_pulse_open_cstr(name, flags) wr_pulse_open((name), wr_strlen(name), (flags))
 #define wr_onewire_open_cstr(bus, rom) wr_onewire_open((bus), wr_strlen(bus), (rom), 0)
 #define wr_onewire_search_cstr(bus, state, flags) wr_onewire_search((bus), wr_strlen(bus), (state), (flags))
+#define wr_counter_open_cstr(name, mode, filter_ns) wr_counter_open((name), wr_strlen(name), (mode), (filter_ns))
 
 /* Addressable LEDs (WS2812 and alike): 3 bytes per LED in green, red, blue
  * order, then the low reset time that latches the colors. */
@@ -638,7 +669,7 @@ static inline int32_t wr_spi_transfer(int32_t device, const void* out, void* in,
     __asm__(WR_APP_SECTION_ ".int8 " #key "\n.uleb128 2f-1f\n1:\n.ascii \"" text "\"\n2:\n.text\n")
 
 /* The ABI version the program was written for (major << 16 | minor). */
-#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65542)
+#define WR_APP_ABI_VERSION() WR_APP_U32_(1, 65543)
 /* Interpreter stack in bytes, unless whoever starts the program picks one. */
 #define WR_APP_STACK_SIZE(bytes) WR_APP_U32_(2, bytes)
 /* Name shown for the program. */

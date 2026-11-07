@@ -209,6 +209,13 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
+#if OS_HAS_COUNTER
+    if (handle->type == OS_OBJECT_COUNTER)
+    {
+        os_counter_close(handle->id);
+    }
+    else
+#endif
     if (handle->type != OS_OBJECT_TASK)
     {
         os_object_release(handle->type, handle->id);
@@ -350,7 +357,7 @@ static uint32_t os_abi_read_le32(const uint8_t* bytes)
            ((uint32_t)bytes[2] << 16U) | ((uint32_t)bytes[3] << 24U);
 }
 
-#if defined(OS_ABI_HAS_WASI) || OS_HAS_ONEWIRE
+#if defined(OS_ABI_HAS_WASI) || OS_HAS_ONEWIRE || OS_HAS_COUNTER
 static void os_abi_write_le32(uint8_t* out, uint32_t value)
 {
     out[0] = (uint8_t)value;
@@ -1678,7 +1685,7 @@ static m3ApiRawFunction(os_abi_spi_transaction)
  * adc, pwm, uart
  * ------------------------------------------------------------------------ */
 
-#if OS_HAS_ADC || OS_HAS_PWM || OS_HAS_UART || OS_HAS_PULSE
+#if OS_HAS_ADC || OS_HAS_PWM || OS_HAS_UART || OS_HAS_PULSE || OS_HAS_COUNTER
 /* A property value for the program, or the error. */
 static int32_t os_abi_property(OsStatus status, uint32_t value)
 {
@@ -2283,8 +2290,117 @@ static m3ApiRawFunction(os_abi_onewire_search)
 }
 #endif
 
+/* ---------------------------------------------------------------------------
+ * counter
+ * ------------------------------------------------------------------------ */
+
+#if OS_HAS_COUNTER
+typedef struct OsAbiCounterOpen
+{
+    uint32_t mode;
+    uint32_t filter_ns;
+} OsAbiCounterOpen;
+
+static OsStatus os_abi_counter_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    const OsAbiCounterOpen* open = (const OsAbiCounterOpen*)context;
+    return os_counter_open(name, length, open->mode, open->filter_ns, out_id);
+}
+
+static m3ApiRawFunction(os_abi_counter_open)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(uint32_t, name_address);
+    m3ApiGetArg(uint32_t, name_length);
+    m3ApiGetArg(uint32_t, mode);
+    m3ApiGetArg(uint32_t, filter_ns);
+    OsAbiCounterOpen open = { mode, filter_ns };
+    OS_ABI_UNUSED();
+
+    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_COUNTER, os_abi_counter_opener, &open,
+                                   os_counter_close));
+}
+
+/* The count is signed, so it goes to memory: 4 bytes, little-endian. */
+static m3ApiRawFunction(os_abi_counter_read)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, out_address);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
+    uint8_t* out = NULL;
+    int32_t count = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    if (os_guest_memory(out_address, 4U, &out) != OS_STATUS_OK)
+    {
+        m3ApiReturn(-WR_EFAULT);
+    }
+    status = os_counter_read(entry->id, &count);
+    if (status == OS_STATUS_OK)
+    {
+        os_abi_write_le32(out, (uint32_t)count);
+    }
+    m3ApiReturn(os_abi_error(status));
+}
+
+static m3ApiRawFunction(os_abi_counter_set)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(int32_t, count);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_counter_write(entry->id, count)));
+}
+
+static m3ApiRawFunction(os_abi_counter_watch)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(int32_t, low);
+    m3ApiGetArg(int32_t, high);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    m3ApiReturn(os_abi_error(os_counter_watch(entry->id, low, high)));
+}
+
+static m3ApiRawFunction(os_abi_counter_get)
+{
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(uint32_t, property);
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (entry == NULL)
+    {
+        m3ApiReturn(-WR_EBADH);
+    }
+    status = os_counter_get(entry->id, property, &value);
+    m3ApiReturn(os_abi_property(status, value));
+}
+#endif
+
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
+    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE || !OS_HAS_COUNTER
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static m3ApiRawFunction(os_abi_unsupported)
 {
@@ -2687,6 +2803,20 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("onewire"), "open", "i(iiIi)", os_abi_unsupported, 6U },
     { WR_MODULE("onewire"), "transaction", "i(iii)", os_abi_unsupported, 6U },
     { WR_MODULE("onewire"), "search", "i(iiii)", os_abi_unsupported, 6U },
+#endif
+
+#if OS_HAS_COUNTER
+    { WR_MODULE("counter"), "open", "i(iiii)", os_abi_counter_open, 7U },
+    { WR_MODULE("counter"), "read", "i(ii)", os_abi_counter_read, 7U },
+    { WR_MODULE("counter"), "set", "i(ii)", os_abi_counter_set, 7U },
+    { WR_MODULE("counter"), "watch", "i(iii)", os_abi_counter_watch, 7U },
+    { WR_MODULE("counter"), "get", "i(ii)", os_abi_counter_get, 7U },
+#else
+    { WR_MODULE("counter"), "open", "i(iiii)", os_abi_unsupported, 7U },
+    { WR_MODULE("counter"), "read", "i(ii)", os_abi_unsupported, 7U },
+    { WR_MODULE("counter"), "set", "i(ii)", os_abi_unsupported, 7U },
+    { WR_MODULE("counter"), "watch", "i(iii)", os_abi_unsupported, 7U },
+    { WR_MODULE("counter"), "get", "i(ii)", os_abi_unsupported, 7U },
 #endif
 
 #if defined(OS_ABI_HAS_WASI)

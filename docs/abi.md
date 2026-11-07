@@ -1,4 +1,4 @@
-# wasm-rtos ABI 1.6
+# wasm-rtos ABI 1.7
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
@@ -14,6 +14,7 @@ remove anything here.
 | 1.4 | `adc`, `pwm`, `uart` |
 | 1.5 | `pulse` |
 | 1.6 | `onewire` |
+| 1.7 | `counter` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -442,6 +443,33 @@ number, the CRC-8 in the high byte (the order they go over the wire).
   can, waits otherwise) and `wr_ds18b20_read` (thousandths of a degree).
 - Transactions run whole and wait like those of `i2c` and `spi` above.
 
+### `counter` (1.7)
+Pulse counters and quadrature encoders, named as the device profile names
+them (`"enc0"`, `"flow"`): motor encoders, flow meters, anemometers. The
+hardware counts, so no edge is lost while the program is busy or waits.
+
+- `open(name, mode, filter_ns)` returns a handle; one owner per counter
+  (`-WR_EINUSE`). The mode depends on the kind (`get(counter, 1)`: 1 a pulse
+  counter on one pin, 2 a quadrature encoder on two):
+
+  | Mode | |
+  |---|---|
+  | 1 rising, 2 falling, 3 both | the edges a pulse counter counts |
+  | 4 x1, 5 x2, 6 x4 | an encoder's steps per cycle of A and B: one, both edges of A, every edge |
+
+  A mode of the other kind is `-WR_EINVAL`. `filter_ns` is the shortest
+  pulse that counts (0: none); the device rounds it (`get(counter, 3)`).
+- `read(counter, count)` writes the count, a signed 32-bit value that
+  wraps, to `count` (4 bytes, little-endian) and returns 0. A distance is
+  the difference of two reads. Counting starts at 0 when opened;
+  `set(counter, value)` sets it (homing).
+- `watch(counter, low, high)` makes the handle ready for `wait.any` while
+  the count is below `low` or above `high`: `watch(c, n, n)` wakes when the
+  count moves from `n`. Watch again after it fired; `INT32_MIN, INT32_MAX`
+  stops watching. Devices without watch points in hardware read the count
+  every 10 ms, so a wait may end up to that late.
+- `get(counter, 2)`: the fastest edges it counts in Hz (0: unknown).
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -471,7 +499,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.6 states 65542 (1.6); kernels refuse only another major.
+A program for 1.7 states 65543 (1.7); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.

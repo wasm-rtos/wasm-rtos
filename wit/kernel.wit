@@ -1,4 +1,4 @@
-// wasm-rtos ABI 1.6: what a program imports from the kernel.
+// wasm-rtos ABI 1.7: what a program imports from the kernel.
 //
 // Lowered to core wasm imports by hand ("canonical ABI lite"): every function
 // returns s32, zero or a value on success and a negative `error` otherwise;
@@ -7,7 +7,7 @@
 // interface is "wasm-rtos:kernel/<interface>@1.<minor>.0", the minor version
 // the program was built for. docs/abi.md has the rules.
 
-package wasm-rtos:kernel@1.6.0;
+package wasm-rtos:kernel@1.7.0;
 
 interface types {
     // A handle to a kernel object; it belongs to the calling program.
@@ -262,6 +262,21 @@ interface onewire {
     search: func(bus: string, state: u32, %flags: u32) -> s32;
 }
 
+// Pulse counters and quadrature encoders, one owner each.
+@since(version = 1.7.0)
+interface counter {
+    use types.{handle};
+    enum mode { reserved, rising, falling, both, x1, x2, x4 }
+    enum property { reserved, kind, max-hz, filter-ns }
+    open: func(name: string, mode: mode, filter-ns: u32) -> handle;
+    // count points to an s32 that receives the count; returns 0.
+    read: func(counter: handle, count: u32) -> s32;
+    set: func(counter: handle, count: s32) -> s32;
+    // Ready for wait.any while the count is below low or above high.
+    watch: func(counter: handle, low: s32, high: s32) -> s32;
+    get: func(counter: handle, property: property) -> s32;
+}
+
 world program {
     import handle;
     import sync;
@@ -288,4 +303,6 @@ world program {
     import pulse;
     @since(version = 1.6.0)
     import onewire;
+    @since(version = 1.7.0)
+    import counter;
 }

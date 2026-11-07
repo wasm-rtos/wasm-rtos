@@ -35,6 +35,7 @@ DallasTemperature (DS18B20 sensors, also on parasite power) over OneWire.
 | `analogWrite`, `tone` | `pwm` on the pin, 1 kHz by default (`analogWriteFrequency`), `analogWriteResolution` 8 bits by default; `digitalWrite` on the pin ends it |
 | `Wire` (`"i2c0"`), `Wire1` (`"i2c1"`) | `i2c`; `endTransmission(false)` and `requestFrom` make one transaction with a repeated start |
 | `SPI` (`"spi0"`) | `spi`, taking the whole bus: libraries drive chip select with `digitalWrite` |
+| `Encoder(A, B)` | `counter` quadrature encoder `"gpioA"`, every edge counted (x4) by the hardware; `read`, `write`, `readAndReset` |
 | `OneWire(N)` | `onewire` bus `"gpioN"`, taking the whole bus: each call is one transaction, `write(v, 1)` leaves the strong pull-up on until the next call or `depower()`, `search()` runs in the kernel |
 | `String`, `Print`, `Stream`, `F()`, `PROGMEM` | plain memory: wasm has no separate flash |
 

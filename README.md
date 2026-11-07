@@ -63,6 +63,7 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_SPI_MAX_BUSES` / `OS_SPI_MAX_DEVICES` | 2 / 8 | SPI buses, and devices programs hold open at once |
 | `OS_HAS_ONEWIRE` / `OS_ONEWIRE_MAX_BUSES` / `OS_ONEWIRE_MAX_DEVICES` | 1 / 2 / 8 | 1-Wire buses, and devices programs hold open at once |
 | `OS_BUS_MAX_OPS` | 16 | ops in one transaction |
+| `OS_HAS_COUNTER` / `OS_COUNTER_MAX` / `OS_COUNTER_POLL_MS` | 1 / 4 / 10 | pulse counters and encoders, how many a platform can register, and how often the kernel reads watched counters whose hardware cannot watch |
 | `OS_HAS_ADC` / `OS_ADC_MAX` | 1 / 8 | analog inputs, and channels a platform can register |
 | `OS_HAS_PWM` / `OS_PWM_MAX` | `OS_HAS_GPIO` / 8 | PWM outputs on GPIO pins with `OS_GPIO_CAN_PWM`, and outputs at once |
 | `OS_HAS_UART` / `OS_UART_MAX` / `OS_UART_RX_BUFFER` | 1 / 4 / 256 | serial ports, and received bytes kept per port |
@@ -298,6 +299,24 @@ os_onewire_port_set(&onewire);
 os_onewire_add_bus("gpio4", 4);  /* Arduino's OneWire(4) finds it by the pin's name */
 ```
 
+### Counters
+
+Pulse counters and quadrature encoders are hardware units the platform
+registers by name and kind: the ESP32's PCNT, an STM32 timer in encoder
+mode, an RP2040 PIO program. The port starts a unit in a mode with a glitch
+filter, reads and sets the count (extending a 16-bit counter to 32 bits on
+its overflow interrupt) and stops it. With `watch` the port arms the
+hardware's compare or limit events and calls `os_counter_event` from the
+interrupt when the count leaves a program's window; without it the kernel
+reads watched counters every `OS_COUNTER_POLL_MS`.
+
+```c
+static const OsCounterPort pcnt = { NULL, pcnt_start, pcnt_read, pcnt_write, pcnt_watch, pcnt_stop };
+static const OsCounterInfo encoder = { OS_COUNTER_QUADRATURE, 40000000 };
+os_counter_port_set(&pcnt);
+os_counter_add("enc0", 0, &encoder);
+```
+
 ### Swapping
 
 To move idle programs out of RAM, give the kernel somewhere to put them: a
@@ -350,7 +369,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-child processes, GPIO pins, displays, input devices, I2C, SPI and 1-Wire buses, analog inputs, PWM outputs, serial ports and pulse trains. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes, GPIO pins, displays, input devices, I2C, SPI and 1-Wire buses, analog inputs, PWM outputs, serial ports, pulse trains and counters. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 
