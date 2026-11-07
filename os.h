@@ -23,6 +23,7 @@
  *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
  *   OS_HAS_UART       serial ports for programs through a platform UART port
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
+ *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -68,6 +69,11 @@
 #if OS_HAS_PULSE && !OS_HAS_GPIO
 #error "OS_HAS_PULSE needs OS_HAS_GPIO"
 #endif
+#ifndef OS_HAS_ONEWIRE
+#define OS_HAS_ONEWIRE 1
+#endif
+/* Buses of any kind: the shared machinery of bus.c. */
+#define OS_HAS_BUSES (OS_HAS_I2C || OS_HAS_SPI || OS_HAS_ONEWIRE)
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
@@ -206,7 +212,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
-#define OS_ABI_VERSION_MINOR 5U
+#define OS_ABI_VERSION_MINOR 6U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -903,10 +909,10 @@ OsStatus os_input_text(uint32_t device, uint32_t code_point);
 uint32_t os_input_get_owner(uint32_t device);
 #endif
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_BUSES
 /*
  * Buses. The platform registers each bus under the device profile's name
- * ("i2c0", "spi0") and moves the bytes through a port; the kernel lends
+ * ("i2c0", "spi0", "ow0") and moves the bytes through a port; the kernel lends
  * devices on a bus to programs and checks every transaction, so a port only
  * ever sees whole, valid transactions. Data pointers point into the
  * program's memory and are valid during the call.
@@ -928,7 +934,7 @@ uint32_t os_input_get_owner(uint32_t device);
 #endif
 #define OS_BUS_NAME_MAX 32U
 
-/* The ops of a transaction; see I2C and SPI below. */
+/* The ops of a transaction; see I2C, SPI and 1-Wire below. */
 #define OS_I2C_WRITE 1U
 #define OS_I2C_READ  2U
 
@@ -951,6 +957,20 @@ typedef struct OsSpiOp
     uint8_t* read;         /* READ and TRANSFER */
     uint32_t length;       /* bytes, or microseconds for DELAY_US */
 } OsSpiOp;
+
+#define OS_ONEWIRE_WRITE      1U
+#define OS_ONEWIRE_READ       2U
+#define OS_ONEWIRE_WRITE_BITS 3U
+#define OS_ONEWIRE_READ_BITS  4U
+#define OS_ONEWIRE_POWER      5U
+#define OS_ONEWIRE_RESET      6U
+
+typedef struct OsOneWireOp
+{
+    uint8_t kind;      /* OS_ONEWIRE_* */
+    uint8_t* data;     /* written from, or read into; bits least significant first */
+    uint32_t length;   /* bytes, bits for the _BITS kinds, milliseconds for POWER */
+} OsOneWireOp;
 #endif
 
 #if OS_HAS_I2C
@@ -1020,25 +1040,83 @@ OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz);
 uint32_t os_spi_get_owner(uint32_t bus, uint32_t cs_pin);
 #endif
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_ONEWIRE
+/*
+ * 1-Wire: one data line with a pull-up, devices told apart by a 64-bit ROM
+ * code (family code in the low byte, CRC in the high one). Ops in order:
+ *   RESET       a reset pulse; OS_STATUS_NACK when no device answers with a
+ *               presence pulse
+ *   WRITE/READ  bytes, least significant bit first; a read sends 1 slots
+ *   WRITE_BITS/READ_BITS  single time slots: length bits, packed least
+ *               significant first
+ *   POWER       right after a write, hold the line high through a strong
+ *               pull-up (parasite-powered devices converting or copying)
+ *               for length milliseconds; 0 keeps it high until the next
+ *               transaction on the bus (POWER 0 comes last). Ports that
+ *               cannot drive the line return OS_STATUS_UNSUPPORTED.
+ * A transaction without ops only ends a strong pull-up left on.
+ *
+ * For a program's device the kernel sends RESET and the ROM command (match
+ * ROM with the code) itself before the program's ops. triplet, when the
+ * port has it, runs one step of a ROM search: it reads a bit and its
+ * complement, writes the bit chosen (that bit when they differ, direction
+ * when both are 0) and returns bit 0 = the bit, bit 1 = the complement,
+ * bit 2 = the direction written. Without it the kernel searches with bit
+ * ops. A search runs at once: a port returning OS_STATUS_PENDING is
+ * finished on the spot.
+ */
+#ifndef OS_ONEWIRE_MAX_BUSES
+#define OS_ONEWIRE_MAX_BUSES 2U
+#endif
+/* Devices programs may hold open at once, over all buses. */
+#ifndef OS_ONEWIRE_MAX_DEVICES
+#define OS_ONEWIRE_MAX_DEVICES 8U
+#endif
+#define OS_ONEWIRE_MAX_POWER_MS 65535U
+/* os_onewire_get_owner: the program that holds the whole bus. */
+#define OS_ONEWIRE_WHOLE_BUS 0U
+
+typedef struct OsOneWirePort
+{
+    void* context;
+    OsStatus (*transaction)(void* context, uint32_t bus, const OsOneWireOp* ops, uint32_t count);
+    OsStatus (*triplet)(void* context, uint32_t bus, uint8_t direction, uint8_t* out_bits);
+    void (*finish)(void* context, uint32_t bus);
+} OsOneWirePort;
+
+OsStatus os_onewire_port_set(const OsOneWirePort* port);
+/*
+ * A bus on a pin is best registered under the pin's name ("gpio4"), which
+ * is what Arduino's OneWire(4) opens.
+ */
+OsStatus os_onewire_add_bus(const char* name, uint32_t bus);
+/* The id of the task that has rom open on bus (OS_ONEWIRE_WHOLE_BUS: holds the bus), 0 when none. */
+uint32_t os_onewire_get_owner(uint32_t bus, uint64_t rom);
+/* The 1-Wire CRC-8 (polynomial x^8 + x^5 + x^4 + 1) of length bytes. */
+uint8_t os_onewire_crc8(const uint8_t* data, uint32_t length);
+#endif
+
+#if OS_HAS_BUSES
 /*
  * Every finished transaction, for bus analyzers and logs: which program,
  * which bus and device, the ops with the bytes written and read (valid
  * during the call) and the result. device is the I2C address, or the chip
- * select pin (OS_BUS_NO_CS when the program drives it).
+ * select pin (OS_BUS_NO_CS when the program drives it), or for 1-Wire 0:
+ * the ROM goes out in the ops (the kernel's RESET and match ROM included).
  */
 #define OS_BUS_I2C 1U
 #define OS_BUS_SPI 2U
+#define OS_BUS_ONEWIRE 3U
 #define OS_BUS_NO_CS 0xFFFFFFFFU
 
 typedef struct OsBusTrace
 {
-    uint8_t kind;           /* OS_BUS_I2C or OS_BUS_SPI */
+    uint8_t kind;           /* OS_BUS_I2C, OS_BUS_SPI or OS_BUS_ONEWIRE */
     uint32_t bus;
     uint32_t device;
     uint32_t task_id;
     uint32_t frequency_hz;
-    const void* ops;        /* const OsI2cOp* or const OsSpiOp* */
+    const void* ops;        /* const OsI2cOp*, const OsSpiOp* or const OsOneWireOp* */
     uint32_t count;
     OsStatus status;
 } OsBusTrace;
@@ -1049,9 +1127,9 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context);
 
 /*
  * The end of a transfer a port started with OS_STATUS_PENDING, with its
- * result (kind is OS_BUS_I2C or OS_BUS_SPI). Safe to call from an interrupt
- * handler: it only records the result; the next os_schedule (or finish)
- * delivers it to the waiting program. With a tickless clock, wake the
+ * result (kind is OS_BUS_I2C, OS_BUS_SPI or OS_BUS_ONEWIRE). Safe to call
+ * from an interrupt handler: it only records the result; the next
+ * os_schedule (or finish) delivers it to the waiting program. With a tickless clock, wake the
  * kernel afterwards as for os_gpio_edge.
  */
 void os_bus_complete(uint32_t kind, uint32_t bus, OsStatus status);

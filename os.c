@@ -580,7 +580,7 @@ void os_shutdown(void)
     os_event_group_free_all();
     os_timer_free_all();
     os_host_import_free_list();
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_BUSES
     os_bus_shutdown();
 #endif
 #if OS_HAS_PULSE
@@ -3734,7 +3734,7 @@ OsStatus os_schedule(void)
     /* Edges reported since the last call, also from interrupt handlers. */
     os_gpio_poll();
 #endif
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_BUSES
     /* Background bus transfers that have ended. */
     os_bus_poll();
 #endif
@@ -7284,7 +7284,7 @@ void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value)
 
 void os_transfer_finish_task(uint32_t task_id)
 {
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_BUSES
     os_bus_finish_task(task_id);
 #endif
 #if OS_HAS_PULSE

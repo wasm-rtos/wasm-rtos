@@ -1,4 +1,4 @@
-# wasm-rtos ABI 1.5
+# wasm-rtos ABI 1.6
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
@@ -13,6 +13,7 @@ remove anything here.
 | 1.3 | `i2c`, `spi`, errors `WR_ENACK`, `WR_EBUS` |
 | 1.4 | `adc`, `pwm`, `uart` |
 | 1.5 | `pulse` |
+| 1.6 | `onewire` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -395,6 +396,52 @@ calling program waits while it works.
 - Like a background bus transfer, the wait for a train is not cut short:
   pausing or aborting the program's wait lets the train end first.
 
+### `onewire` (1.6)
+1-Wire buses, named as the device profile names them (`"ow0"`; a bus on a
+single pin is best named after the pin, `"gpio4"`). Devices are told apart
+by their 64-bit ROM code: the family code in the low byte, then the serial
+number, the CRC-8 in the high byte (the order they go over the wire).
+
+- `open(bus, rom, flags)` returns a handle; flags are 0.
+  - With a ROM code, a device: programs share the bus, one program per ROM
+    (`-WR_EINUSE`). A code whose CRC is wrong is `-WR_EINVAL`. Every
+    transaction starts with a reset and match ROM, which the kernel sends.
+  - With rom 0 the program takes the whole bus (`-WR_EINUSE` while others
+    use it, and they get it while it does) and sends resets and ROM
+    commands itself, over as many transactions as it likes. Libraries that
+    work byte by byte (Arduino's OneWire) need this.
+- `transaction(device, ops, count)` runs up to 16 ops in one go. Each op is
+  12 bytes, little-endian: u32 `kind`, u32 `data`, u32 `length`.
+
+  | Kind | |
+  |---|---|
+  | 1 write | sends `length` bytes, least significant bit first |
+  | 2 read | reads `length` bytes |
+  | 3 write-bits | sends `length` single time slots from `data`, packed least significant bit first |
+  | 4 read-bits | reads `length` single time slots into `data` |
+  | 5 power | right after a write: holds the line high through a strong pull-up for `length` ms (at most 65535), for parasite-powered devices converting or copying; 0 keeps it until the next transaction on the bus, and then comes last |
+  | 6 reset | a reset pulse; the whole bus only |
+
+  With no ops a device's transaction is only the reset and match ROM, and
+  answers whether anything is present; on the whole bus an empty
+  transaction ends a pull-up left on.
+- `search(bus, state, flags)` finds the next ROM code on the bus, as many
+  as there are, and returns 1, or 0 when there are no more (then the state
+  starts over). `state` points to 16 bytes the program keeps between calls
+  and zeroes to start: u64 `rom` (the code found), u32 `discrepancy`, u32
+  `done`. Starting with `rom` set to a family code and `discrepancy` 64
+  finds that family first. Flag 1 finds only devices in alarm. A search
+  needs no handle and runs while other programs hold devices, but not
+  while another program holds the whole bus (`-WR_EINUSE`).
+- Results: 0, `-WR_ENACK` (no presence pulse after a reset), `-WR_EBUS`
+  (a shorted line, a ROM code that arrived broken), `-WR_EUNSUPPORTED` (a
+  power op on a bus without a strong pull-up), `-WR_EFAULT`, `-WR_EINVAL`,
+  `-WR_ELIMIT`.
+- C helpers: `wr_onewire_crc8`, `wr_onewire_write_read`, and for DS18B20
+  temperature sensors `wr_ds18b20_convert` (powers the conversion where it
+  can, waits otherwise) and `wr_ds18b20_read` (thousandths of a degree).
+- Transactions run whole and wait like those of `i2c` and `spi` above.
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -424,7 +471,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.5 states 65541 (1.5); kernels refuse only another major.
+A program for 1.6 states 65542 (1.6); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
@@ -437,7 +484,7 @@ These names are taken; their shape will follow the rules above.
   descriptors.
 - `wasm-rtos:kernel/device`: what the device offers (display size and shape,
   inputs, sensors), so programs ask instead of assuming.
-- `wasm-rtos:kernel/dac`, `onewire`: analog outputs and 1-Wire buses.
+- `wasm-rtos:kernel/dac`: analog outputs.
 - `wasm-rtos:kernel/power`, `system`, `ui`: sleep and wake sources, battery
   and indicators, windows and dialogs. `ui` will hand programs windows that
   behave like `display` and `input` devices.

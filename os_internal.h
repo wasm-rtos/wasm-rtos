@@ -25,7 +25,8 @@ typedef enum OsObjectType
     OS_OBJECT_ADC,
     OS_OBJECT_PWM,
     OS_OBJECT_UART,
-    OS_OBJECT_PULSE
+    OS_OBJECT_PULSE,
+    OS_OBJECT_ONEWIRE
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -266,6 +267,34 @@ OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count);
 void os_spi_shutdown(void);
 #endif
 
+#if OS_HAS_ONEWIRE
+/* ---- 1-Wire for programs (bus.c) ------------------------------------------- */
+
+/*
+ * A device by its ROM code, or with rom 0 the whole bus: no other program
+ * may then use it, and the program sends RESET and ROM commands itself.
+ * OS_STATUS_BUSY when that conflicts or the ROM is taken,
+ * OS_STATUS_INVALID_ARGUMENT for a ROM whose CRC is wrong.
+ */
+OsStatus os_onewire_open(const char* bus_name, uint32_t length, uint64_t rom, uint32_t* out_id);
+void os_onewire_close(uint32_t id);
+OsStatus os_onewire_transaction(uint32_t id, const OsOneWireOp* ops, uint32_t count);
+
+/* Where a ROM search stands, kept by the program between calls. */
+typedef struct OsOneWireSearch
+{
+    uint64_t rom;          /* the last ROM found */
+    uint32_t discrepancy;  /* bit (1-64) where the next pass takes the other branch; 0 at the start */
+    uint32_t done;         /* the last ROM has been found */
+} OsOneWireSearch;
+
+/* The next ROM into state->rom (*out_found 1), or *out_found 0 when there are no more. */
+#define OS_ONEWIRE_SEARCH_ALARM 0x01U
+OsStatus os_onewire_search(const char* bus_name, uint32_t length, OsOneWireSearch* state, uint32_t flags,
+                           uint8_t* out_found);
+void os_onewire_shutdown(void);
+#endif
+
 #if OS_HAS_ADC
 /* ---- Analog inputs for programs (adc.c) ------------------------------------ */
 #define OS_ADC_PROP_RESOLUTION 1U
@@ -311,9 +340,9 @@ void os_uart_shutdown(void);
 #endif
 
 /* Ports that work on a program's memory in the background: buses and pulse trains. */
-#define OS_HAS_TRANSFERS (OS_HAS_I2C || OS_HAS_SPI || OS_HAS_PULSE)
+#define OS_HAS_TRANSFERS (OS_HAS_BUSES || OS_HAS_PULSE)
 
-#if OS_HAS_I2C || OS_HAS_SPI
+#if OS_HAS_BUSES
 void os_bus_shutdown(void);
 /* Deliver background transfers that have ended. */
 void os_bus_poll(void);

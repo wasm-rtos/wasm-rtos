@@ -19,7 +19,10 @@ if [ -n "${WASI_SYSROOT:-}" ]; then
 fi
 output=""
 sources=()
-includes=(-I"$ARDUINO_DIR/cores/wasm-rtos" -I"$ARDUINO_DIR/libraries/Wire" -I"$ARDUINO_DIR/libraries/SPI" -I"$KERNEL_DIR/include")
+includes=(-I"$ARDUINO_DIR/cores/wasm-rtos" -I"$KERNEL_DIR/include")
+for library in "$ARDUINO_DIR"/libraries/*/; do
+    includes+=(-I"${library%/}")
+done
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
