@@ -32,7 +32,8 @@ DallasTemperature (DS18B20 sensors, also on parasite power) over OneWire.
 | `Serial` | standard output: the system keeps it per program or sends it to a UART; input reads nothing |
 | `Serial1`, `Serial2` | `uart` ports `"uart1"`, `"uart2"`, with the classic `SERIAL_8N1`… formats |
 | `analogRead(A0)` | `adc` channel `"a0"` (and `analogRead(0)` too), scaled to `analogReadResolution` (10 bits by default) |
-| `analogWrite`, `tone` | `pwm` on the pin, 1 kHz by default (`analogWriteFrequency`), `analogWriteResolution` 8 bits by default; `digitalWrite` on the pin ends it |
+| `analogWrite` on a pin with an analog output, `dacWrite`, `dacDisable` | `dac` channel named like the pin (`"gpio25"`), scaled from `analogWriteResolution` (or 8 bits) to the converter's |
+| `analogWrite` elsewhere, `tone` | `pwm` on the pin, 1 kHz by default (`analogWriteFrequency`), `analogWriteResolution` 8 bits by default; `digitalWrite` on the pin ends it |
 | `Wire` (`"i2c0"`), `Wire1` (`"i2c1"`) | `i2c`; `endTransmission(false)` and `requestFrom` make one transaction with a repeated start |
 | `SPI` (`"spi0"`) | `spi`, taking the whole bus: libraries drive chip select with `digitalWrite` |
 | `Encoder(A, B)` | `counter` quadrature encoder `"gpioA"`, every edge counted (x4) by the hardware; `read`, `write`, `readAndReset` |

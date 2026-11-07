@@ -25,6 +25,7 @@
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_COUNTER    pulse counters and quadrature encoders through a platform port
+ *   OS_HAS_DAC        analog outputs for programs through a platform DAC port
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -75,6 +76,9 @@
 #endif
 #ifndef OS_HAS_COUNTER
 #define OS_HAS_COUNTER 1
+#endif
+#ifndef OS_HAS_DAC
+#define OS_HAS_DAC 1
 #endif
 /* Buses of any kind: the shared machinery of bus.c. */
 #define OS_HAS_BUSES (OS_HAS_I2C || OS_HAS_SPI || OS_HAS_ONEWIRE)
@@ -216,7 +220,7 @@ void os_shutdown(void);
  * macros that write the records (WR_APP_STACK_SIZE, WR_APP_NAME, ...).
  */
 #define OS_ABI_VERSION_MAJOR 1U
-#define OS_ABI_VERSION_MINOR 7U
+#define OS_ABI_VERSION_MINOR 8U
 #define OS_APP_KEY_ABI_VERSION 1U   /* u32: major << 16 | minor */
 #define OS_APP_KEY_STACK_SIZE 2U    /* u32: interpreter stack bytes */
 #define OS_APP_KEY_NAME 3U          /* UTF-8 */
@@ -1170,6 +1174,45 @@ typedef struct OsAdcPort
 OsStatus os_adc_port_set(const OsAdcPort* port);
 /* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_ADC_MAX. */
 OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo* info);
+#endif
+
+#if OS_HAS_DAC
+/*
+ * Analog outputs, registered under the device profile's names. One program
+ * owns an output at a time. A channel named like a GPIO pin ("gpio25") is
+ * that pin: opening it takes the pin as an opened GPIO would, so nothing
+ * else drives it, and closing gives it back as an input. Other names are
+ * outputs of their own (an external DAC chip).
+ *
+ * start (may be NULL) switches the channel on; write sets a raw value,
+ * 0 .. 2^resolution_bits - 1, already checked; stop switches it off. The
+ * output is 0 when a program opens it. Voltages are scaled by the kernel
+ * from full_scale_mv, the voltage of the largest raw value.
+ */
+#ifndef OS_DAC_MAX
+#define OS_DAC_MAX 4U
+#endif
+#define OS_DAC_NAME_MAX 32U
+
+typedef struct OsDacInfo
+{
+    uint8_t resolution_bits;
+    uint32_t full_scale_mv;
+} OsDacInfo;
+
+typedef struct OsDacPort
+{
+    void* context;
+    OsStatus (*start)(void* context, uint32_t channel);
+    OsStatus (*write)(void* context, uint32_t channel, uint32_t raw);
+    void (*stop)(void* context, uint32_t channel);
+} OsDacPort;
+
+OsStatus os_dac_port_set(const OsDacPort* port);
+/* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_DAC_MAX. */
+OsStatus os_dac_add_channel(const char* name, uint32_t channel, const OsDacInfo* info);
+/* The id of the task that owns a channel, 0 when it is free. */
+uint32_t os_dac_get_owner(uint32_t channel);
 #endif
 
 #if OS_HAS_PWM

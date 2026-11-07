@@ -63,6 +63,7 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_SPI_MAX_BUSES` / `OS_SPI_MAX_DEVICES` | 2 / 8 | SPI buses, and devices programs hold open at once |
 | `OS_HAS_ONEWIRE` / `OS_ONEWIRE_MAX_BUSES` / `OS_ONEWIRE_MAX_DEVICES` | 1 / 2 / 8 | 1-Wire buses, and devices programs hold open at once |
 | `OS_BUS_MAX_OPS` | 16 | ops in one transaction |
+| `OS_HAS_DAC` / `OS_DAC_MAX` | 1 / 4 | analog outputs, and channels a platform can register |
 | `OS_HAS_COUNTER` / `OS_COUNTER_MAX` / `OS_COUNTER_POLL_MS` | 1 / 4 / 10 | pulse counters and encoders, how many a platform can register, and how often the kernel reads watched counters whose hardware cannot watch |
 | `OS_HAS_ADC` / `OS_ADC_MAX` | 1 / 8 | analog inputs, and channels a platform can register |
 | `OS_HAS_PWM` / `OS_PWM_MAX` | `OS_HAS_GPIO` / 8 | PWM outputs on GPIO pins with `OS_GPIO_CAN_PWM`, and outputs at once |
@@ -299,6 +300,21 @@ os_onewire_port_set(&onewire);
 os_onewire_add_bus("gpio4", 4);  /* Arduino's OneWire(4) finds it by the pin's name */
 ```
 
+### Analog outputs
+
+Register each converter output with its resolution and full-scale voltage;
+the port switches it on, writes raw values the kernel has checked and
+switches it off. Register an output under its pin's GPIO name and the
+kernel takes the pin while a program uses the output.
+
+```c
+static const OsDacPort dac = { NULL, board_dac_start, board_dac_write, board_dac_stop };
+static const OsDacInfo esp32_dac = { 8, 3300 };
+os_dac_port_set(&dac);
+os_gpio_add_pin("gpio25", 25, OS_GPIO_CAN_ALL, 0);
+os_dac_add_channel("gpio25", 1, &esp32_dac);
+```
+
 ### Counters
 
 Pulse counters and quadrature encoders are hardware units the platform
@@ -369,7 +385,7 @@ Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
 WASI, programs import the wasm-rtos ABI: kernel objects behind per-program
 handles (mutexes, semaphores, event groups, queues, named to share them
 between programs), counting timers, waiting for several objects at once,
-child processes, GPIO pins, displays, input devices, I2C, SPI and 1-Wire buses, analog inputs, PWM outputs, serial ports, pulse trains and counters. [`docs/abi.md`](docs/abi.md) is the specification,
+child processes, GPIO pins, displays, input devices, I2C, SPI and 1-Wire buses, analog inputs and outputs, PWM outputs, serial ports, pulse trains and counters. [`docs/abi.md`](docs/abi.md) is the specification,
 [`wit/kernel.wit`](wit/kernel.wit) the interface description, and
 [`include/wasm-rtos.h`](include/wasm-rtos.h) declares everything for C and C++:
 

@@ -1,4 +1,4 @@
-# wasm-rtos ABI 1.7
+# wasm-rtos ABI 1.8
 
 What a WebAssembly program can rely on when it runs on wasm-rtos. Programs
 built against ABI 1.x keep working on every kernel that supports 1.x; new
@@ -15,6 +15,7 @@ remove anything here.
 | 1.5 | `pulse` |
 | 1.6 | `onewire` |
 | 1.7 | `counter` |
+| 1.8 | `dac` |
 
 [`wit/kernel.wit`](../wit/kernel.wit) describes the interfaces;
 [`include/wasm-rtos.h`](../include/wasm-rtos.h) declares them for C and C++.
@@ -470,6 +471,22 @@ hardware counts, so no edge is lost while the program is busy or waits.
   every 10 ms, so a wait may end up to that late.
 - `get(counter, 2)`: the fastest edges it counts in Hz (0: unknown).
 
+### `dac` (1.8)
+Analog outputs, named as the device profile names them: a pin's own
+converter (`"gpio25"`) or an output of its own (`"dac0"`, an external
+chip).
+
+- `open(name, flags)` returns a handle; flags are 0. One program per output
+  (`-WR_EINUSE`). An output named like a GPIO pin takes that pin as
+  `gpio.open` would, so no program drives it digitally meanwhile. The
+  output is 0 when opened and switches off when closed (the pin goes back
+  to an input).
+- `write(output, raw)` sets a raw value from 0 to `get(output, 2)`;
+  `write-mv(output, mv)` the nearest step to a voltage up to
+  `get(output, 3)`. More than that is `-WR_EINVAL`.
+- `get(output, property)`: 1 resolution in bits, 2 the largest raw value,
+  3 its voltage in mV, 4 the raw value last written.
+
 ## WASI
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
@@ -499,7 +516,7 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.7 states 65543 (1.7); kernels refuse only another major.
+A program for 1.8 states 65544 (1.8); kernels refuse only another major.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
@@ -512,7 +529,6 @@ These names are taken; their shape will follow the rules above.
   descriptors.
 - `wasm-rtos:kernel/device`: what the device offers (display size and shape,
   inputs, sensors), so programs ask instead of assuming.
-- `wasm-rtos:kernel/dac`: analog outputs.
 - `wasm-rtos:kernel/power`, `system`, `ui`: sleep and wake sources, battery
   and indicators, windows and dialogs. `ui` will hand programs windows that
   behave like `display` and `input` devices.

@@ -15,6 +15,8 @@ static int32_t g_pins[MAX_PINS];
 static uint8_t g_pin_modes[MAX_PINS];
 /* PWM outputs from analogWrite and tone, by pin; a pin is either these or g_pins. */
 static int32_t g_pwm[MAX_PINS];
+/* Analog outputs from analogWrite and dacWrite, by pin: 0 not tried, -1 the pin has none. */
+static int32_t g_dac[MAX_PINS];
 static int g_read_bits = 10;
 static int g_write_bits = 8;
 static uint32_t g_write_hz = 1000;
@@ -42,6 +44,9 @@ static void release_pwm(uint8_t pin)
     if (g_pwm[pin] > 0)
         wr_close(g_pwm[pin]);
     g_pwm[pin] = 0;
+    if (g_dac[pin] > 0)
+        wr_close(g_dac[pin]);
+    g_dac[pin] = 0;
 }
 
 extern "C" __attribute__((weak)) const char* wr_arduino_pin_name(uint8_t pin)
@@ -155,11 +160,49 @@ static int32_t pwm_handle(uint8_t pin, uint32_t frequency_hz)
     return g_pwm[pin] > 0 ? g_pwm[pin] : 0;
 }
 
+/* The pin's analog output, opened on first use; 0 when the pin has none. */
+static int32_t dac_handle(uint8_t pin)
+{
+    if (g_dac[pin] != 0)
+        return g_dac[pin] > 0 ? g_dac[pin] : 0;
+    if (g_pins[pin] > 0)
+    {
+        wr_close(g_pins[pin]);
+        g_pins[pin] = 0;
+    }
+    g_dac[pin] = wr_dac_open_cstr(wr_arduino_pin_name(pin));
+    if (g_dac[pin] <= 0)
+        g_dac[pin] = -1;
+    return g_dac[pin] > 0 ? g_dac[pin] : 0;
+}
+
+void dacWrite(uint8_t pin, uint8_t value)
+{
+    int32_t output = dac_handle(pin);
+    if (output > 0)
+        wr_dac_write(output, rescale(value, 8, (int)wr_dac_get(output, WR_DAC_RESOLUTION)));
+}
+
+void dacDisable(uint8_t pin)
+{
+    if (g_dac[pin] > 0)
+        wr_close(g_dac[pin]);
+    g_dac[pin] = 0;
+}
+
 void analogWrite(uint8_t pin, int value)
 {
     uint32_t max = (1u << g_write_bits) - 1u;
     uint32_t level = value < 0 ? 0u : (uint32_t)value > max ? max : (uint32_t)value;
-    int32_t output = pwm_handle(pin, g_write_hz);
+    int32_t output = 0;
+
+    /* A true analog output where the pin has one, as the cores of boards with a DAC do. */
+    if (g_pwm[pin] <= 0 && (output = dac_handle(pin)) > 0)
+    {
+        wr_dac_write(output, rescale(level, g_write_bits, (int)wr_dac_get(output, WR_DAC_RESOLUTION)));
+        return;
+    }
+    output = pwm_handle(pin, g_write_hz);
     if (output == 0)
     {
         /* No PWM on this pin: on from half scale, as some cores do. */

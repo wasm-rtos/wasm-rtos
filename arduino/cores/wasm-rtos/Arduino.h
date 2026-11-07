@@ -92,6 +92,9 @@ void analogReadResolution(int bits);
 void analogWrite(uint8_t pin, int value);
 void analogWriteResolution(int bits);
 void analogWriteFrequency(uint8_t pin, uint32_t frequency_hz);
+/* An analog output's 8-bit value, as on the ESP32; dacDisable gives the pin back. */
+void dacWrite(uint8_t pin, uint8_t value);
+void dacDisable(uint8_t pin);
 void analogReference(uint8_t mode);
 
 unsigned long millis(void);
