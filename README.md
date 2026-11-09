@@ -433,6 +433,6 @@ The kernel and the interpreter are released into the public domain (see
 
 ## Arduino
 
-[wasm-rtos-arduino](https://github.com/wasm-rtos/wasm-rtos-arduino) builds Arduino sketches and libraries into
+[wasm-rtos-libraries](https://github.com/wasm-rtos/wasm-rtos-libraries) (`arduino/`) builds Arduino sketches and libraries into
 programs: `Arduino.h`, `Serial`, `Wire` and `SPI` on top of the guest ABI.
 It is a library inside the program, not part of the kernel.
