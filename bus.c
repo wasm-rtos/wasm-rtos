@@ -1114,38 +1114,41 @@ static void* os_bus_port_context(uint8_t kind)
     return NULL;
 }
 
-/* Every bus of every kind, for the loops below. */
-static void os_bus_each(void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id), uint32_t task_id)
+/* The buses of a kind, for the loops below. */
+static void os_bus_each(uint8_t kind, void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id), uint32_t task_id)
 {
+    OsBus** buses = NULL;
+    uint32_t max = 0U;
     uint32_t index = 0U;
+
 #if OS_HAS_I2C
-    for (index = 0U; index < OS_I2C_MAX_BUSES; ++index)
+    if (kind == OS_BUS_I2C)
     {
-        if (g_i2c.buses[index] != NULL)
-        {
-            visit(OS_BUS_I2C, g_i2c.buses[index], task_id);
-        }
+        buses = g_i2c.buses;
+        max = OS_I2C_MAX_BUSES;
     }
 #endif
 #if OS_HAS_SPI
-    for (index = 0U; index < OS_SPI_MAX_BUSES; ++index)
+    if (kind == OS_BUS_SPI)
     {
-        if (g_spi.buses[index] != NULL)
-        {
-            visit(OS_BUS_SPI, g_spi.buses[index], task_id);
-        }
+        buses = g_spi.buses;
+        max = OS_SPI_MAX_BUSES;
     }
 #endif
 #if OS_HAS_ONEWIRE
-    for (index = 0U; index < OS_ONEWIRE_MAX_BUSES; ++index)
+    if (kind == OS_BUS_ONEWIRE)
     {
-        if (g_onewire.buses[index] != NULL)
-        {
-            visit(OS_BUS_ONEWIRE, g_onewire.buses[index], task_id);
-        }
+        buses = g_onewire.buses;
+        max = OS_ONEWIRE_MAX_BUSES;
     }
 #endif
-    (void)index;
+    for (index = 0U; index < max; ++index)
+    {
+        if (buses[index] != NULL)
+        {
+            visit(kind, buses[index], task_id);
+        }
+    }
 }
 
 static void os_bus_poll_one(uint8_t kind, OsBus* bus, uint32_t task_id)
@@ -1165,30 +1168,65 @@ static void os_bus_finish_one(uint8_t kind, OsBus* bus, uint32_t task_id)
     }
 }
 
+/* Transfers of a kind that ended in the background reach their programs. */
+static void os_bus_poll_kind(uint8_t kind)
+{
+    os_bus_each(kind, os_bus_poll_one, 0U);
+}
+
+/* End the task's transfers on buses of a kind now. */
+static void os_bus_finish_task_kind(uint8_t kind, uint32_t task_id)
+{
+    if (task_id != 0U)
+    {
+        os_bus_each(kind, os_bus_finish_one, task_id);
+    }
+}
+
+/* Ports must be done with every buffer of a kind before the kernel lets go. */
+static void os_bus_finish_all(uint8_t kind)
+{
+    os_bus_each(kind, os_bus_finish_one, 0U);
+}
+
 void os_bus_poll(void)
 {
-    os_bus_each(os_bus_poll_one, 0U);
+#if OS_HAS_I2C
+    os_bus_poll_kind(OS_BUS_I2C);
+#endif
+#if OS_HAS_SPI
+    os_bus_poll_kind(OS_BUS_SPI);
+#endif
+#if OS_HAS_ONEWIRE
+    os_bus_poll_kind(OS_BUS_ONEWIRE);
+#endif
 }
 
 void os_bus_finish_task(uint32_t task_id)
 {
-    if (task_id != 0U)
-    {
-        os_bus_each(os_bus_finish_one, task_id);
-    }
+#if OS_HAS_I2C
+    os_bus_finish_task_kind(OS_BUS_I2C, task_id);
+#endif
+#if OS_HAS_SPI
+    os_bus_finish_task_kind(OS_BUS_SPI, task_id);
+#endif
+#if OS_HAS_ONEWIRE
+    os_bus_finish_task_kind(OS_BUS_ONEWIRE, task_id);
+#endif
 }
 
 void os_bus_shutdown(void)
 {
-    /* Ports must be done with every buffer before the kernel lets go. */
-    os_bus_each(os_bus_finish_one, 0U);
 #if OS_HAS_I2C
+    os_bus_finish_all(OS_BUS_I2C);
     os_i2c_shutdown();
 #endif
 #if OS_HAS_SPI
+    os_bus_finish_all(OS_BUS_SPI);
     os_spi_shutdown();
 #endif
 #if OS_HAS_ONEWIRE
+    os_bus_finish_all(OS_BUS_ONEWIRE);
     os_onewire_shutdown();
 #endif
     memset(&g_bus_trace, 0, sizeof(g_bus_trace));
