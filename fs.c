@@ -726,20 +726,20 @@ static const char* os_fs_directory_for_fd(uint32_t fd)
     return file != NULL && file->is_directory ? file->path : NULL;
 }
 
-static __wasi_errno_t os_fs_errno(OsStatus status)
+static os_wasi_errno_t os_fs_errno(OsStatus status)
 {
     switch (status)
     {
-        case OS_STATUS_OK: return __WASI_ERRNO_SUCCESS;
-        case OS_STATUS_FILE_NOT_FOUND: return __WASI_ERRNO_NOENT;
-        case OS_STATUS_NOT_A_DIRECTORY: return __WASI_ERRNO_NOTDIR;
-        case OS_STATUS_IS_A_DIRECTORY: return __WASI_ERRNO_ISDIR;
-        case OS_STATUS_READ_ONLY: return __WASI_ERRNO_ROFS;
-        case OS_STATUS_BUFFER_TOO_SMALL: return __WASI_ERRNO_NAMETOOLONG;
-        case OS_STATUS_OUT_OF_MEMORY: return __WASI_ERRNO_NOMEM;
-        case OS_STATUS_LIMIT_REACHED: return __WASI_ERRNO_MFILE;
-        case OS_STATUS_INVALID_ARGUMENT: return __WASI_ERRNO_INVAL;
-        default: return __WASI_ERRNO_IO;
+        case OS_STATUS_OK: return OS_WASI_ERRNO_SUCCESS;
+        case OS_STATUS_FILE_NOT_FOUND: return OS_WASI_ERRNO_NOENT;
+        case OS_STATUS_NOT_A_DIRECTORY: return OS_WASI_ERRNO_NOTDIR;
+        case OS_STATUS_IS_A_DIRECTORY: return OS_WASI_ERRNO_ISDIR;
+        case OS_STATUS_READ_ONLY: return OS_WASI_ERRNO_ROFS;
+        case OS_STATUS_BUFFER_TOO_SMALL: return OS_WASI_ERRNO_NAMETOOLONG;
+        case OS_STATUS_OUT_OF_MEMORY: return OS_WASI_ERRNO_NOMEM;
+        case OS_STATUS_LIMIT_REACHED: return OS_WASI_ERRNO_MFILE;
+        case OS_STATUS_INVALID_ARGUMENT: return OS_WASI_ERRNO_INVAL;
+        default: return OS_WASI_ERRNO_IO;
     }
 }
 
@@ -760,13 +760,13 @@ static uint64_t os_fs_inode(const char* text)
  * ------------------------------------------------------------------------ */
 
 #define OS_FS_FILE_RIGHTS \
-    (__WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_SEEK | __WASI_RIGHTS_FD_TELL | \
-     __WASI_RIGHTS_FD_FILESTAT_GET | __WASI_RIGHTS_FD_ADVISE)
+    (OS_WASI_RIGHTS_FD_READ | OS_WASI_RIGHTS_FD_SEEK | OS_WASI_RIGHTS_FD_TELL | \
+     OS_WASI_RIGHTS_FD_FILESTAT_GET | OS_WASI_RIGHTS_FD_ADVISE)
 #define OS_FS_DIRECTORY_RIGHTS \
-    (__WASI_RIGHTS_PATH_OPEN | __WASI_RIGHTS_FD_READDIR | \
-     __WASI_RIGHTS_PATH_FILESTAT_GET | __WASI_RIGHTS_FD_FILESTAT_GET)
+    (OS_WASI_RIGHTS_PATH_OPEN | OS_WASI_RIGHTS_FD_READDIR | \
+     OS_WASI_RIGHTS_PATH_FILESTAT_GET | OS_WASI_RIGHTS_FD_FILESTAT_GET)
 #define OS_FS_WRITE_RIGHTS \
-    (__WASI_RIGHTS_FD_WRITE | __WASI_RIGHTS_FD_ALLOCATE | __WASI_RIGHTS_FD_FILESTAT_SET_SIZE)
+    (OS_WASI_RIGHTS_FD_WRITE | OS_WASI_RIGHTS_FD_ALLOCATE | OS_WASI_RIGHTS_FD_FILESTAT_SET_SIZE)
 
 typedef struct OsFsIovec
 {
@@ -791,7 +791,7 @@ static OsStatus os_fs_read_into(OsFsOpenFile* file, uint64_t offset, void* buffe
 static OS_HOST_FUNCTION(os_fs_wasi_fd_prestat_get)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG_MEM(uint8_t*, buf);
     (void)runtime;
     (void)os_host_user;
@@ -799,47 +799,47 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_prestat_get)
     OS_HOST_CHECK_MEM(buf, 8);
     if (fd != OS_FS_ROOT_FD)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
-    OS_HOST_WRITE32(buf, __WASI_PREOPENTYPE_DIR);
+    OS_HOST_WRITE32(buf, OS_WASI_PREOPENTYPE_DIR);
     OS_HOST_WRITE32(buf + 4, 1);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_prestat_dir_name)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG_MEM(char*, path);
-    OS_HOST_ARG(__wasi_size_t, path_len);
+    OS_HOST_ARG(os_wasi_size_t, path_len);
     (void)runtime;
     (void)os_host_user;
 
     if (fd != OS_FS_ROOT_FD)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
     if (path_len < 1U)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
     OS_HOST_CHECK_MEM(path, 1);
     path[0] = '/';
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_path_open)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, dirfd);
-    OS_HOST_ARG(__wasi_lookupflags_t, dirflags);
+    OS_HOST_ARG(os_wasi_fd_t, dirfd);
+    OS_HOST_ARG(os_wasi_lookupflags_t, dirflags);
     OS_HOST_ARG_MEM(const char*, path);
-    OS_HOST_ARG(__wasi_size_t, path_len);
-    OS_HOST_ARG(__wasi_oflags_t, oflags);
-    OS_HOST_ARG(__wasi_rights_t, rights_base);
-    OS_HOST_ARG(__wasi_rights_t, rights_inheriting);
-    OS_HOST_ARG(__wasi_fdflags_t, fdflags);
-    OS_HOST_ARG_MEM(__wasi_fd_t*, out_fd);
+    OS_HOST_ARG(os_wasi_size_t, path_len);
+    OS_HOST_ARG(os_wasi_oflags_t, oflags);
+    OS_HOST_ARG(os_wasi_rights_t, rights_base);
+    OS_HOST_ARG(os_wasi_rights_t, rights_inheriting);
+    OS_HOST_ARG(os_wasi_fdflags_t, fdflags);
+    OS_HOST_ARG_MEM(os_wasi_fd_t*, out_fd);
     const char* directory = os_fs_directory_for_fd(dirfd);
     char normalized[OS_FS_PATH_MAX];
     OsFsProcess* process = NULL;
@@ -855,17 +855,17 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
     (void)rights_inheriting;
 
     OS_HOST_CHECK_MEM(path, path_len);
-    OS_HOST_CHECK_MEM(out_fd, sizeof(__wasi_fd_t));
+    OS_HOST_CHECK_MEM(out_fd, sizeof(os_wasi_fd_t));
 
     if (directory == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
-    if ((oflags & (__WASI_OFLAGS_CREAT | __WASI_OFLAGS_EXCL | __WASI_OFLAGS_TRUNC)) != 0U ||
-        (fdflags & (__WASI_FDFLAGS_APPEND | __WASI_FDFLAGS_DSYNC | __WASI_FDFLAGS_RSYNC | __WASI_FDFLAGS_SYNC)) != 0U ||
+    if ((oflags & (OS_WASI_OFLAGS_CREAT | OS_WASI_OFLAGS_EXCL | OS_WASI_OFLAGS_TRUNC)) != 0U ||
+        (fdflags & (OS_WASI_FDFLAGS_APPEND | OS_WASI_FDFLAGS_DSYNC | OS_WASI_FDFLAGS_RSYNC | OS_WASI_FDFLAGS_SYNC)) != 0U ||
         (rights_base & OS_FS_WRITE_RIGHTS) != 0U)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_ROFS);
+        OS_HOST_RETURN(OS_WASI_ERRNO_ROFS);
     }
 
     status = os_fs_normalize(directory, path, path_len, normalized, sizeof(normalized));
@@ -877,15 +877,15 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
     {
         OS_HOST_RETURN(os_fs_errno(status));
     }
-    if ((oflags & __WASI_OFLAGS_DIRECTORY) != 0U && stat.type != OS_FS_TYPE_DIRECTORY)
+    if ((oflags & OS_WASI_OFLAGS_DIRECTORY) != 0U && stat.type != OS_FS_TYPE_DIRECTORY)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_NOTDIR);
+        OS_HOST_RETURN(OS_WASI_ERRNO_NOTDIR);
     }
 
     process = os_fs_find_process(os_fs_current_task_id(), 1U);
     if (process == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_NOMEM);
+        OS_HOST_RETURN(OS_WASI_ERRNO_NOMEM);
     }
     for (index = 0U; index < OS_FS_MAX_FILES; ++index)
     {
@@ -897,7 +897,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
     }
     if (file == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_MFILE);
+        OS_HOST_RETURN(OS_WASI_ERRNO_MFILE);
     }
 
     if (stat.type == OS_FS_TYPE_DIRECTORY)
@@ -906,7 +906,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
         file->path = (char*)malloc(length);
         if (file->path == NULL)
         {
-            OS_HOST_RETURN(__WASI_ERRNO_NOMEM);
+            OS_HOST_RETURN(OS_WASI_ERRNO_NOMEM);
         }
         memcpy(file->path, normalized, length);
         file->is_directory = 1U;
@@ -929,16 +929,16 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
     file->used = 1U;
     file->position = 0U;
     OS_HOST_WRITE32(out_fd, OS_FS_FIRST_FILE_FD + index);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_read)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG_MEM(OsFsIovec*, iovs);
-    OS_HOST_ARG(__wasi_size_t, iovs_len);
-    OS_HOST_ARG_MEM(__wasi_size_t*, nread);
+    OS_HOST_ARG(os_wasi_size_t, iovs_len);
+    OS_HOST_ARG_MEM(os_wasi_size_t*, nread);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     uint32_t total = 0U;
     uint32_t index = 0U;
@@ -946,21 +946,21 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_read)
     (void)os_host_user;
 
     OS_HOST_CHECK_MEM(iovs, iovs_len * sizeof(OsFsIovec));
-    OS_HOST_CHECK_MEM(nread, sizeof(__wasi_size_t));
+    OS_HOST_CHECK_MEM(nread, sizeof(os_wasi_size_t));
 
     if (fd == 0U)
     {
         /* No console input yet: stdin reads as end of file. */
         OS_HOST_WRITE32(nread, 0);
-        OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+        OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (file == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
     if (file->is_directory)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_ISDIR);
+        OS_HOST_RETURN(OS_WASI_ERRNO_ISDIR);
     }
 
     for (index = 0U; index < iovs_len; ++index)
@@ -989,17 +989,17 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_read)
     }
 
     OS_HOST_WRITE32(nread, total);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_pread)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG_MEM(OsFsIovec*, iovs);
-    OS_HOST_ARG(__wasi_size_t, iovs_len);
-    OS_HOST_ARG(__wasi_filesize_t, offset);
-    OS_HOST_ARG_MEM(__wasi_size_t*, nread);
+    OS_HOST_ARG(os_wasi_size_t, iovs_len);
+    OS_HOST_ARG(os_wasi_filesize_t, offset);
+    OS_HOST_ARG_MEM(os_wasi_size_t*, nread);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     uint32_t total = 0U;
     uint32_t index = 0U;
@@ -1007,15 +1007,15 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_pread)
     (void)os_host_user;
 
     OS_HOST_CHECK_MEM(iovs, iovs_len * sizeof(OsFsIovec));
-    OS_HOST_CHECK_MEM(nread, sizeof(__wasi_size_t));
+    OS_HOST_CHECK_MEM(nread, sizeof(os_wasi_size_t));
 
     if (file == NULL)
     {
-        OS_HOST_RETURN(fd < OS_FS_FIRST_FILE_FD ? __WASI_ERRNO_SPIPE : __WASI_ERRNO_BADF);
+        OS_HOST_RETURN(fd < OS_FS_FIRST_FILE_FD ? OS_WASI_ERRNO_SPIPE : OS_WASI_ERRNO_BADF);
     }
     if (file->is_directory)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_ISDIR);
+        OS_HOST_RETURN(OS_WASI_ERRNO_ISDIR);
     }
 
     for (index = 0U; index < iovs_len; ++index)
@@ -1043,69 +1043,69 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_pread)
     }
 
     OS_HOST_WRITE32(nread, total);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 uint16_t os_fs_write_error(uint32_t fd)
 {
-    return os_fs_file_for_fd(fd) != NULL || fd == OS_FS_ROOT_FD ? __WASI_ERRNO_ROFS : __WASI_ERRNO_BADF;
+    return os_fs_file_for_fd(fd) != NULL || fd == OS_FS_ROOT_FD ? OS_WASI_ERRNO_ROFS : OS_WASI_ERRNO_BADF;
 }
 
-static __wasi_errno_t os_fs_seek(uint32_t fd, int64_t offset, uint32_t whence, uint64_t* out_position)
+static os_wasi_errno_t os_fs_seek(uint32_t fd, int64_t offset, uint32_t whence, uint64_t* out_position)
 {
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     int64_t base = 0;
 
     if (file == NULL)
     {
-        return fd < OS_FS_FIRST_FILE_FD ? __WASI_ERRNO_SPIPE : __WASI_ERRNO_BADF;
+        return fd < OS_FS_FIRST_FILE_FD ? OS_WASI_ERRNO_SPIPE : OS_WASI_ERRNO_BADF;
     }
     if (file->is_directory)
     {
-        return __WASI_ERRNO_ISDIR;
+        return OS_WASI_ERRNO_ISDIR;
     }
 
-    if (whence == __WASI_WHENCE_SET)
+    if (whence == OS_WASI_WHENCE_SET)
     {
         base = 0;
     }
-    else if (whence == __WASI_WHENCE_CUR)
+    else if (whence == OS_WASI_WHENCE_CUR)
     {
         base = (int64_t)file->position;
     }
-    else if (whence == __WASI_WHENCE_END)
+    else if (whence == OS_WASI_WHENCE_END)
     {
         base = (int64_t)file->size;
     }
     else
     {
-        return __WASI_ERRNO_INVAL;
+        return OS_WASI_ERRNO_INVAL;
     }
 
     if ((offset < 0 && base + offset < 0))
     {
-        return __WASI_ERRNO_INVAL;
+        return OS_WASI_ERRNO_INVAL;
     }
     file->position = (uint64_t)(base + offset);
     *out_position = file->position;
-    return __WASI_ERRNO_SUCCESS;
+    return OS_WASI_ERRNO_SUCCESS;
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_seek)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
-    OS_HOST_ARG(__wasi_filedelta_t, offset);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_filedelta_t, offset);
     OS_HOST_ARG(uint32_t, whence);
-    OS_HOST_ARG_MEM(__wasi_filesize_t*, result);
+    OS_HOST_ARG_MEM(os_wasi_filesize_t*, result);
     uint64_t position = 0U;
-    __wasi_errno_t error = 0;
+    os_wasi_errno_t error = 0;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(result, sizeof(__wasi_filesize_t));
+    OS_HOST_CHECK_MEM(result, sizeof(os_wasi_filesize_t));
     error = os_fs_seek(fd, offset, whence, &position);
-    if (error == __WASI_ERRNO_SUCCESS)
+    if (error == OS_WASI_ERRNO_SUCCESS)
     {
         OS_HOST_WRITE64(result, position);
     }
@@ -1116,23 +1116,23 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_seek)
 static OS_HOST_FUNCTION(os_fs_wasi_unstable_fd_seek)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
-    OS_HOST_ARG(__wasi_filedelta_t, offset);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_filedelta_t, offset);
     OS_HOST_ARG(uint32_t, whence);
-    OS_HOST_ARG_MEM(__wasi_filesize_t*, result);
-    static const uint32_t whence_map[3] = { __WASI_WHENCE_CUR, __WASI_WHENCE_END, __WASI_WHENCE_SET };
+    OS_HOST_ARG_MEM(os_wasi_filesize_t*, result);
+    static const uint32_t whence_map[3] = { OS_WASI_WHENCE_CUR, OS_WASI_WHENCE_END, OS_WASI_WHENCE_SET };
     uint64_t position = 0U;
-    __wasi_errno_t error = 0;
+    os_wasi_errno_t error = 0;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(result, sizeof(__wasi_filesize_t));
+    OS_HOST_CHECK_MEM(result, sizeof(os_wasi_filesize_t));
     if (whence > 2U)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
     error = os_fs_seek(fd, offset, whence_map[whence], &position);
-    if (error == __WASI_ERRNO_SUCCESS)
+    if (error == OS_WASI_ERRNO_SUCCESS)
     {
         OS_HOST_WRITE64(result, position);
     }
@@ -1142,25 +1142,25 @@ static OS_HOST_FUNCTION(os_fs_wasi_unstable_fd_seek)
 static OS_HOST_FUNCTION(os_fs_wasi_fd_tell)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(__wasi_filesize_t*, result);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
+    OS_HOST_ARG_MEM(os_wasi_filesize_t*, result);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(result, sizeof(__wasi_filesize_t));
+    OS_HOST_CHECK_MEM(result, sizeof(os_wasi_filesize_t));
     if (file == NULL)
     {
-        OS_HOST_RETURN(fd < OS_FS_FIRST_FILE_FD ? __WASI_ERRNO_SPIPE : __WASI_ERRNO_BADF);
+        OS_HOST_RETURN(fd < OS_FS_FIRST_FILE_FD ? OS_WASI_ERRNO_SPIPE : OS_WASI_ERRNO_BADF);
     }
     OS_HOST_WRITE64(result, file->position);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_close)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     (void)runtime;
     (void)runtime;
@@ -1169,20 +1169,20 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_close)
 
     if (fd <= OS_FS_ROOT_FD)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+        OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (file == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
     os_fs_close_file(file);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_fdstat_get)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG_MEM(uint8_t*, buf);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     uint8_t filetype = 0U;
@@ -1194,30 +1194,30 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_fdstat_get)
     OS_HOST_CHECK_MEM(buf, 24);
     if (fd <= 2U)
     {
-        filetype = __WASI_FILETYPE_CHARACTER_DEVICE;
-        rights = fd == 0U ? __WASI_RIGHTS_FD_READ : __WASI_RIGHTS_FD_WRITE;
+        filetype = OS_WASI_FILETYPE_CHARACTER_DEVICE;
+        rights = fd == 0U ? OS_WASI_RIGHTS_FD_READ : OS_WASI_RIGHTS_FD_WRITE;
     }
     else if (fd == OS_FS_ROOT_FD || (file != NULL && file->is_directory))
     {
-        filetype = __WASI_FILETYPE_DIRECTORY;
+        filetype = OS_WASI_FILETYPE_DIRECTORY;
         rights = OS_FS_DIRECTORY_RIGHTS;
         inheriting = OS_FS_DIRECTORY_RIGHTS | OS_FS_FILE_RIGHTS;
     }
     else if (file != NULL)
     {
-        filetype = __WASI_FILETYPE_REGULAR_FILE;
+        filetype = OS_WASI_FILETYPE_REGULAR_FILE;
         rights = OS_FS_FILE_RIGHTS;
     }
     else
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
 
     memset(buf, 0, 24);
     OS_HOST_WRITE8(buf, filetype);
     OS_HOST_WRITE64(buf + 8, rights);
     OS_HOST_WRITE64(buf + 16, inheriting);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static void os_fs_write_filestat(uint8_t* buf, const char* path, const OsFsStat* stat)
@@ -1225,8 +1225,8 @@ static void os_fs_write_filestat(uint8_t* buf, const char* path, const OsFsStat*
     memset(buf, 0, 64);
     OS_HOST_WRITE64(buf + 8, os_fs_inode(path));
     OS_HOST_WRITE8(buf + 16, stat->type == OS_FS_TYPE_DIRECTORY
-        ? __WASI_FILETYPE_DIRECTORY
-        : __WASI_FILETYPE_REGULAR_FILE);
+        ? OS_WASI_FILETYPE_DIRECTORY
+        : OS_WASI_FILETYPE_REGULAR_FILE);
     OS_HOST_WRITE64(buf + 24, 1U);
     OS_HOST_WRITE64(buf + 32, stat->size);
 }
@@ -1234,7 +1234,7 @@ static void os_fs_write_filestat(uint8_t* buf, const char* path, const OsFsStat*
 static OS_HOST_FUNCTION(os_fs_wasi_fd_filestat_get)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG_MEM(uint8_t*, buf);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     OsFsStat stat;
@@ -1245,33 +1245,33 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_filestat_get)
     if (fd <= 2U)
     {
         memset(buf, 0, 64);
-        OS_HOST_WRITE8(buf + 16, __WASI_FILETYPE_CHARACTER_DEVICE);
-        OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+        OS_HOST_WRITE8(buf + 16, OS_WASI_FILETYPE_CHARACTER_DEVICE);
+        OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (fd == OS_FS_ROOT_FD)
     {
         stat.type = OS_FS_TYPE_DIRECTORY;
         stat.size = 0U;
         os_fs_write_filestat(buf, "/", &stat);
-        OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+        OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (file == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
     stat.type = file->is_directory ? OS_FS_TYPE_DIRECTORY : OS_FS_TYPE_FILE;
     stat.size = file->size;
     os_fs_write_filestat(buf, file->path != NULL ? file->path : "", &stat);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_path_filestat_get)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, dirfd);
-    OS_HOST_ARG(__wasi_lookupflags_t, flags);
+    OS_HOST_ARG(os_wasi_fd_t, dirfd);
+    OS_HOST_ARG(os_wasi_lookupflags_t, flags);
     OS_HOST_ARG_MEM(const char*, path);
-    OS_HOST_ARG(__wasi_size_t, path_len);
+    OS_HOST_ARG(os_wasi_size_t, path_len);
     OS_HOST_ARG_MEM(uint8_t*, buf);
     const char* directory = os_fs_directory_for_fd(dirfd);
     char normalized[OS_FS_PATH_MAX];
@@ -1285,7 +1285,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_filestat_get)
     OS_HOST_CHECK_MEM(buf, 64);
     if (directory == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
 
     status = os_fs_normalize(directory, path, path_len, normalized, sizeof(normalized));
@@ -1298,18 +1298,18 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_filestat_get)
         OS_HOST_RETURN(os_fs_errno(status));
     }
     os_fs_write_filestat(buf, normalized, &stat);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 /* cookie is the index of the next entry; a partial last entry fills the buffer. */
 static OS_HOST_FUNCTION(os_fs_wasi_fd_readdir)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(__wasi_fd_t, fd);
+    OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG_MEM(uint8_t*, buf);
-    OS_HOST_ARG(__wasi_size_t, buf_len);
-    OS_HOST_ARG(__wasi_dircookie_t, cookie);
-    OS_HOST_ARG_MEM(__wasi_size_t*, bufused);
+    OS_HOST_ARG(os_wasi_size_t, buf_len);
+    OS_HOST_ARG(os_wasi_dircookie_t, cookie);
+    OS_HOST_ARG_MEM(os_wasi_size_t*, bufused);
     const char* directory = os_fs_directory_for_fd(fd);
     uint32_t used = 0U;
     uint64_t index = cookie;
@@ -1317,10 +1317,10 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_readdir)
     (void)os_host_user;
 
     OS_HOST_CHECK_MEM(buf, buf_len);
-    OS_HOST_CHECK_MEM(bufused, sizeof(__wasi_size_t));
+    OS_HOST_CHECK_MEM(bufused, sizeof(os_wasi_size_t));
     if (directory == NULL)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
 
     while (used < buf_len && index <= UINT32_MAX)
@@ -1351,8 +1351,8 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_readdir)
         OS_HOST_WRITE64(header + 8, os_fs_inode(child));
         OS_HOST_WRITE32(header + 16, name_length);
         OS_HOST_WRITE8(header + 20, entry.type == OS_FS_TYPE_DIRECTORY
-            ? __WASI_FILETYPE_DIRECTORY
-            : __WASI_FILETYPE_REGULAR_FILE);
+            ? OS_WASI_FILETYPE_DIRECTORY
+            : OS_WASI_FILETYPE_REGULAR_FILE);
 
         chunk = buf_len - used < sizeof(header) ? buf_len - used : (uint32_t)sizeof(header);
         memcpy(buf + used, header, chunk);
@@ -1364,7 +1364,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_readdir)
     }
 
     OS_HOST_WRITE32(bufused, used);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_read_only)
@@ -1375,7 +1375,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_read_only)
     (void)os_host_user;
     (void)os_host_slot;
     (void)os_host_memory;
-    OS_HOST_RETURN(__WASI_ERRNO_ROFS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_ROFS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_not_supported)
@@ -1386,7 +1386,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_not_supported)
     (void)os_host_user;
     (void)os_host_slot;
     (void)os_host_memory;
-    OS_HOST_RETURN(__WASI_ERRNO_NOSYS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_NOSYS);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_no_effect)
@@ -1397,7 +1397,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_no_effect)
     (void)os_host_user;
     (void)os_host_slot;
     (void)os_host_memory;
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 typedef struct OsFsWasiImport
