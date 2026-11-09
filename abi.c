@@ -127,13 +127,6 @@ static void os_abi_drop(OsAbiHandle* handle)
         }
     }
     else
-#if OS_HAS_I2C
-    if (handle->type == OS_OBJECT_I2C)
-    {
-        os_i2c_close(handle->id);
-    }
-    else
-#endif
 #if OS_HAS_SPI
     if (handle->type == OS_OBJECT_SPI)
     {
@@ -1008,8 +1001,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
     {
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
-            (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)  ||
-            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI    || entry->type == OS_OBJECT_ONEWIRE )
+            (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)   || entry->type == OS_OBJECT_SPI    || entry->type == OS_OBJECT_ONEWIRE )
         {
             OS_HOST_RETURN(-WR_EBADH);
         }
@@ -1246,93 +1238,6 @@ static int32_t os_abi_bus_data(uint32_t address, uint32_t length, uint8_t** out_
         return 0;
     }
     return os_guest_memory(address, length, out_data) == OS_STATUS_OK ? 0 : -WR_EFAULT;
-}
-#endif
-
-#if OS_HAS_I2C
-static OS_HOST_FUNCTION(os_abi_i2c_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, bus_address);
-    OS_HOST_ARG(uint32_t, bus_length);
-    OS_HOST_ARG(uint32_t, address);
-    OS_HOST_ARG(uint32_t, flags);
-    const char* bus = NULL;
-    uint32_t id = 0U;
-    int32_t handle = 0;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    handle = os_abi_read_name(bus_address, bus_length, &bus);
-    if (handle < 0)
-    {
-        OS_HOST_RETURN(handle);
-    }
-    if (bus == NULL || flags != 0U)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    status = os_i2c_open(bus, bus_length, address, &id);
-    if (status != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
-    }
-    handle = os_abi_handle_new(OS_OBJECT_I2C, id);
-    if (handle < 0)
-    {
-        os_i2c_close(id);
-    }
-    OS_HOST_RETURN(handle);
-}
-
-/* ops: count records of 12 bytes, u32 kind, u32 data, u32 length. */
-static OS_HOST_FUNCTION(os_abi_i2c_transaction)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, ops_address);
-    OS_HOST_ARG(uint32_t, count);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_I2C);
-    OsI2cOp ops[OS_BUS_MAX_OPS];
-    uint8_t* records = NULL;
-    uint32_t index = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (count > OS_BUS_MAX_OPS)
-    {
-        OS_HOST_RETURN(-WR_ELIMIT);
-    }
-    if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    for (index = 0U; index < count; ++index)
-    {
-        const uint8_t* record = records + index * 12U;
-        int32_t result = os_abi_bus_data(os_abi_read_le32(record + 4U), os_abi_read_le32(record + 8U), &ops[index].data);
-        uint32_t kind = os_abi_read_le32(record);
-        if (result < 0)
-        {
-            OS_HOST_RETURN(result);
-        }
-        if (kind != OS_I2C_WRITE && kind != OS_I2C_READ)
-        {
-            OS_HOST_RETURN(-WR_EINVAL);
-        }
-        ops[index].kind = (uint8_t)kind;
-        ops[index].length = os_abi_read_le32(record + 8U);
-    }
-    /* A port working in the background leaves the program waiting; the end writes the result. */
-    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    *raw_return = os_abi_error(os_i2c_transaction(entry->id, ops, count));
-    return os_guest_end();
 }
 #endif
 
@@ -1588,7 +1493,7 @@ static OS_HOST_FUNCTION(os_abi_onewire_search)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_I2C || \
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || \
     !OS_HAS_SPI || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
@@ -2083,14 +1988,6 @@ static const OsAbiImport g_abi_imports[] =
 #endif
     { WR_MODULE("proc"), "self", "i()", os_abi_proc_self, 0U },
     { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
-
-#if OS_HAS_I2C
-    { WR_MODULE("i2c"), "open", "i(iiii)", os_abi_i2c_open, 3U },
-    { WR_MODULE("i2c"), "transaction", "i(iii)", os_abi_i2c_transaction, 3U },
-#else
-    { WR_MODULE("i2c"), "open", "i(iiii)", os_abi_unsupported, 3U },
-    { WR_MODULE("i2c"), "transaction", "i(iii)", os_abi_unsupported, 3U },
-#endif
 
 #if OS_HAS_SPI
     { WR_MODULE("spi"), "open", "i(iiiiii)", os_abi_spi_open, 3U },

@@ -4,7 +4,7 @@
  * code) and run whole transactions; the platform's port moves the bytes.
  */
 
-#include "os_internal.h"
+#include "driver.h"
 
 #if OS_HAS_BUSES
 
@@ -172,6 +172,20 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context)
 
 static void os_bus_finish(uint8_t kind, OsBus* bus);
 static OsBus* os_bus_by_number(uint8_t kind, uint32_t number);
+/* Program memory for a data range of an op; length 0 needs no memory. */
+static int32_t os_bus_guest_data(uint32_t address, uint32_t length, uint8_t** out_data)
+{
+    *out_data = NULL;
+    if (length == 0U)
+    {
+        return 0;
+    }
+    return os_guest_memory(address, length, out_data) == OS_STATUS_OK ? 0 : -WR_EFAULT;
+}
+
+static void os_bus_poll_kind(uint8_t kind);
+static void os_bus_finish_task_kind(uint8_t kind, uint32_t task_id);
+static void os_bus_finish_all(uint8_t kind);
 
 /* The kernel's copy of a transfer's ops, of the bus's kind. */
 static const void* os_bus_ops(uint8_t kind, const OsBus* bus)
@@ -307,7 +321,6 @@ uint8_t os_bus_is_busy(uint32_t kind, uint32_t number)
  * I2C
  * ------------------------------------------------------------------------ */
 
-#if OS_HAS_I2C
 typedef struct OsI2cDevice
 {
     OsBus* bus;
@@ -346,13 +359,27 @@ OsStatus os_i2c_port_set(const OsI2cPort* port)
     return OS_STATUS_OK;
 }
 
+extern const OsDriver os_i2c_driver;
+
 OsStatus os_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz)
 {
+    OsStatus status = OS_STATUS_OK;
+
     if (frequency_hz == 0U)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
-    return os_bus_add(g_i2c.buses, OS_I2C_MAX_BUSES, name, bus, frequency_hz);
+    status = os_bus_add(g_i2c.buses, OS_I2C_MAX_BUSES, name, bus, frequency_hz);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    /* A platform with these devices gives programs the i2c interface. */
+    if (os_driver_add(&os_i2c_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
+    return OS_STATUS_OK;
 }
 
 uint32_t os_i2c_get_owner(uint32_t bus, uint32_t address)
@@ -453,12 +480,22 @@ OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count)
                         os_i2c_run, 1U);
 }
 
+static void os_i2c_poll(void)
+{
+    os_bus_poll_kind(OS_BUS_I2C);
+}
+
+static void os_i2c_finish_task(uint32_t task_id)
+{
+    os_bus_finish_task_kind(OS_BUS_I2C, task_id);
+}
+
 void os_i2c_shutdown(void)
 {
+    os_bus_finish_all(OS_BUS_I2C);
     os_bus_free_all(g_i2c.buses, OS_I2C_MAX_BUSES);
     memset(&g_i2c, 0, sizeof(g_i2c));
 }
-#endif
 
 /* ---------------------------------------------------------------------------
  * SPI
@@ -509,11 +546,18 @@ OsStatus os_spi_port_set(const OsSpiPort* port)
 
 OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz)
 {
+    OsStatus status = OS_STATUS_OK;
+
     if (max_hz == 0U)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
-    return os_bus_add(g_spi.buses, OS_SPI_MAX_BUSES, name, bus, max_hz);
+    status = os_bus_add(g_spi.buses, OS_SPI_MAX_BUSES, name, bus, max_hz);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    return OS_STATUS_OK;
 }
 
 uint32_t os_spi_get_owner(uint32_t bus, uint32_t cs_pin)
@@ -638,8 +682,19 @@ OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count)
                         count, os_spi_run, 1U);
 }
 
+static void os_spi_poll(void)
+{
+    os_bus_poll_kind(OS_BUS_SPI);
+}
+
+static void os_spi_finish_task(uint32_t task_id)
+{
+    os_bus_finish_task_kind(OS_BUS_SPI, task_id);
+}
+
 void os_spi_shutdown(void)
 {
+    os_bus_finish_all(OS_BUS_SPI);
     os_bus_free_all(g_spi.buses, OS_SPI_MAX_BUSES);
     memset(&g_spi, 0, sizeof(g_spi));
 }
@@ -726,7 +781,13 @@ OsStatus os_onewire_port_set(const OsOneWirePort* port)
 OsStatus os_onewire_add_bus(const char* name, uint32_t bus)
 {
     /* The speed is the standard one; the field only matters to the other kinds. */
-    return os_bus_add(g_onewire.buses, OS_ONEWIRE_MAX_BUSES, name, bus, 0U);
+    OsStatus status = os_bus_add(g_onewire.buses, OS_ONEWIRE_MAX_BUSES, name, bus, 0U);
+
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    return OS_STATUS_OK;
 }
 
 uint32_t os_onewire_get_owner(uint32_t bus, uint64_t rom)
@@ -1024,8 +1085,19 @@ OsStatus os_onewire_search(const char* bus_name, uint32_t length, OsOneWireSearc
     return OS_STATUS_OK;
 }
 
+static void os_onewire_poll(void)
+{
+    os_bus_poll_kind(OS_BUS_ONEWIRE);
+}
+
+static void os_onewire_finish_task(uint32_t task_id)
+{
+    os_bus_finish_task_kind(OS_BUS_ONEWIRE, task_id);
+}
+
 void os_onewire_shutdown(void)
 {
+    os_bus_finish_all(OS_BUS_ONEWIRE);
     os_bus_free_all(g_onewire.buses, OS_ONEWIRE_MAX_BUSES);
     memset(&g_onewire, 0, sizeof(g_onewire));
 }
@@ -1037,13 +1109,11 @@ static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
     uint32_t max = 0U;
     uint32_t index = 0U;
 
-#if OS_HAS_I2C
     if (kind == OS_BUS_I2C)
     {
         buses = g_i2c.buses;
         max = OS_I2C_MAX_BUSES;
     }
-#endif
 #if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
@@ -1070,12 +1140,10 @@ static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
 
 static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t)
 {
-#if OS_HAS_I2C
     if (kind == OS_BUS_I2C)
     {
         return g_i2c.port.finish;
     }
-#endif
 #if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
@@ -1093,12 +1161,10 @@ static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t)
 
 static void* os_bus_port_context(uint8_t kind)
 {
-#if OS_HAS_I2C
     if (kind == OS_BUS_I2C)
     {
         return g_i2c.port.context;
     }
-#endif
 #if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
@@ -1121,13 +1187,11 @@ static void os_bus_each(uint8_t kind, void (*visit)(uint8_t kind, OsBus* bus, ui
     uint32_t max = 0U;
     uint32_t index = 0U;
 
-#if OS_HAS_I2C
     if (kind == OS_BUS_I2C)
     {
         buses = g_i2c.buses;
         max = OS_I2C_MAX_BUSES;
     }
-#endif
 #if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
@@ -1191,45 +1255,143 @@ static void os_bus_finish_all(uint8_t kind)
 
 void os_bus_poll(void)
 {
-#if OS_HAS_I2C
-    os_bus_poll_kind(OS_BUS_I2C);
-#endif
+    os_i2c_poll();
 #if OS_HAS_SPI
-    os_bus_poll_kind(OS_BUS_SPI);
+    os_spi_poll();
 #endif
 #if OS_HAS_ONEWIRE
-    os_bus_poll_kind(OS_BUS_ONEWIRE);
+    os_onewire_poll();
 #endif
 }
 
 void os_bus_finish_task(uint32_t task_id)
 {
-#if OS_HAS_I2C
-    os_bus_finish_task_kind(OS_BUS_I2C, task_id);
-#endif
+    os_i2c_finish_task(task_id);
 #if OS_HAS_SPI
-    os_bus_finish_task_kind(OS_BUS_SPI, task_id);
+    os_spi_finish_task(task_id);
 #endif
 #if OS_HAS_ONEWIRE
-    os_bus_finish_task_kind(OS_BUS_ONEWIRE, task_id);
+    os_onewire_finish_task(task_id);
 #endif
 }
 
 void os_bus_shutdown(void)
 {
-#if OS_HAS_I2C
-    os_bus_finish_all(OS_BUS_I2C);
     os_i2c_shutdown();
-#endif
 #if OS_HAS_SPI
-    os_bus_finish_all(OS_BUS_SPI);
     os_spi_shutdown();
 #endif
 #if OS_HAS_ONEWIRE
-    os_bus_finish_all(OS_BUS_ONEWIRE);
     os_onewire_shutdown();
 #endif
     memset(&g_bus_trace, 0, sizeof(g_bus_trace));
 }
+
+/* ---------------------------------------------------------------------------
+ * The i2c interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OS_HOST_FUNCTION(os_i2c_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint32_t, address);
+    OS_HOST_ARG(uint32_t, flags);
+    const char* bus = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    if (handle < 0)
+    {
+        OS_HOST_RETURN(handle);
+    }
+    if (bus == NULL || flags != 0U)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    status = os_i2c_open(bus, bus_length, address, &id);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_driver_handle_new(&os_i2c_driver, id);
+    if (handle < 0)
+    {
+        os_i2c_close(id);
+    }
+    OS_HOST_RETURN(handle);
+}
+
+/* ops: count records of 12 bytes, u32 kind, u32 data, u32 length. */
+static OS_HOST_FUNCTION(os_i2c_call_transaction)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, ops_address);
+    OS_HOST_ARG(uint32_t, count);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_i2c_driver, handle, &id);
+    OsI2cOp ops[OS_BUS_MAX_OPS];
+    uint8_t* records = NULL;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (count > OS_BUS_MAX_OPS)
+    {
+        OS_HOST_RETURN(-WR_ELIMIT);
+    }
+    if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        const uint8_t* record = records + index * 12U;
+        int32_t result = os_bus_guest_data(OS_HOST_READ32(record + 4U), OS_HOST_READ32(record + 8U), &ops[index].data);
+        uint32_t kind = OS_HOST_READ32(record);
+        if (result < 0)
+        {
+            OS_HOST_RETURN(result);
+        }
+        if (kind != OS_I2C_WRITE && kind != OS_I2C_READ)
+        {
+            OS_HOST_RETURN(-WR_EINVAL);
+        }
+        ops[index].kind = (uint8_t)kind;
+        ops[index].length = OS_HOST_READ32(record + 8U);
+    }
+    /* A port working in the background leaves the program waiting; the end writes the result. */
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_i2c_transaction(id, ops, count));
+    return os_guest_end();
+}
+
+static const OsDriverCall os_i2c_calls[] =
+{
+    { "open", "i(iiii)", os_i2c_call_open, 3U },
+    { "transaction", "i(iii)", os_i2c_call_transaction, 3U },
+};
+
+const OsDriver os_i2c_driver =
+{
+    .interface = "i2c",
+    .calls = os_i2c_calls,
+    .call_count = (uint32_t)(sizeof(os_i2c_calls) / sizeof(os_i2c_calls[0])),
+    .close = os_i2c_close,
+    .poll = os_i2c_poll,
+    .finish_task = os_i2c_finish_task,
+    .shutdown = os_i2c_shutdown,
+};
 
 #endif

@@ -11,7 +11,6 @@
  *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
- *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
  *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
@@ -27,9 +26,6 @@
 #endif
 #ifndef OS_FS_TAR
 #define OS_FS_TAR OS_HAS_FS
-#endif
-#ifndef OS_HAS_I2C
-#define OS_HAS_I2C 1
 #endif
 #ifndef OS_HAS_SPI
 #define OS_HAS_SPI 1
@@ -1005,7 +1001,6 @@ typedef struct OsOneWireOp
 } OsOneWireOp;
 #endif
 
-#if OS_HAS_I2C
 /*
  * I2C: ops in order, a repeated start where a read follows a write or a
  * write follows a read, a stop at the end. Adjacent ops of the same kind
@@ -1036,7 +1031,6 @@ OsStatus os_i2c_port_set(const OsI2cPort* port);
 OsStatus os_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz);
 /* The id of the task that has address open on bus, 0 when none. */
 uint32_t os_i2c_get_owner(uint32_t bus, uint32_t address);
-#endif
 
 #if OS_HAS_SPI
 /*
