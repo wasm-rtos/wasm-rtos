@@ -807,9 +807,6 @@ void os_shutdown(void)
 #if OS_HAS_PULSE
     os_pulse_shutdown();
 #endif
-#if OS_HAS_PWM
-    os_pwm_shutdown();
-#endif
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif

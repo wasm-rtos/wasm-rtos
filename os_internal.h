@@ -21,7 +21,6 @@ typedef enum OsObjectType
     OS_OBJECT_DRIVER,
     OS_OBJECT_I2C,
     OS_OBJECT_SPI,
-    OS_OBJECT_PWM,
     OS_OBJECT_PULSE,
     OS_OBJECT_ONEWIRE
 } OsObjectType;
@@ -363,7 +362,6 @@ OsStatus os_adc_read_mv(uint32_t id, uint32_t* out_mv);
 OsStatus os_adc_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_adc_shutdown(void);
 
-#if OS_HAS_PWM
 /* ---- PWM outputs for programs (pwm.c) -------------------------------------- */
 #define OS_PWM_PROP_FREQUENCY 1U
 #define OS_PWM_PROP_DUTY      2U
@@ -375,7 +373,6 @@ OsStatus os_pwm_set_frequency(uint32_t id, uint32_t frequency_hz);
 OsStatus os_pwm_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_pwm_close(uint32_t id);
 void os_pwm_shutdown(void);
-#endif
 
 /* ---- Serial ports for programs (uart.c) ------------------------------------ */
 #define OS_UART_PROP_BAUD      1U

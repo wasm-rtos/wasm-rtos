@@ -142,13 +142,6 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
-#if OS_HAS_PWM
-    if (handle->type == OS_OBJECT_PWM)
-    {
-        os_pwm_close(handle->id);
-    }
-    else
-#endif
 #if OS_HAS_PULSE
     if (handle->type == OS_OBJECT_PULSE)
     {
@@ -1025,8 +1018,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
             (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)  ||
-            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI  ||
-            entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE )
+            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI   || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE )
         {
             OS_HOST_RETURN(-WR_EBADH);
         }
@@ -1506,82 +1498,6 @@ static int32_t os_abi_open_device(uint32_t name_address, uint32_t name_length, O
 }
 
 
-#if OS_HAS_PWM
-typedef struct OsAbiPwmOpen
-{
-    uint32_t frequency_hz;
-    uint32_t flags;
-} OsAbiPwmOpen;
-
-static OsStatus os_abi_pwm_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
-{
-    const OsAbiPwmOpen* open = (const OsAbiPwmOpen*)context;
-    return os_pwm_open(name, length, open->frequency_hz, open->flags, out_id);
-}
-
-static OS_HOST_FUNCTION(os_abi_pwm_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, frequency_hz);
-    OS_HOST_ARG(uint32_t, flags);
-    OsAbiPwmOpen open = { frequency_hz, flags };
-    OS_ABI_UNUSED();
-
-    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_PWM, os_abi_pwm_opener, &open, os_pwm_close));
-}
-
-static OS_HOST_FUNCTION(os_abi_pwm_set_duty)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, duty);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_pwm_set_duty(entry->id, duty)));
-}
-
-static OS_HOST_FUNCTION(os_abi_pwm_set_frequency)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, frequency_hz);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_pwm_set_frequency(entry->id, frequency_hz)));
-}
-
-static OS_HOST_FUNCTION(os_abi_pwm_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, property);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
-    uint32_t value = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    {
-        /* The call fills value: it must happen before value is read. */
-        OsStatus status = os_pwm_get(entry->id, property, &value);
-        OS_HOST_RETURN(os_abi_property(status, value));
-    }
-}
-#endif
 
 
 /* ---------------------------------------------------------------------------
@@ -1878,7 +1794,7 @@ static OS_HOST_FUNCTION(os_abi_onewire_search)
 #endif
 
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_PWM || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
+    !OS_HAS_SPI || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
 {
@@ -2392,17 +2308,6 @@ static const OsAbiImport g_abi_imports[] =
 #endif
 
 
-#if OS_HAS_PWM
-    { WR_MODULE("pwm"), "open", "i(iiii)", os_abi_pwm_open, 4U },
-    { WR_MODULE("pwm"), "set-duty", "i(ii)", os_abi_pwm_set_duty, 4U },
-    { WR_MODULE("pwm"), "set-frequency", "i(ii)", os_abi_pwm_set_frequency, 4U },
-    { WR_MODULE("pwm"), "get", "i(ii)", os_abi_pwm_get, 4U },
-#else
-    { WR_MODULE("pwm"), "open", "i(iiii)", os_abi_unsupported, 4U },
-    { WR_MODULE("pwm"), "set-duty", "i(ii)", os_abi_unsupported, 4U },
-    { WR_MODULE("pwm"), "set-frequency", "i(ii)", os_abi_unsupported, 4U },
-    { WR_MODULE("pwm"), "get", "i(ii)", os_abi_unsupported, 4U },
-#endif
 
 
 #if OS_HAS_PULSE

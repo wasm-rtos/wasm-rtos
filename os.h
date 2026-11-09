@@ -13,7 +13,6 @@
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
  *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
  *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
- *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
@@ -35,9 +34,6 @@
 #endif
 #ifndef OS_HAS_SPI
 #define OS_HAS_SPI 1
-#endif
-#ifndef OS_HAS_PWM
-#define OS_HAS_PWM 1
 #endif
 #ifndef OS_HAS_PULSE
 #define OS_HAS_PULSE 1
@@ -1243,7 +1239,6 @@ OsStatus os_dac_add_channel(const char* name, uint32_t channel, const OsDacInfo*
 /* The id of the task that owns a channel, 0 when it is free. */
 uint32_t os_dac_get_owner(uint32_t channel);
 
-#if OS_HAS_PWM
 /*
  * Pulse-width outputs on GPIO pins that have OS_GPIO_CAN_PWM. A program owns
  * the pin as it would through gpio; closing gives it back as an input.
@@ -1264,7 +1259,6 @@ typedef struct OsPwmPort
 } OsPwmPort;
 
 OsStatus os_pwm_port_set(const OsPwmPort* port);
-#endif
 
 /*
  * Serial ports, registered under the device profile's names ("uart1",
