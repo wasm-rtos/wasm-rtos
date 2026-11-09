@@ -128,13 +128,6 @@ static void os_abi_drop(OsAbiHandle* handle)
         }
     }
     else
-#if OS_HAS_INPUT
-    if (handle->type == OS_OBJECT_INPUT)
-    {
-        os_input_close(handle->id);
-    }
-    else
-#endif
 #if OS_HAS_I2C
     if (handle->type == OS_OBJECT_I2C)
     {
@@ -1257,86 +1250,6 @@ static OS_HOST_FUNCTION(os_abi_proc_parent)
 }
 
 /* ---------------------------------------------------------------------------
- * input
- * ------------------------------------------------------------------------ */
-
-#if OS_HAS_INPUT
-static OS_HOST_FUNCTION(os_abi_input_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, flags);
-    const char* name = NULL;
-    uint32_t id = 0U;
-    int32_t handle = 0;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    handle = os_abi_read_name(name_address, name_length, &name);
-    if (handle < 0)
-    {
-        OS_HOST_RETURN(handle);
-    }
-    if (name == NULL || flags != 0U)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    status = os_input_open(name, name_length, &id);
-    if (status != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
-    }
-    handle = os_abi_handle_new(OS_OBJECT_INPUT, id);
-    if (handle < 0)
-    {
-        os_input_close(id);
-    }
-    OS_HOST_RETURN(handle);
-}
-
-static OS_HOST_FUNCTION(os_abi_input_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, property);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_INPUT);
-    uint32_t value = 0U;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    status = os_input_get(entry->id, property, &value);
-    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
-}
-
-static OS_HOST_FUNCTION(os_abi_input_read)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, events_address);
-    OS_HOST_ARG(uint32_t, max_events);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_INPUT);
-    uint8_t* events = NULL;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (max_events > UINT32_MAX / OS_INPUT_EVENT_SIZE ||
-        os_guest_memory(events_address, max_events * OS_INPUT_EVENT_SIZE, &events) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    OS_HOST_RETURN((int32_t)os_input_read(entry->id, events, max_events));
-}
-#endif
-
-/* ---------------------------------------------------------------------------
  * i2c and spi
  * ------------------------------------------------------------------------ */
 
@@ -1964,7 +1877,7 @@ static OS_HOST_FUNCTION(os_abi_onewire_search)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_INPUT || !OS_HAS_I2C || \
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_I2C || \
     !OS_HAS_SPI || !OS_HAS_PWM || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
@@ -2461,15 +2374,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
 
 
-#if OS_HAS_INPUT
-    { WR_MODULE("input"), "open", "i(iii)", os_abi_input_open, 2U },
-    { WR_MODULE("input"), "get", "i(ii)", os_abi_input_get, 2U },
-    { WR_MODULE("input"), "read", "i(iii)", os_abi_input_read, 2U },
-#else
-    { WR_MODULE("input"), "open", "i(iii)", os_abi_unsupported, 2U },
-    { WR_MODULE("input"), "get", "i(ii)", os_abi_unsupported, 2U },
-    { WR_MODULE("input"), "read", "i(iii)", os_abi_unsupported, 2U },
-#endif
 
 #if OS_HAS_I2C
     { WR_MODULE("i2c"), "open", "i(iiii)", os_abi_i2c_open, 3U },

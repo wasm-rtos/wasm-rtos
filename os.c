@@ -814,9 +814,6 @@ void os_shutdown(void)
     os_fs_shutdown();
 #endif
     os_drivers_shutdown();
-#if OS_HAS_INPUT
-    os_input_shutdown();
-#endif
 
     memset(&g_os, 0, sizeof(g_os));
 }
@@ -3907,16 +3904,6 @@ uint32_t os_get_next_wakeup_ms(void)
         }
     }
 
-#if OS_HAS_INPUT
-    {
-        /* A held key's long press or next repeat. */
-        uint32_t input_ms = os_input_next_deadline_ms();
-        if (input_ms < next_wakeup_ms)
-        {
-            next_wakeup_ms = input_ms;
-        }
-    }
-#endif
     {
         /* What drivers poll for, such as counters whose hardware cannot watch. */
         uint32_t driver_ms = os_drivers_next_deadline_ms();
@@ -6147,9 +6134,6 @@ static void os_update_time_events(void)
     g_os.processing_time_events = 1U;
     os_process_timers();
     os_drivers_time();
-#if OS_HAS_INPUT
-    os_input_update_time();
-#endif
     os_update_waiting_tasks();
     g_os.processing_time_events = 0U;
     os_clock_rearm();
@@ -7182,10 +7166,6 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target)
         }
         case OS_OBJECT_DRIVER:
             return target->driver->ready != NULL && target->driver->ready(target->id);
-#if OS_HAS_INPUT
-        case OS_OBJECT_INPUT:
-            return os_input_ready(target->id);
-#endif
         default:
             return 0U;
     }

@@ -11,7 +11,6 @@
  *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
- *   OS_HAS_INPUT      buttons, rotary controls, touch and keyboards for programs
  *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
  *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
  *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
@@ -30,9 +29,6 @@
 #endif
 #ifndef OS_FS_TAR
 #define OS_FS_TAR OS_HAS_FS
-#endif
-#ifndef OS_HAS_INPUT
-#define OS_HAS_INPUT 1
 #endif
 #ifndef OS_HAS_I2C
 #define OS_HAS_I2C 1
@@ -895,7 +891,6 @@ OsStatus os_display_add(const char* name, uint32_t display, const OsDisplayInfo*
 /* The id of the task that owns a display, 0 when it is free or unknown. */
 uint32_t os_display_get_owner(uint32_t display);
 
-#if OS_HAS_INPUT
 /*
  * Input devices: a group of buttons, a rotary control such as a bezel or a
  * knob, a touch surface, a keyboard. The platform registers each under the
@@ -953,7 +948,6 @@ OsStatus os_input_touch(uint32_t device, uint32_t contact, uint32_t phase, uint3
 OsStatus os_input_text(uint32_t device, uint32_t code_point);
 /* The id of the task that owns a device, 0 when it is free or unknown. */
 uint32_t os_input_get_owner(uint32_t device);
-#endif
 
 #if OS_HAS_BUSES
 /*

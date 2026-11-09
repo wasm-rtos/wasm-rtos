@@ -19,7 +19,6 @@ typedef enum OsObjectType
     OS_OBJECT_TASK,
     /* An object of a driver (driver.h): the handle and the wait target name the driver. */
     OS_OBJECT_DRIVER,
-    OS_OBJECT_INPUT,
     OS_OBJECT_I2C,
     OS_OBJECT_SPI,
     OS_OBJECT_PWM,
@@ -232,7 +231,6 @@ OsStatus os_display_flush(uint32_t id);
 OsStatus os_display_set_brightness(uint32_t id, uint32_t level);
 void os_display_shutdown(void);
 
-#if OS_HAS_INPUT
 /* ---- Input devices for programs (input.c) --------------------------------- */
 
 #define OS_INPUT_PROP_KIND           1U
@@ -264,7 +262,6 @@ uint8_t os_input_ready(uint32_t id);
 void os_input_update_time(void);
 uint32_t os_input_next_deadline_ms(void);
 void os_input_shutdown(void);
-#endif
 
 #if OS_HAS_I2C
 /* ---- I2C for programs (bus.c) ---------------------------------------------- */
