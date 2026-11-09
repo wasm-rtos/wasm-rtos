@@ -47,7 +47,7 @@ typedef struct OsWaitTarget
  * success, a negative ABI error otherwise).
  */
 OsStatus os_guest_begin(uint32_t* raw_return);
-M3Result os_guest_end(void);
+WmResult os_guest_end(void);
 /* Address range of the current task's linear memory, or an error. */
 OsStatus os_guest_memory(uint32_t address, uint32_t length, uint8_t** out_memory);
 
@@ -68,12 +68,30 @@ uint64_t os_time_ms64(void);
 /* Program output on fd 1 or 2, from the current task, to the output port. */
 void os_output_write(uint32_t fd, const void* data, uint32_t size);
 
+/*
+ * The host function for an import table entry, made once and kept until
+ * os_shutdown: signature as "i(iI*)" (i i32, I i64, f f32, F f64, * an
+ * address; v for no result).
+ */
+WmResult os_host_function(const char* signature, OsHostImportFunction function, WmFunc** out);
+/* Whether the length bytes at text (not terminated) are the string name. */
+int os_name_is(const char* text, uint32_t length, const char* name);
+/* The current task's WASI arguments; argv[0] is its name when it has none. */
+uint32_t os_guest_args(const char* const** out_argv);
+/* WASI proc_exit: the trap that ends the current task with the code. */
+WmResult os_guest_exit(uint32_t code);
+
 /* Per-task state owned by the ABI layer, released when the task ends. */
 void** os_task_abi_state(OsTaskHandle task);
 
 /* ---- Implemented by abi.c ------------------------------------------------ */
 
-M3Result os_abi_link(IM3Module module);
+/* The ABI call an import names, or *out NULL when it is not one. */
+WmResult os_abi_resolve(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
+                        WmFunc** out);
+/* A WASI call for what nothing else answers (arguments, exit, random, standard streams), or *out NULL. */
+WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
+                             WmFunc** out);
 void os_abi_release_task(OsTaskHandle task);
 /* The ABI's negative error code for a kernel status (0 for OS_STATUS_OK). */
 int32_t os_abi_error(OsStatus status);

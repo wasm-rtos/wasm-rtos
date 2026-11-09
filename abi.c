@@ -11,8 +11,8 @@
 #include "os_internal.h"
 #include "fs.h"
 
-#if defined(d_m3HasWASI) || defined(d_m3HasMetaWASI) || defined(d_m3HasUVWASI)
-#include "wasm3/source/extra/wasi_core.h"
+#if OS_HAS_WASI
+#include "wasi.h"
 #define OS_ABI_HAS_WASI 1
 #endif
 
@@ -388,25 +388,25 @@ static uint64_t os_abi_read_le64(const uint8_t* bytes)
 }
 #endif
 
-#define OS_ABI_UNUSED() (void)runtime; (void)_ctx; (void)_mem
+#define OS_ABI_UNUSED() (void)runtime; (void)os_host_user; (void)os_host_memory
 
 /* ---------------------------------------------------------------------------
  * handle
  * ------------------------------------------------------------------------ */
 
-static m3ApiRawFunction(os_abi_handle_close)
+static OS_HOST_FUNCTION(os_abi_handle_close)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_NONE);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     os_abi_drop(entry);
-    m3ApiReturn(0);
+    OS_HOST_RETURN(0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -436,11 +436,11 @@ static int32_t os_abi_adopt(OsObjectType type, uint32_t id, const char* name, ui
     return os_abi_handle_for_new(type, id);
 }
 
-static m3ApiRawFunction(os_abi_mutex_create)
+static OS_HOST_FUNCTION(os_abi_mutex_create)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
     const char* name = NULL;
     OsMutexHandle mutex = NULL;
     uint32_t id = 0U;
@@ -450,7 +450,7 @@ static m3ApiRawFunction(os_abi_mutex_create)
 
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     if (os_abi_open_named(OS_OBJECT_MUTEX, name, name_length, &id))
     {
@@ -459,59 +459,59 @@ static m3ApiRawFunction(os_abi_mutex_create)
         {
             os_object_release(OS_OBJECT_MUTEX, id);
         }
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     status = os_mutex_create(&mutex);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(os_abi_error(status));
+        OS_HOST_RETURN(os_abi_error(status));
     }
-    m3ApiReturn(os_abi_adopt(OS_OBJECT_MUTEX, os_mutex_get_id(mutex), name, name_length));
+    OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_MUTEX, os_mutex_get_id(mutex), name, name_length));
 }
 
-static m3ApiRawFunction(os_abi_mutex_lock)
+static OS_HOST_FUNCTION(os_abi_mutex_lock)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_MUTEX);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_mutex_lock(os_mutex_find_by_id(entry->id), timeout_ms);
     *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_mutex_unlock)
+static OS_HOST_FUNCTION(os_abi_mutex_unlock)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_MUTEX);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_mutex_unlock(os_mutex_find_by_id(entry->id))));
+    OS_HOST_RETURN(os_abi_error(os_mutex_unlock(os_mutex_find_by_id(entry->id))));
 }
 
-static m3ApiRawFunction(os_abi_semaphore_create)
+static OS_HOST_FUNCTION(os_abi_semaphore_create)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, max_count);
-    m3ApiGetArg(uint32_t, initial_count);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, max_count);
+    OS_HOST_ARG(uint32_t, initial_count);
     const char* name = NULL;
     OsSemaphoreHandle semaphore = NULL;
     uint32_t id = 0U;
@@ -521,75 +521,75 @@ static m3ApiRawFunction(os_abi_semaphore_create)
 
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     if (max_count == 0U || initial_count > max_count || max_count > 0x7FFFFFFFU)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     if (os_abi_open_named(OS_OBJECT_SEMAPHORE, name, name_length, &id))
     {
         if (os_semaphore_get_max_count(os_semaphore_find_by_id(id)) != max_count)
         {
             os_object_release(OS_OBJECT_SEMAPHORE, id);
-            m3ApiReturn(-WR_EMISMATCH);
+            OS_HOST_RETURN(-WR_EMISMATCH);
         }
         result = os_abi_handle_new(OS_OBJECT_SEMAPHORE, id);
         if (result < 0)
         {
             os_object_release(OS_OBJECT_SEMAPHORE, id);
         }
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     status = os_semaphore_create(&semaphore, max_count, initial_count);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(os_abi_error(status));
+        OS_HOST_RETURN(os_abi_error(status));
     }
-    m3ApiReturn(os_abi_adopt(OS_OBJECT_SEMAPHORE, os_semaphore_get_id(semaphore), name, name_length));
+    OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_SEMAPHORE, os_semaphore_get_id(semaphore), name, name_length));
 }
 
-static m3ApiRawFunction(os_abi_semaphore_take)
+static OS_HOST_FUNCTION(os_abi_semaphore_take)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_SEMAPHORE);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_semaphore_take(os_semaphore_find_by_id(entry->id), timeout_ms);
     *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_semaphore_give)
+static OS_HOST_FUNCTION(os_abi_semaphore_give)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_SEMAPHORE);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_semaphore_give(os_semaphore_find_by_id(entry->id))));
+    OS_HOST_RETURN(os_abi_error(os_semaphore_give(os_semaphore_find_by_id(entry->id))));
 }
 
-static m3ApiRawFunction(os_abi_event_create)
+static OS_HOST_FUNCTION(os_abi_event_create)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
     const char* name = NULL;
     OsEventGroupHandle event_group = NULL;
     uint32_t id = 0U;
@@ -599,7 +599,7 @@ static m3ApiRawFunction(os_abi_event_create)
 
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     if (os_abi_open_named(OS_OBJECT_EVENT_GROUP, name, name_length, &id))
     {
@@ -608,14 +608,14 @@ static m3ApiRawFunction(os_abi_event_create)
         {
             os_object_release(OS_OBJECT_EVENT_GROUP, id);
         }
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     status = os_event_group_create(&event_group);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(os_abi_error(status));
+        OS_HOST_RETURN(os_abi_error(status));
     }
-    m3ApiReturn(os_abi_adopt(OS_OBJECT_EVENT_GROUP, os_event_group_get_id(event_group), name, name_length));
+    OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_EVENT_GROUP, os_event_group_get_id(event_group), name, name_length));
 }
 
 static OsEventGroupHandle os_abi_event(int32_t handle)
@@ -624,81 +624,81 @@ static OsEventGroupHandle os_abi_event(int32_t handle)
     return entry != NULL ? os_event_group_find_by_id(entry->id) : NULL;
 }
 
-static m3ApiRawFunction(os_abi_event_set)
+static OS_HOST_FUNCTION(os_abi_event_set)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, bits);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, bits);
     OsEventGroupHandle event_group = os_abi_event(handle);
     OS_ABI_UNUSED();
 
     if (event_group == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if ((bits & ~OS_ABI_EVENT_BITS) != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
-    m3ApiReturn((int32_t)os_event_group_set_bits(event_group, bits));
+    OS_HOST_RETURN((int32_t)os_event_group_set_bits(event_group, bits));
 }
 
-static m3ApiRawFunction(os_abi_event_clear)
+static OS_HOST_FUNCTION(os_abi_event_clear)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, bits);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, bits);
     OsEventGroupHandle event_group = os_abi_event(handle);
     OS_ABI_UNUSED();
 
     if (event_group == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if ((bits & ~OS_ABI_EVENT_BITS) != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
-    m3ApiReturn((int32_t)os_event_group_clear_bits(event_group, bits));
+    OS_HOST_RETURN((int32_t)os_event_group_clear_bits(event_group, bits));
 }
 
-static m3ApiRawFunction(os_abi_event_get)
+static OS_HOST_FUNCTION(os_abi_event_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsEventGroupHandle event_group = os_abi_event(handle);
     OS_ABI_UNUSED();
 
     if (event_group == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn((int32_t)os_event_group_get_bits(event_group));
+    OS_HOST_RETURN((int32_t)os_event_group_get_bits(event_group));
 }
 
-static m3ApiRawFunction(os_abi_event_wait)
+static OS_HOST_FUNCTION(os_abi_event_wait)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, bits);
-    m3ApiGetArg(uint32_t, flags);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, bits);
+    OS_HOST_ARG(uint32_t, flags);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     OsEventGroupHandle event_group = os_abi_event(handle);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (event_group == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (bits == 0U || (bits & ~OS_ABI_EVENT_BITS) != 0U ||
         (flags & ~(WR_SYNC_EVENT_ALL | WR_SYNC_EVENT_CLEAR)) != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_event_group_wait_bits(event_group, bits, (flags & WR_SYNC_EVENT_CLEAR) != 0U,
                                       (flags & WR_SYNC_EVENT_ALL) != 0U, timeout_ms);
@@ -706,13 +706,13 @@ static m3ApiRawFunction(os_abi_event_wait)
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_queue_create)
+static OS_HOST_FUNCTION(os_abi_queue_create)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, item_size);
-    m3ApiGetArg(uint32_t, capacity);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, item_size);
+    OS_HOST_ARG(uint32_t, capacity);
     const char* name = NULL;
     OsQueueHandle queue = NULL;
     uint32_t id = 0U;
@@ -722,11 +722,11 @@ static m3ApiRawFunction(os_abi_queue_create)
 
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     if (item_size == 0U || capacity == 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     if (os_abi_open_named(OS_OBJECT_QUEUE, name, name_length, &id))
     {
@@ -735,21 +735,21 @@ static m3ApiRawFunction(os_abi_queue_create)
             os_queue_get_item_size(queue) != item_size)
         {
             os_object_release(OS_OBJECT_QUEUE, id);
-            m3ApiReturn(-WR_EMISMATCH);
+            OS_HOST_RETURN(-WR_EMISMATCH);
         }
         result = os_abi_handle_new(OS_OBJECT_QUEUE, id);
         if (result < 0)
         {
             os_object_release(OS_OBJECT_QUEUE, id);
         }
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     status = os_queue_create(&queue, item_size, capacity);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(os_abi_error(status));
+        OS_HOST_RETURN(os_abi_error(status));
     }
-    m3ApiReturn(os_abi_adopt(OS_OBJECT_QUEUE, os_queue_get_id(queue), name, name_length));
+    OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_QUEUE, os_queue_get_id(queue), name, name_length));
 }
 
 /* Send or receive one item through guest memory at item_address. */
@@ -783,12 +783,12 @@ static int32_t os_abi_queue_transfer(int32_t handle, uint32_t item_address, uint
     return os_abi_error(status);
 }
 
-static m3ApiRawFunction(os_abi_queue_send)
+static OS_HOST_FUNCTION(os_abi_queue_send)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, item_address);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, item_address);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     int32_t result = 0;
     OS_ABI_UNUSED();
 
@@ -797,12 +797,12 @@ static m3ApiRawFunction(os_abi_queue_send)
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_queue_receive)
+static OS_HOST_FUNCTION(os_abi_queue_receive)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, item_address);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, item_address);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     int32_t result = 0;
     OS_ABI_UNUSED();
 
@@ -821,84 +821,84 @@ static OsTimerHandle os_abi_timer(int32_t handle)
     return entry != NULL ? os_timer_find_by_id(entry->id) : NULL;
 }
 
-static m3ApiRawFunction(os_abi_timer_create)
+static OS_HOST_FUNCTION(os_abi_timer_create)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, period_ms);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, period_ms);
+    OS_HOST_ARG(uint32_t, flags);
     OsTimerHandle timer = NULL;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if ((flags & ~WR_TIMER_PERIODIC) != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     status = os_timer_create_counting(&timer, period_ms, (flags & WR_TIMER_PERIODIC) != 0U);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(os_abi_error(status));
+        OS_HOST_RETURN(os_abi_error(status));
     }
-    m3ApiReturn(os_abi_adopt(OS_OBJECT_TIMER, os_timer_get_id(timer), NULL, 0U));
+    OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_TIMER, os_timer_get_id(timer), NULL, 0U));
 }
 
-static m3ApiRawFunction(os_abi_timer_start)
+static OS_HOST_FUNCTION(os_abi_timer_start)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsTimerHandle timer = os_abi_timer(handle);
     OS_ABI_UNUSED();
 
-    m3ApiReturn(timer != NULL ? os_abi_error(os_timer_start(timer)) : -WR_EBADH);
+    OS_HOST_RETURN(timer != NULL ? os_abi_error(os_timer_start(timer)) : -WR_EBADH);
 }
 
-static m3ApiRawFunction(os_abi_timer_stop)
+static OS_HOST_FUNCTION(os_abi_timer_stop)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsTimerHandle timer = os_abi_timer(handle);
     OS_ABI_UNUSED();
 
-    m3ApiReturn(timer != NULL ? os_abi_error(os_timer_stop(timer)) : -WR_EBADH);
+    OS_HOST_RETURN(timer != NULL ? os_abi_error(os_timer_stop(timer)) : -WR_EBADH);
 }
 
-static m3ApiRawFunction(os_abi_timer_set_period)
+static OS_HOST_FUNCTION(os_abi_timer_set_period)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, period_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, period_ms);
     OsTimerHandle timer = os_abi_timer(handle);
     OS_ABI_UNUSED();
 
-    m3ApiReturn(timer != NULL ? os_abi_error(os_timer_change_period(timer, period_ms)) : -WR_EBADH);
+    OS_HOST_RETURN(timer != NULL ? os_abi_error(os_timer_change_period(timer, period_ms)) : -WR_EBADH);
 }
 
-static m3ApiRawFunction(os_abi_timer_read)
+static OS_HOST_FUNCTION(os_abi_timer_read)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsTimerHandle timer = os_abi_timer(handle);
     uint32_t expirations = 0U;
     OS_ABI_UNUSED();
 
     if (timer == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     expirations = os_timer_take_expirations(timer);
-    m3ApiReturn((int32_t)(expirations > 0x7FFFFFFFU ? 0x7FFFFFFFU : expirations));
+    OS_HOST_RETURN((int32_t)(expirations > 0x7FFFFFFFU ? 0x7FFFFFFFU : expirations));
 }
 
 /* ---------------------------------------------------------------------------
  * wait
  * ------------------------------------------------------------------------ */
 
-static m3ApiRawFunction(os_abi_wait_any)
+static OS_HOST_FUNCTION(os_abi_wait_any)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, handles_address);
-    m3ApiGetArg(uint32_t, count);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, handles_address);
+    OS_HOST_ARG(uint32_t, count);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     OsWaitTarget targets[OS_ABI_MAX_HANDLES];
     uint8_t* handles = NULL;
     uint32_t index = 0U;
@@ -908,11 +908,11 @@ static m3ApiRawFunction(os_abi_wait_any)
 
     if (count == 0U || count > OS_ABI_MAX_HANDLES)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     if (os_guest_memory(handles_address, count * 4U, &handles) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
@@ -922,14 +922,14 @@ static m3ApiRawFunction(os_abi_wait_any)
             entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE ||
             entry->type == OS_OBJECT_DAC)
         {
-            m3ApiReturn(-WR_EBADH);
+            OS_HOST_RETURN(-WR_EBADH);
         }
         targets[index].type = entry->type;
         targets[index].id = entry->id;
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_wait_any(targets, count, timeout_ms, &ready);
     *raw_return = status == OS_STATUS_OK ? (int32_t)ready : os_abi_error(status);
@@ -1008,15 +1008,15 @@ static int32_t os_abi_child_handle(OsStatus status, OsTaskHandle child)
     return handle;
 }
 
-static m3ApiRawFunction(os_abi_proc_spawn)
+static OS_HOST_FUNCTION(os_abi_proc_spawn)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, bytes_address);
-    m3ApiGetArg(uint32_t, bytes_length);
-    m3ApiGetArg(uint32_t, args_address);
-    m3ApiGetArg(uint32_t, argc);
-    m3ApiGetArg(uint32_t, priority);
-    m3ApiGetArg(uint32_t, stack_size);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bytes_address);
+    OS_HOST_ARG(uint32_t, bytes_length);
+    OS_HOST_ARG(uint32_t, args_address);
+    OS_HOST_ARG(uint32_t, argc);
+    OS_HOST_ARG(uint32_t, priority);
+    OS_HOST_ARG(uint32_t, stack_size);
     const char* args[OS_ABI_ARGS_MAX];
     char* storage = NULL;
     uint8_t* bytes = NULL;
@@ -1027,32 +1027,32 @@ static m3ApiRawFunction(os_abi_proc_spawn)
 
     if (bytes_length == 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     if (os_guest_memory(bytes_address, bytes_length, &bytes) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     result = os_abi_read_args(args_address, argc, &storage, args);
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     status = os_task_spawn(&child, bytes, bytes_length, argc > 0U ? args : NULL, argc, priority, stack_size);
     free(storage);
-    m3ApiReturn(os_abi_child_handle(status, child));
+    OS_HOST_RETURN(os_abi_child_handle(status, child));
 }
 
 #if OS_HAS_FS
-static m3ApiRawFunction(os_abi_proc_spawn_path)
+static OS_HOST_FUNCTION(os_abi_proc_spawn_path)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, path_address);
-    m3ApiGetArg(uint32_t, path_length);
-    m3ApiGetArg(uint32_t, args_address);
-    m3ApiGetArg(uint32_t, argc);
-    m3ApiGetArg(uint32_t, priority);
-    m3ApiGetArg(uint32_t, stack_size);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, path_address);
+    OS_HOST_ARG(uint32_t, path_length);
+    OS_HOST_ARG(uint32_t, args_address);
+    OS_HOST_ARG(uint32_t, argc);
+    OS_HOST_ARG(uint32_t, priority);
+    OS_HOST_ARG(uint32_t, stack_size);
     const char* args[OS_ABI_ARGS_MAX];
     char path[OS_ABI_PATH_MAX + 1U];
     char* storage = NULL;
@@ -1064,30 +1064,30 @@ static m3ApiRawFunction(os_abi_proc_spawn_path)
 
     if (path_length == 0U || path_length > OS_ABI_PATH_MAX)
     {
-        m3ApiReturn(path_length == 0U ? -WR_EINVAL : -WR_ETOOLONG);
+        OS_HOST_RETURN(path_length == 0U ? -WR_EINVAL : -WR_ETOOLONG);
     }
     if (os_guest_memory(path_address, path_length, &text) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     memcpy(path, text, path_length);
     path[path_length] = '\0';
     result = os_abi_read_args(args_address, argc, &storage, args);
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     status = os_task_spawn_path(&child, path, argc > 0U ? args : NULL, argc, priority, stack_size);
     free(storage);
-    m3ApiReturn(os_abi_child_handle(status, child));
+    OS_HOST_RETURN(os_abi_child_handle(status, child));
 }
 #endif
 
-static m3ApiRawFunction(os_abi_proc_wait)
+static OS_HOST_FUNCTION(os_abi_proc_wait)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_TASK);
     int32_t result = 0;
     OsStatus status = OS_STATUS_OK;
@@ -1095,50 +1095,50 @@ static m3ApiRawFunction(os_abi_proc_wait)
 
     if (entry == NULL || !os_child_is_mine(entry->id))
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_child_wait(entry->id, timeout_ms, &result);
     *raw_return = status == OS_STATUS_OK ? result : os_abi_error(status);
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_proc_kill)
+static OS_HOST_FUNCTION(os_abi_proc_kill)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_TASK);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_child_kill(entry->id)));
+    OS_HOST_RETURN(os_abi_error(os_child_kill(entry->id)));
 }
 
 #endif
 
-static m3ApiRawFunction(os_abi_proc_self)
+static OS_HOST_FUNCTION(os_abi_proc_self)
 {
-    m3ApiReturnType(int32_t);
-    (void)_sp;
+    OS_HOST_RETURNS(int32_t);
+    (void)os_host_slot;
     OS_ABI_UNUSED();
-    m3ApiReturn((int32_t)os_task_get_id(os_task_get_current()));
+    OS_HOST_RETURN((int32_t)os_task_get_id(os_task_get_current()));
 }
 
-static m3ApiRawFunction(os_abi_proc_parent)
+static OS_HOST_FUNCTION(os_abi_proc_parent)
 {
-    m3ApiReturnType(int32_t);
-    (void)_sp;
+    OS_HOST_RETURNS(int32_t);
+    (void)os_host_slot;
     OS_ABI_UNUSED();
 #if OS_HAS_PROCESSES
-    m3ApiReturn((int32_t)os_current_parent_id());
+    OS_HOST_RETURN((int32_t)os_current_parent_id());
 #else
-    m3ApiReturn(0);
+    OS_HOST_RETURN(0);
 #endif
 }
 
@@ -1147,12 +1147,12 @@ static m3ApiRawFunction(os_abi_proc_parent)
  * ------------------------------------------------------------------------ */
 
 #if OS_HAS_GPIO
-static m3ApiRawFunction(os_abi_gpio_open)
+static OS_HOST_FUNCTION(os_abi_gpio_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
     const char* name = NULL;
     uint32_t id = 0U;
     int32_t handle = 0;
@@ -1162,44 +1162,44 @@ static m3ApiRawFunction(os_abi_gpio_open)
     handle = os_abi_read_name(name_address, name_length, &name);
     if (handle < 0)
     {
-        m3ApiReturn(handle);
+        OS_HOST_RETURN(handle);
     }
     if (name == NULL)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     status = os_gpio_open(name, name_length, flags, &id);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
     }
     handle = os_abi_handle_new(OS_OBJECT_GPIO, id);
     if (handle < 0)
     {
         os_gpio_close(id);
     }
-    m3ApiReturn(handle);
+    OS_HOST_RETURN(handle);
 }
 
-static m3ApiRawFunction(os_abi_gpio_set)
+static OS_HOST_FUNCTION(os_abi_gpio_set)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, level);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, level);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_gpio_set(entry->id, level)));
+    OS_HOST_RETURN(os_abi_error(os_gpio_set(entry->id, level)));
 }
 
-static m3ApiRawFunction(os_abi_gpio_get)
+static OS_HOST_FUNCTION(os_abi_gpio_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
     uint32_t level = 0U;
     OsStatus status = OS_STATUS_OK;
@@ -1207,56 +1207,56 @@ static m3ApiRawFunction(os_abi_gpio_get)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     status = os_gpio_get(entry->id, &level);
-    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)level : os_abi_error(status));
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)level : os_abi_error(status));
 }
 
-static m3ApiRawFunction(os_abi_gpio_set_mode)
+static OS_HOST_FUNCTION(os_abi_gpio_set_mode)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, flags);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_gpio_set_mode(entry->id, flags)));
+    OS_HOST_RETURN(os_abi_error(os_gpio_set_mode(entry->id, flags)));
 }
 
-static m3ApiRawFunction(os_abi_gpio_watch)
+static OS_HOST_FUNCTION(os_abi_gpio_watch)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, edges);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, edges);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_gpio_watch(entry->id, edges)));
+    OS_HOST_RETURN(os_abi_error(os_gpio_watch(entry->id, edges)));
 }
 
-static m3ApiRawFunction(os_abi_gpio_events)
+static OS_HOST_FUNCTION(os_abi_gpio_events)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
     uint32_t events = 0U;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     events = os_gpio_take_events(entry->id);
-    m3ApiReturn((int32_t)(events > 0x7FFFFFFFU ? 0x7FFFFFFFU : events));
+    OS_HOST_RETURN((int32_t)(events > 0x7FFFFFFFU ? 0x7FFFFFFFU : events));
 }
 #endif
 
@@ -1265,12 +1265,12 @@ static m3ApiRawFunction(os_abi_gpio_events)
  * ------------------------------------------------------------------------ */
 
 #if OS_HAS_DISPLAY
-static m3ApiRawFunction(os_abi_display_open)
+static OS_HOST_FUNCTION(os_abi_display_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
     const char* name = NULL;
     uint32_t id = 0U;
     int32_t handle = 0;
@@ -1280,30 +1280,30 @@ static m3ApiRawFunction(os_abi_display_open)
     handle = os_abi_read_name(name_address, name_length, &name);
     if (handle < 0)
     {
-        m3ApiReturn(handle);
+        OS_HOST_RETURN(handle);
     }
     if (name == NULL || flags != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     status = os_display_open(name, name_length, &id);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
     }
     handle = os_abi_handle_new(OS_OBJECT_DISPLAY, id);
     if (handle < 0)
     {
         os_display_close(id);
     }
-    m3ApiReturn(handle);
+    OS_HOST_RETURN(handle);
 }
 
-static m3ApiRawFunction(os_abi_display_get)
+static OS_HOST_FUNCTION(os_abi_display_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
     uint32_t value = 0U;
     OsStatus status = OS_STATUS_OK;
@@ -1311,86 +1311,86 @@ static m3ApiRawFunction(os_abi_display_get)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     status = os_display_get(entry->id, property, &value);
-    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
 }
 
-static m3ApiRawFunction(os_abi_display_write)
+static OS_HOST_FUNCTION(os_abi_display_write)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, x);
-    m3ApiGetArg(uint32_t, y);
-    m3ApiGetArg(uint32_t, width);
-    m3ApiGetArg(uint32_t, height);
-    m3ApiGetArg(uint32_t, format);
-    m3ApiGetArg(uint32_t, pixels_address);
-    m3ApiGetArg(uint32_t, length);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, x);
+    OS_HOST_ARG(uint32_t, y);
+    OS_HOST_ARG(uint32_t, width);
+    OS_HOST_ARG(uint32_t, height);
+    OS_HOST_ARG(uint32_t, format);
+    OS_HOST_ARG(uint32_t, pixels_address);
+    OS_HOST_ARG(uint32_t, length);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
     uint8_t* pixels = NULL;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (length > 0U && os_guest_memory(pixels_address, length, &pixels) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     /* The port reads the program's memory in place, during this call only. */
-    m3ApiReturn(os_abi_error(os_display_write(entry->id, x, y, width, height, format, pixels, length)));
+    OS_HOST_RETURN(os_abi_error(os_display_write(entry->id, x, y, width, height, format, pixels, length)));
 }
 
-static m3ApiRawFunction(os_abi_display_fill)
+static OS_HOST_FUNCTION(os_abi_display_fill)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, x);
-    m3ApiGetArg(uint32_t, y);
-    m3ApiGetArg(uint32_t, width);
-    m3ApiGetArg(uint32_t, height);
-    m3ApiGetArg(uint32_t, format);
-    m3ApiGetArg(uint32_t, color);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, x);
+    OS_HOST_ARG(uint32_t, y);
+    OS_HOST_ARG(uint32_t, width);
+    OS_HOST_ARG(uint32_t, height);
+    OS_HOST_ARG(uint32_t, format);
+    OS_HOST_ARG(uint32_t, color);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_display_fill(entry->id, x, y, width, height, format, color)));
+    OS_HOST_RETURN(os_abi_error(os_display_fill(entry->id, x, y, width, height, format, color)));
 }
 
-static m3ApiRawFunction(os_abi_display_flush)
+static OS_HOST_FUNCTION(os_abi_display_flush)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_display_flush(entry->id)));
+    OS_HOST_RETURN(os_abi_error(os_display_flush(entry->id)));
 }
 
-static m3ApiRawFunction(os_abi_display_set_brightness)
+static OS_HOST_FUNCTION(os_abi_display_set_brightness)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, level);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, level);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_display_set_brightness(entry->id, level)));
+    OS_HOST_RETURN(os_abi_error(os_display_set_brightness(entry->id, level)));
 }
 #endif
 
@@ -1399,12 +1399,12 @@ static m3ApiRawFunction(os_abi_display_set_brightness)
  * ------------------------------------------------------------------------ */
 
 #if OS_HAS_INPUT
-static m3ApiRawFunction(os_abi_input_open)
+static OS_HOST_FUNCTION(os_abi_input_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
     const char* name = NULL;
     uint32_t id = 0U;
     int32_t handle = 0;
@@ -1414,30 +1414,30 @@ static m3ApiRawFunction(os_abi_input_open)
     handle = os_abi_read_name(name_address, name_length, &name);
     if (handle < 0)
     {
-        m3ApiReturn(handle);
+        OS_HOST_RETURN(handle);
     }
     if (name == NULL || flags != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     status = os_input_open(name, name_length, &id);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
     }
     handle = os_abi_handle_new(OS_OBJECT_INPUT, id);
     if (handle < 0)
     {
         os_input_close(id);
     }
-    m3ApiReturn(handle);
+    OS_HOST_RETURN(handle);
 }
 
-static m3ApiRawFunction(os_abi_input_get)
+static OS_HOST_FUNCTION(os_abi_input_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_INPUT);
     uint32_t value = 0U;
     OsStatus status = OS_STATUS_OK;
@@ -1445,32 +1445,32 @@ static m3ApiRawFunction(os_abi_input_get)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     status = os_input_get(entry->id, property, &value);
-    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
 }
 
-static m3ApiRawFunction(os_abi_input_read)
+static OS_HOST_FUNCTION(os_abi_input_read)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, events_address);
-    m3ApiGetArg(uint32_t, max_events);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, events_address);
+    OS_HOST_ARG(uint32_t, max_events);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_INPUT);
     uint8_t* events = NULL;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (max_events > UINT32_MAX / OS_INPUT_EVENT_SIZE ||
         os_guest_memory(events_address, max_events * OS_INPUT_EVENT_SIZE, &events) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
-    m3ApiReturn((int32_t)os_input_read(entry->id, events, max_events));
+    OS_HOST_RETURN((int32_t)os_input_read(entry->id, events, max_events));
 }
 #endif
 
@@ -1492,13 +1492,13 @@ static int32_t os_abi_bus_data(uint32_t address, uint32_t length, uint8_t** out_
 #endif
 
 #if OS_HAS_I2C
-static m3ApiRawFunction(os_abi_i2c_open)
+static OS_HOST_FUNCTION(os_abi_i2c_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, bus_address);
-    m3ApiGetArg(uint32_t, bus_length);
-    m3ApiGetArg(uint32_t, address);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint32_t, address);
+    OS_HOST_ARG(uint32_t, flags);
     const char* bus = NULL;
     uint32_t id = 0U;
     int32_t handle = 0;
@@ -1508,32 +1508,32 @@ static m3ApiRawFunction(os_abi_i2c_open)
     handle = os_abi_read_name(bus_address, bus_length, &bus);
     if (handle < 0)
     {
-        m3ApiReturn(handle);
+        OS_HOST_RETURN(handle);
     }
     if (bus == NULL || flags != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     status = os_i2c_open(bus, bus_length, address, &id);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
     }
     handle = os_abi_handle_new(OS_OBJECT_I2C, id);
     if (handle < 0)
     {
         os_i2c_close(id);
     }
-    m3ApiReturn(handle);
+    OS_HOST_RETURN(handle);
 }
 
 /* ops: count records of 12 bytes, u32 kind, u32 data, u32 length. */
-static m3ApiRawFunction(os_abi_i2c_transaction)
+static OS_HOST_FUNCTION(os_abi_i2c_transaction)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, ops_address);
-    m3ApiGetArg(uint32_t, count);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, ops_address);
+    OS_HOST_ARG(uint32_t, count);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_I2C);
     OsI2cOp ops[OS_BUS_MAX_OPS];
     uint8_t* records = NULL;
@@ -1542,15 +1542,15 @@ static m3ApiRawFunction(os_abi_i2c_transaction)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (count > OS_BUS_MAX_OPS)
     {
-        m3ApiReturn(-WR_ELIMIT);
+        OS_HOST_RETURN(-WR_ELIMIT);
     }
     if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
@@ -1559,11 +1559,11 @@ static m3ApiRawFunction(os_abi_i2c_transaction)
         uint32_t kind = os_abi_read_le32(record);
         if (result < 0)
         {
-            m3ApiReturn(result);
+            OS_HOST_RETURN(result);
         }
         if (kind != OS_I2C_WRITE && kind != OS_I2C_READ)
         {
-            m3ApiReturn(-WR_EINVAL);
+            OS_HOST_RETURN(-WR_EINVAL);
         }
         ops[index].kind = (uint8_t)kind;
         ops[index].length = os_abi_read_le32(record + 8U);
@@ -1571,7 +1571,7 @@ static m3ApiRawFunction(os_abi_i2c_transaction)
     /* A port working in the background leaves the program waiting; the end writes the result. */
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     *raw_return = os_abi_error(os_i2c_transaction(entry->id, ops, count));
     return os_guest_end();
@@ -1579,15 +1579,15 @@ static m3ApiRawFunction(os_abi_i2c_transaction)
 #endif
 
 #if OS_HAS_SPI
-static m3ApiRawFunction(os_abi_spi_open)
+static OS_HOST_FUNCTION(os_abi_spi_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, bus_address);
-    m3ApiGetArg(uint32_t, bus_length);
-    m3ApiGetArg(uint32_t, cs_address);
-    m3ApiGetArg(uint32_t, cs_length);
-    m3ApiGetArg(uint32_t, mode);
-    m3ApiGetArg(uint32_t, frequency_hz);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint32_t, cs_address);
+    OS_HOST_ARG(uint32_t, cs_length);
+    OS_HOST_ARG(uint32_t, mode);
+    OS_HOST_ARG(uint32_t, frequency_hz);
     const char* bus = NULL;
     const char* cs = NULL;
     uint32_t id = 0U;
@@ -1602,32 +1602,32 @@ static m3ApiRawFunction(os_abi_spi_open)
     }
     if (handle < 0)
     {
-        m3ApiReturn(handle);
+        OS_HOST_RETURN(handle);
     }
     if (bus == NULL)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     status = os_spi_open(bus, bus_length, cs, cs_length, mode, frequency_hz, &id);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
     }
     handle = os_abi_handle_new(OS_OBJECT_SPI, id);
     if (handle < 0)
     {
         os_spi_close(id);
     }
-    m3ApiReturn(handle);
+    OS_HOST_RETURN(handle);
 }
 
 /* ops: count records of 16 bytes, u32 kind, u32 write, u32 read, u32 length. */
-static m3ApiRawFunction(os_abi_spi_transaction)
+static OS_HOST_FUNCTION(os_abi_spi_transaction)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, ops_address);
-    m3ApiGetArg(uint32_t, count);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, ops_address);
+    OS_HOST_ARG(uint32_t, count);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_SPI);
     OsSpiOp ops[OS_BUS_MAX_OPS];
     uint8_t* records = NULL;
@@ -1636,19 +1636,19 @@ static m3ApiRawFunction(os_abi_spi_transaction)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (count > OS_BUS_MAX_OPS)
     {
-        m3ApiReturn(-WR_ELIMIT);
+        OS_HOST_RETURN(-WR_ELIMIT);
     }
     if (count == 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     if (os_guest_memory(ops_address, count * 16U, &records) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
@@ -1661,7 +1661,7 @@ static m3ApiRawFunction(os_abi_spi_transaction)
 
         if (kind < OS_SPI_WRITE || kind > OS_SPI_DELAY_US)
         {
-            m3ApiReturn(-WR_EINVAL);
+            OS_HOST_RETURN(-WR_EINVAL);
         }
         if (kind == OS_SPI_WRITE || kind == OS_SPI_TRANSFER)
         {
@@ -1673,7 +1673,7 @@ static m3ApiRawFunction(os_abi_spi_transaction)
         }
         if (result < 0)
         {
-            m3ApiReturn(result);
+            OS_HOST_RETURN(result);
         }
         ops[index].kind = (uint8_t)kind;
         ops[index].write = write;
@@ -1682,7 +1682,7 @@ static m3ApiRawFunction(os_abi_spi_transaction)
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     *raw_return = os_abi_error(os_spi_transaction(entry->id, ops, count));
     return os_guest_end();
@@ -1739,76 +1739,76 @@ static OsStatus os_abi_adc_opener(const char* name, uint32_t length, void* conte
     return os_adc_open(name, length, out_id);
 }
 
-static m3ApiRawFunction(os_abi_adc_open)
+static OS_HOST_FUNCTION(os_abi_adc_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
     OS_ABI_UNUSED();
 
     if (flags != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
-    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_ADC, os_abi_adc_opener, NULL, NULL));
+    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_ADC, os_abi_adc_opener, NULL, NULL));
 }
 
-static m3ApiRawFunction(os_abi_adc_read)
+static OS_HOST_FUNCTION(os_abi_adc_read)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
     uint32_t value = 0U;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     {
         /* The call fills value: it must happen before value is read. */
         OsStatus status = os_adc_read(entry->id, &value);
-        m3ApiReturn(os_abi_property(status, value));
+        OS_HOST_RETURN(os_abi_property(status, value));
     }
 }
 
-static m3ApiRawFunction(os_abi_adc_read_mv)
+static OS_HOST_FUNCTION(os_abi_adc_read_mv)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
     uint32_t value = 0U;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     {
         /* The call fills value: it must happen before value is read. */
         OsStatus status = os_adc_read_mv(entry->id, &value);
-        m3ApiReturn(os_abi_property(status, value));
+        OS_HOST_RETURN(os_abi_property(status, value));
     }
 }
 
-static m3ApiRawFunction(os_abi_adc_get)
+static OS_HOST_FUNCTION(os_abi_adc_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
     uint32_t value = 0U;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     {
         /* The call fills value: it must happen before value is read. */
         OsStatus status = os_adc_get(entry->id, property, &value);
-        m3ApiReturn(os_abi_property(status, value));
+        OS_HOST_RETURN(os_abi_property(status, value));
     }
 }
 #endif
@@ -1826,66 +1826,66 @@ static OsStatus os_abi_pwm_opener(const char* name, uint32_t length, void* conte
     return os_pwm_open(name, length, open->frequency_hz, open->flags, out_id);
 }
 
-static m3ApiRawFunction(os_abi_pwm_open)
+static OS_HOST_FUNCTION(os_abi_pwm_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, frequency_hz);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, frequency_hz);
+    OS_HOST_ARG(uint32_t, flags);
     OsAbiPwmOpen open = { frequency_hz, flags };
     OS_ABI_UNUSED();
 
-    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_PWM, os_abi_pwm_opener, &open, os_pwm_close));
+    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_PWM, os_abi_pwm_opener, &open, os_pwm_close));
 }
 
-static m3ApiRawFunction(os_abi_pwm_set_duty)
+static OS_HOST_FUNCTION(os_abi_pwm_set_duty)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, duty);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, duty);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_pwm_set_duty(entry->id, duty)));
+    OS_HOST_RETURN(os_abi_error(os_pwm_set_duty(entry->id, duty)));
 }
 
-static m3ApiRawFunction(os_abi_pwm_set_frequency)
+static OS_HOST_FUNCTION(os_abi_pwm_set_frequency)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, frequency_hz);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, frequency_hz);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_pwm_set_frequency(entry->id, frequency_hz)));
+    OS_HOST_RETURN(os_abi_error(os_pwm_set_frequency(entry->id, frequency_hz)));
 }
 
-static m3ApiRawFunction(os_abi_pwm_get)
+static OS_HOST_FUNCTION(os_abi_pwm_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PWM);
     uint32_t value = 0U;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     {
         /* The call fills value: it must happen before value is read. */
         OsStatus status = os_pwm_get(entry->id, property, &value);
-        m3ApiReturn(os_abi_property(status, value));
+        OS_HOST_RETURN(os_abi_property(status, value));
     }
 }
 #endif
@@ -1903,47 +1903,47 @@ static OsStatus os_abi_uart_opener(const char* name, uint32_t length, void* cont
     return os_uart_open(name, length, open->baud, open->format, out_id);
 }
 
-static m3ApiRawFunction(os_abi_uart_open)
+static OS_HOST_FUNCTION(os_abi_uart_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, baud);
-    m3ApiGetArg(uint32_t, format);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, baud);
+    OS_HOST_ARG(uint32_t, format);
     OsAbiUartOpen open = { baud, format };
     OS_ABI_UNUSED();
 
-    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_UART, os_abi_uart_opener, &open,
+    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_UART, os_abi_uart_opener, &open,
                                    os_uart_close));
 }
 
-static m3ApiRawFunction(os_abi_uart_read)
+static OS_HOST_FUNCTION(os_abi_uart_read)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, buffer_address);
-    m3ApiGetArg(uint32_t, max);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, buffer_address);
+    OS_HOST_ARG(uint32_t, max);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
     uint8_t* buffer = NULL;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (max > 0x7FFFFFFFU || (max > 0U && os_guest_memory(buffer_address, max, &buffer) != OS_STATUS_OK))
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
-    m3ApiReturn((int32_t)os_uart_read(entry->id, buffer, max));
+    OS_HOST_RETURN((int32_t)os_uart_read(entry->id, buffer, max));
 }
 
-static m3ApiRawFunction(os_abi_uart_write)
+static OS_HOST_FUNCTION(os_abi_uart_write)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, data_address);
-    m3ApiGetArg(uint32_t, length);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, data_address);
+    OS_HOST_ARG(uint32_t, length);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
     uint8_t* data = NULL;
     uint32_t written = 0U;
@@ -1952,55 +1952,55 @@ static m3ApiRawFunction(os_abi_uart_write)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_uart_write(entry->id, data, length, &written);
-    m3ApiReturn(status == OS_STATUS_OK ? (int32_t)written : os_abi_error(status));
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)written : os_abi_error(status));
 }
 
-static m3ApiRawFunction(os_abi_uart_wait_writable)
+static OS_HOST_FUNCTION(os_abi_uart_wait_writable)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_uart_wait_writable(entry->id, timeout_ms);
     *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_uart_get)
+static OS_HOST_FUNCTION(os_abi_uart_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
     uint32_t value = 0U;
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     {
         /* The call fills value: it must happen before value is read. */
         OsStatus status = os_uart_get(entry->id, property, &value);
-        m3ApiReturn(os_abi_property(status, value));
+        OS_HOST_RETURN(os_abi_property(status, value));
     }
 }
 #endif
@@ -2015,15 +2015,15 @@ static OsStatus os_abi_pulse_opener(const char* name, uint32_t length, void* con
     return os_pulse_open(name, length, *(const uint32_t*)context, out_id);
 }
 
-static m3ApiRawFunction(os_abi_pulse_open)
+static OS_HOST_FUNCTION(os_abi_pulse_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
     OS_ABI_UNUSED();
 
-    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_PULSE, os_abi_pulse_opener, &flags,
+    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_PULSE, os_abi_pulse_opener, &flags,
                                    os_pulse_close));
 }
 
@@ -2044,13 +2044,13 @@ static int32_t os_abi_pulse_items(uint32_t address, uint32_t count, uint32_t** o
     return 0;
 }
 
-static m3ApiRawFunction(os_abi_pulse_send)
+static OS_HOST_FUNCTION(os_abi_pulse_send)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, items_address);
-    m3ApiGetArg(uint32_t, count);
-    m3ApiGetArg(uint32_t, carrier_hz);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, items_address);
+    OS_HOST_ARG(uint32_t, count);
+    OS_HOST_ARG(uint32_t, carrier_hz);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
     uint32_t* items = NULL;
     int32_t result = 0;
@@ -2058,31 +2058,31 @@ static m3ApiRawFunction(os_abi_pulse_send)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     result = os_abi_pulse_items(items_address, count, &items);
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     *raw_return = os_abi_error(os_pulse_send(entry->id, items, count, carrier_hz));
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_pulse_send_bits)
+static OS_HOST_FUNCTION(os_abi_pulse_send_bits)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, data_address);
-    m3ApiGetArg(uint32_t, length);
-    m3ApiGetArg(uint32_t, zero_high_ns);
-    m3ApiGetArg(uint32_t, zero_low_ns);
-    m3ApiGetArg(uint32_t, one_high_ns);
-    m3ApiGetArg(uint32_t, one_low_ns);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, data_address);
+    OS_HOST_ARG(uint32_t, length);
+    OS_HOST_ARG(uint32_t, zero_high_ns);
+    OS_HOST_ARG(uint32_t, zero_low_ns);
+    OS_HOST_ARG(uint32_t, one_high_ns);
+    OS_HOST_ARG(uint32_t, one_low_ns);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
     uint32_t timing[4] = { zero_high_ns, zero_low_ns, one_high_ns, one_low_ns };
     uint8_t* data = NULL;
@@ -2090,28 +2090,28 @@ static m3ApiRawFunction(os_abi_pulse_send_bits)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     *raw_return = os_abi_error(os_pulse_send_bits(entry->id, data, length, timing));
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_pulse_receive)
+static OS_HOST_FUNCTION(os_abi_pulse_receive)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, items_address);
-    m3ApiGetArg(uint32_t, max);
-    m3ApiGetArg(uint32_t, idle_ns);
-    m3ApiGetArg(uint32_t, timeout_ms);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, items_address);
+    OS_HOST_ARG(uint32_t, max);
+    OS_HOST_ARG(uint32_t, idle_ns);
+    OS_HOST_ARG(uint32_t, timeout_ms);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
     uint32_t* items = NULL;
     uint32_t count = 0U;
@@ -2121,16 +2121,16 @@ static m3ApiRawFunction(os_abi_pulse_receive)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     result = os_abi_pulse_items(items_address, max, &items);
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     /* Done at once: the count now; in the background, the wakeup writes it. */
     status = os_pulse_receive(entry->id, items, max, idle_ns, timeout_ms, &count);
@@ -2138,11 +2138,11 @@ static m3ApiRawFunction(os_abi_pulse_receive)
     return os_guest_end();
 }
 
-static m3ApiRawFunction(os_abi_pulse_get)
+static OS_HOST_FUNCTION(os_abi_pulse_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
     uint32_t value = 0U;
     OsStatus status = OS_STATUS_OK;
@@ -2150,10 +2150,10 @@ static m3ApiRawFunction(os_abi_pulse_get)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     status = os_pulse_get(entry->id, property, &value);
-    m3ApiReturn(os_abi_property(status, value));
+    OS_HOST_RETURN(os_abi_property(status, value));
 }
 #endif
 
@@ -2162,13 +2162,13 @@ static m3ApiRawFunction(os_abi_pulse_get)
  * ------------------------------------------------------------------------ */
 
 #if OS_HAS_ONEWIRE
-static m3ApiRawFunction(os_abi_onewire_open)
+static OS_HOST_FUNCTION(os_abi_onewire_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, bus_address);
-    m3ApiGetArg(uint32_t, bus_length);
-    m3ApiGetArg(uint64_t, rom);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint64_t, rom);
+    OS_HOST_ARG(uint32_t, flags);
     const char* bus = NULL;
     uint32_t id = 0U;
     int32_t handle = 0;
@@ -2178,32 +2178,32 @@ static m3ApiRawFunction(os_abi_onewire_open)
     handle = os_abi_read_name(bus_address, bus_length, &bus);
     if (handle < 0)
     {
-        m3ApiReturn(handle);
+        OS_HOST_RETURN(handle);
     }
     if (bus == NULL || flags != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     status = os_onewire_open(bus, bus_length, rom, &id);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
     }
     handle = os_abi_handle_new(OS_OBJECT_ONEWIRE, id);
     if (handle < 0)
     {
         os_onewire_close(id);
     }
-    m3ApiReturn(handle);
+    OS_HOST_RETURN(handle);
 }
 
 /* ops: count records of 12 bytes, u32 kind, u32 data, u32 length (bits for the _BITS kinds, ms for POWER). */
-static m3ApiRawFunction(os_abi_onewire_transaction)
+static OS_HOST_FUNCTION(os_abi_onewire_transaction)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, ops_address);
-    m3ApiGetArg(uint32_t, count);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, ops_address);
+    OS_HOST_ARG(uint32_t, count);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ONEWIRE);
     OsOneWireOp ops[OS_BUS_MAX_OPS];
     uint8_t* records = NULL;
@@ -2212,15 +2212,15 @@ static m3ApiRawFunction(os_abi_onewire_transaction)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (count > OS_BUS_MAX_OPS)
     {
-        m3ApiReturn(-WR_ELIMIT);
+        OS_HOST_RETURN(-WR_ELIMIT);
     }
     if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
@@ -2235,12 +2235,12 @@ static m3ApiRawFunction(os_abi_onewire_transaction)
         if (kind < OS_ONEWIRE_WRITE || kind > OS_ONEWIRE_RESET ||
             ((kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS) && length > 0xFFFFFFF8U))
         {
-            m3ApiReturn(-WR_EINVAL);
+            OS_HOST_RETURN(-WR_EINVAL);
         }
         result = os_abi_bus_data(os_abi_read_le32(record + 4U), bytes, &ops[index].data);
         if (result < 0)
         {
-            m3ApiReturn(result);
+            OS_HOST_RETURN(result);
         }
         ops[index].kind = (uint8_t)kind;
         ops[index].length = length;
@@ -2248,20 +2248,20 @@ static m3ApiRawFunction(os_abi_onewire_transaction)
     /* A port working in the background leaves the program waiting; the end writes the result. */
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     *raw_return = os_abi_error(os_onewire_transaction(entry->id, ops, count));
     return os_guest_end();
 }
 
 /* state: 16 bytes, u64 rom, u32 discrepancy, u32 done. 1 and the next ROM, or 0 when there are no more. */
-static m3ApiRawFunction(os_abi_onewire_search)
+static OS_HOST_FUNCTION(os_abi_onewire_search)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, bus_address);
-    m3ApiGetArg(uint32_t, bus_length);
-    m3ApiGetArg(uint32_t, state_address);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint32_t, state_address);
+    OS_HOST_ARG(uint32_t, flags);
     const char* bus = NULL;
     uint8_t* memory = NULL;
     OsOneWireSearch state;
@@ -2273,15 +2273,15 @@ static m3ApiRawFunction(os_abi_onewire_search)
     result = os_abi_read_name(bus_address, bus_length, &bus);
     if (result < 0)
     {
-        m3ApiReturn(result);
+        OS_HOST_RETURN(result);
     }
     if (bus == NULL)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
     if (os_guest_memory(state_address, 16U, &memory) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     state.rom = os_abi_read_le64(memory);
     state.discrepancy = os_abi_read_le32(memory + 8U);
@@ -2289,12 +2289,12 @@ static m3ApiRawFunction(os_abi_onewire_search)
     status = os_onewire_search(bus, bus_length, &state, flags, &found);
     if (status != OS_STATUS_OK)
     {
-        m3ApiReturn(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
     }
     os_abi_write_le64(memory, state.rom);
     os_abi_write_le32(memory + 8U, state.discrepancy);
     os_abi_write_le32(memory + 12U, state.done);
-    m3ApiReturn((int32_t)found);
+    OS_HOST_RETURN((int32_t)found);
 }
 #endif
 
@@ -2315,26 +2315,26 @@ static OsStatus os_abi_counter_opener(const char* name, uint32_t length, void* c
     return os_counter_open(name, length, open->mode, open->filter_ns, out_id);
 }
 
-static m3ApiRawFunction(os_abi_counter_open)
+static OS_HOST_FUNCTION(os_abi_counter_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, mode);
-    m3ApiGetArg(uint32_t, filter_ns);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, mode);
+    OS_HOST_ARG(uint32_t, filter_ns);
     OsAbiCounterOpen open = { mode, filter_ns };
     OS_ABI_UNUSED();
 
-    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_COUNTER, os_abi_counter_opener, &open,
+    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_COUNTER, os_abi_counter_opener, &open,
                                    os_counter_close));
 }
 
 /* The count is signed, so it goes to memory: 4 bytes, little-endian. */
-static m3ApiRawFunction(os_abi_counter_read)
+static OS_HOST_FUNCTION(os_abi_counter_read)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, out_address);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, out_address);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
     uint8_t* out = NULL;
     int32_t count = 0;
@@ -2343,56 +2343,56 @@ static m3ApiRawFunction(os_abi_counter_read)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     if (os_guest_memory(out_address, 4U, &out) != OS_STATUS_OK)
     {
-        m3ApiReturn(-WR_EFAULT);
+        OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_counter_read(entry->id, &count);
     if (status == OS_STATUS_OK)
     {
         os_abi_write_le32(out, (uint32_t)count);
     }
-    m3ApiReturn(os_abi_error(status));
+    OS_HOST_RETURN(os_abi_error(status));
 }
 
-static m3ApiRawFunction(os_abi_counter_set)
+static OS_HOST_FUNCTION(os_abi_counter_set)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(int32_t, count);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(int32_t, count);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_counter_write(entry->id, count)));
+    OS_HOST_RETURN(os_abi_error(os_counter_write(entry->id, count)));
 }
 
-static m3ApiRawFunction(os_abi_counter_watch)
+static OS_HOST_FUNCTION(os_abi_counter_watch)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(int32_t, low);
-    m3ApiGetArg(int32_t, high);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(int32_t, low);
+    OS_HOST_ARG(int32_t, high);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_counter_watch(entry->id, low, high)));
+    OS_HOST_RETURN(os_abi_error(os_counter_watch(entry->id, low, high)));
 }
 
-static m3ApiRawFunction(os_abi_counter_get)
+static OS_HOST_FUNCTION(os_abi_counter_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_COUNTER);
     uint32_t value = 0U;
     OsStatus status = OS_STATUS_OK;
@@ -2400,10 +2400,10 @@ static m3ApiRawFunction(os_abi_counter_get)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     status = os_counter_get(entry->id, property, &value);
-    m3ApiReturn(os_abi_property(status, value));
+    OS_HOST_RETURN(os_abi_property(status, value));
 }
 #endif
 
@@ -2418,56 +2418,56 @@ static OsStatus os_abi_dac_opener(const char* name, uint32_t length, void* conte
     return os_dac_open(name, length, out_id);
 }
 
-static m3ApiRawFunction(os_abi_dac_open)
+static OS_HOST_FUNCTION(os_abi_dac_open)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(uint32_t, name_address);
-    m3ApiGetArg(uint32_t, name_length);
-    m3ApiGetArg(uint32_t, flags);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
     OS_ABI_UNUSED();
 
     if (flags != 0U)
     {
-        m3ApiReturn(-WR_EINVAL);
+        OS_HOST_RETURN(-WR_EINVAL);
     }
-    m3ApiReturn(os_abi_open_device(name_address, name_length, OS_OBJECT_DAC, os_abi_dac_opener, NULL, os_dac_close));
+    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_DAC, os_abi_dac_opener, NULL, os_dac_close));
 }
 
-static m3ApiRawFunction(os_abi_dac_write)
+static OS_HOST_FUNCTION(os_abi_dac_write)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, raw);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, raw);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DAC);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_dac_write(entry->id, raw)));
+    OS_HOST_RETURN(os_abi_error(os_dac_write(entry->id, raw)));
 }
 
-static m3ApiRawFunction(os_abi_dac_write_mv)
+static OS_HOST_FUNCTION(os_abi_dac_write_mv)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, mv);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, mv);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DAC);
     OS_ABI_UNUSED();
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
-    m3ApiReturn(os_abi_error(os_dac_write_mv(entry->id, mv)));
+    OS_HOST_RETURN(os_abi_error(os_dac_write_mv(entry->id, mv)));
 }
 
-static m3ApiRawFunction(os_abi_dac_get)
+static OS_HOST_FUNCTION(os_abi_dac_get)
 {
-    m3ApiReturnType(int32_t);
-    m3ApiGetArg(int32_t, handle);
-    m3ApiGetArg(uint32_t, property);
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DAC);
     uint32_t value = 0U;
     OsStatus status = OS_STATUS_OK;
@@ -2475,10 +2475,10 @@ static m3ApiRawFunction(os_abi_dac_get)
 
     if (entry == NULL)
     {
-        m3ApiReturn(-WR_EBADH);
+        OS_HOST_RETURN(-WR_EBADH);
     }
     status = os_dac_get(entry->id, property, &value);
-    m3ApiReturn(os_abi_property(status, value));
+    OS_HOST_RETURN(os_abi_property(status, value));
 }
 #endif
 
@@ -2486,11 +2486,11 @@ static m3ApiRawFunction(os_abi_dac_get)
     !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE || !OS_HAS_COUNTER || \
     !OS_HAS_DAC
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
-static m3ApiRawFunction(os_abi_unsupported)
+static OS_HOST_FUNCTION(os_abi_unsupported)
 {
-    m3ApiReturnType(int32_t);
+    OS_HOST_RETURNS(int32_t);
     OS_ABI_UNUSED();
-    m3ApiReturn(-WR_EUNSUPPORTED);
+    OS_HOST_RETURN(-WR_EUNSUPPORTED);
 }
 #endif
 
@@ -2500,32 +2500,32 @@ static m3ApiRawFunction(os_abi_unsupported)
  * ------------------------------------------------------------------------ */
 
 #if defined(OS_ABI_HAS_WASI)
-static m3ApiRawFunction(os_abi_wasi_clock_res_get)
+static OS_HOST_FUNCTION(os_abi_wasi_clock_res_get)
 {
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, clock_id);
-    m3ApiGetArg(uint32_t, resolution_address);
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG(uint32_t, clock_id);
+    OS_HOST_ARG(uint32_t, resolution_address);
     uint8_t* out = NULL;
     OS_ABI_UNUSED();
 
     if (clock_id > __WASI_CLOCKID_THREAD_CPUTIME_ID)
     {
-        m3ApiReturn(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
     }
     if (os_guest_memory(resolution_address, 8U, &out) != OS_STATUS_OK)
     {
-        m3ApiReturn(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
     }
     os_abi_write_le64(out, 1000000U);
-    m3ApiReturn(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
 }
 
-static m3ApiRawFunction(os_abi_wasi_clock_time_get)
+static OS_HOST_FUNCTION(os_abi_wasi_clock_time_get)
 {
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, clock_id);
-    m3ApiGetArg(uint64_t, precision);
-    m3ApiGetArg(uint32_t, time_address);
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG(uint32_t, clock_id);
+    OS_HOST_ARG(uint64_t, precision);
+    OS_HOST_ARG(uint32_t, time_address);
     uint8_t* out = NULL;
     (void)precision;
     OS_ABI_UNUSED();
@@ -2533,41 +2533,41 @@ static m3ApiRawFunction(os_abi_wasi_clock_time_get)
     /* Every clock reads kernel time until a platform supplies wall time. */
     if (clock_id > __WASI_CLOCKID_THREAD_CPUTIME_ID)
     {
-        m3ApiReturn(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
     }
     if (os_guest_memory(time_address, 8U, &out) != OS_STATUS_OK)
     {
-        m3ApiReturn(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
     }
     os_abi_write_le64(out, os_time_ms64() * 1000000U);
-    m3ApiReturn(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
 }
 
-static m3ApiRawFunction(os_abi_wasi_sched_yield)
+static OS_HOST_FUNCTION(os_abi_wasi_sched_yield)
 {
-    m3ApiReturnType(uint32_t);
-    (void)_sp;
+    OS_HOST_RETURNS(uint32_t);
+    (void)os_host_slot;
     OS_ABI_UNUSED();
 
     *raw_return = __WASI_ERRNO_SUCCESS;
     if (os_task_yield() != OS_STATUS_OK)
     {
-        return m3Err_none;
+        return NULL;
     }
-    return m3_Yield();
+    return NULL;
 }
 
 /*
  * fd_write: stdout and stderr go to the output port with the writer's task
  * id; files are read only.
  */
-static m3ApiRawFunction(os_abi_wasi_fd_write)
+static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
 {
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, fd);
-    m3ApiGetArg(uint32_t, iovs_address);
-    m3ApiGetArg(uint32_t, iovs_count);
-    m3ApiGetArg(uint32_t, written_address);
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG(uint32_t, fd);
+    OS_HOST_ARG(uint32_t, iovs_address);
+    OS_HOST_ARG(uint32_t, iovs_count);
+    OS_HOST_ARG(uint32_t, written_address);
     uint8_t* iovs = NULL;
     uint8_t* written = NULL;
     uint32_t total = 0U;
@@ -2578,14 +2578,14 @@ static m3ApiRawFunction(os_abi_wasi_fd_write)
         os_guest_memory(iovs_address, iovs_count * 8U, &iovs) != OS_STATUS_OK ||
         os_guest_memory(written_address, 4U, &written) != OS_STATUS_OK)
     {
-        m3ApiReturn(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
     }
     if (fd != 1U && fd != 2U)
     {
 #if OS_HAS_FS
-        m3ApiReturn(os_fs_write_error(fd));
+        OS_HOST_RETURN(os_fs_write_error(fd));
 #else
-        m3ApiReturn(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(__WASI_ERRNO_BADF);
 #endif
     }
 
@@ -2597,7 +2597,7 @@ static m3ApiRawFunction(os_abi_wasi_fd_write)
         if (os_guest_memory(os_abi_read_le32(iovs + index * 8U), length, &data) != OS_STATUS_OK ||
             length > UINT32_MAX - total)
         {
-            m3ApiReturn(__WASI_ERRNO_FAULT);
+            OS_HOST_RETURN(__WASI_ERRNO_FAULT);
         }
         total += length;
     }
@@ -2610,20 +2610,20 @@ static m3ApiRawFunction(os_abi_wasi_fd_write)
     }
 
     os_abi_write_le32(written, total);
-    m3ApiReturn(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
 }
 
 /*
  * poll_oneoff: file subscriptions are always ready (files and stdio never
  * block); otherwise the task sleeps until the earliest clock subscription.
  */
-static m3ApiRawFunction(os_abi_wasi_poll_oneoff)
+static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
 {
-    m3ApiReturnType(uint32_t);
-    m3ApiGetArg(uint32_t, in_address);
-    m3ApiGetArg(uint32_t, out_address);
-    m3ApiGetArg(uint32_t, count);
-    m3ApiGetArg(uint32_t, events_address);
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG(uint32_t, in_address);
+    OS_HOST_ARG(uint32_t, out_address);
+    OS_HOST_ARG(uint32_t, count);
+    OS_HOST_ARG(uint32_t, events_address);
     uint8_t* in = NULL;
     uint8_t* out = NULL;
     uint8_t* events = NULL;
@@ -2636,14 +2636,14 @@ static m3ApiRawFunction(os_abi_wasi_poll_oneoff)
 
     if (count == 0U)
     {
-        m3ApiReturn(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
     }
     if (count > 0xFFFFFFFFU / 48U ||
         os_guest_memory(in_address, count * 48U, &in) != OS_STATUS_OK ||
         os_guest_memory(out_address, count * 32U, &out) != OS_STATUS_OK ||
         os_guest_memory(events_address, 4U, &events) != OS_STATUS_OK)
     {
-        m3ApiReturn(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
     }
 
     for (index = 0U; index < count; ++index)
@@ -2688,16 +2688,226 @@ static m3ApiRawFunction(os_abi_wasi_poll_oneoff)
         *raw_return = __WASI_ERRNO_SUCCESS;
         if (wait_ms > 0U && os_task_delay_ms(wait_ms > 0x7FFFFFFFU ? 0x7FFFFFFFU : (uint32_t)wait_ms) == OS_STATUS_OK)
         {
-            return m3_Yield();
+            return NULL;
         }
-        return m3Err_none;
+        return NULL;
     }
 
     events[0] = (uint8_t)written;
     events[1] = (uint8_t)(written >> 8U);
     events[2] = (uint8_t)(written >> 16U);
     events[3] = (uint8_t)(written >> 24U);
-    m3ApiReturn(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+#endif
+
+#if defined(OS_ABI_HAS_WASI)
+/* ---------------------------------------------------------------------------
+ * WASI basics: arguments, environment, exit, random bytes and the standard
+ * streams, for what neither the table below nor the file system answers.
+ * ------------------------------------------------------------------------ */
+
+static OS_HOST_FUNCTION(os_wasi_args_sizes_get)
+{
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG_MEM(uint8_t*, count);
+    OS_HOST_ARG_MEM(uint8_t*, size);
+    const char* const* argv = NULL;
+    uint32_t argc = os_guest_args(&argv);
+    uint32_t bytes = 0U;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    OS_HOST_CHECK_MEM(count, 4U);
+    OS_HOST_CHECK_MEM(size, 4U);
+    for (index = 0U; index < argc; ++index)
+    {
+        bytes += (uint32_t)strlen(argv[index]) + 1U;
+    }
+    OS_HOST_WRITE32(count, argc);
+    OS_HOST_WRITE32(size, bytes);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+
+static OS_HOST_FUNCTION(os_wasi_args_get)
+{
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG_MEM(uint8_t*, pointers);
+    OS_HOST_ARG_MEM(uint8_t*, buffer);
+    const char* const* argv = NULL;
+    uint32_t argc = os_guest_args(&argv);
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    for (index = 0U; index < argc; ++index)
+    {
+        uint32_t length = (uint32_t)strlen(argv[index]) + 1U;
+        OS_HOST_CHECK_MEM(pointers + index * 4U, 4U);
+        OS_HOST_CHECK_MEM(buffer, length);
+        OS_HOST_WRITE32(pointers + index * 4U, OS_HOST_OFFSET(buffer));
+        memcpy(buffer, argv[index], length);
+        buffer += length;
+    }
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+
+/* No environment variables. */
+static OS_HOST_FUNCTION(os_wasi_environ_sizes_get)
+{
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG_MEM(uint8_t*, count);
+    OS_HOST_ARG_MEM(uint8_t*, size);
+    OS_ABI_UNUSED();
+
+    OS_HOST_CHECK_MEM(count, 4U);
+    OS_HOST_CHECK_MEM(size, 4U);
+    OS_HOST_WRITE32(count, 0U);
+    OS_HOST_WRITE32(size, 0U);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+
+static OS_HOST_FUNCTION(os_wasi_environ_get)
+{
+    OS_HOST_RETURNS(uint32_t);
+    (void)os_host_slot;
+    OS_ABI_UNUSED();
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+
+static OS_HOST_FUNCTION(os_wasi_proc_exit)
+{
+    OS_HOST_ARG(uint32_t, code);
+    OS_ABI_UNUSED();
+    return os_guest_exit(code);
+}
+
+static OS_HOST_FUNCTION(os_wasi_random_get)
+{
+    static uint32_t state = 0x2545F491U;
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG_MEM(uint8_t*, buffer);
+    OS_HOST_ARG(uint32_t, length);
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    OS_HOST_CHECK_MEM(buffer, length);
+    for (index = 0U; index < length; ++index)
+    {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        buffer[index] = (uint8_t)state;
+    }
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+
+/* The standard streams are character devices; without a file system nothing else is open. */
+static OS_HOST_FUNCTION(os_wasi_fd_fdstat_get)
+{
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG(uint32_t, fd);
+    OS_HOST_ARG_MEM(uint8_t*, stat);
+    OS_ABI_UNUSED();
+
+    if (fd > 2U)
+    {
+        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+    }
+    OS_HOST_CHECK_MEM(stat, 24U);
+    memset(stat, 0, 24U);
+    stat[0] = __WASI_FILETYPE_CHARACTER_DEVICE;
+    memset(stat + 8, 0xFF, 16U);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+
+static OS_HOST_FUNCTION(os_wasi_fd_close)
+{
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG(uint32_t, fd);
+    OS_ABI_UNUSED();
+    OS_HOST_RETURN(fd <= 2U ? __WASI_ERRNO_SUCCESS : __WASI_ERRNO_BADF);
+}
+
+static OS_HOST_FUNCTION(os_wasi_fd_seek)
+{
+    OS_HOST_RETURNS(uint32_t);
+    (void)os_host_slot;
+    OS_ABI_UNUSED();
+    OS_HOST_RETURN(__WASI_ERRNO_SPIPE);
+}
+
+static OS_HOST_FUNCTION(os_wasi_badf)
+{
+    OS_HOST_RETURNS(uint32_t);
+    (void)os_host_slot;
+    OS_ABI_UNUSED();
+    OS_HOST_RETURN(__WASI_ERRNO_BADF);
+}
+
+/* Standard input has nothing to read. */
+static OS_HOST_FUNCTION(os_wasi_fd_read)
+{
+    OS_HOST_RETURNS(uint32_t);
+    OS_HOST_ARG(uint32_t, fd);
+    OS_HOST_ARG(uint32_t, iovs);
+    OS_HOST_ARG(uint32_t, count);
+    OS_HOST_ARG_MEM(uint8_t*, nread);
+    OS_ABI_UNUSED();
+    (void)iovs;
+    (void)count;
+
+    if (fd != 0U)
+    {
+        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+    }
+    OS_HOST_CHECK_MEM(nread, 4U);
+    OS_HOST_WRITE32(nread, 0U);
+    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+}
+
+typedef struct OsWasiImport
+{
+    const char* name;
+    const char* signature;
+    OsHostImportFunction function;
+} OsWasiImport;
+
+static const OsWasiImport g_wasi_basics[] =
+{
+    { "args_sizes_get", "i(**)", os_wasi_args_sizes_get },
+    { "args_get", "i(**)", os_wasi_args_get },
+    { "environ_sizes_get", "i(**)", os_wasi_environ_sizes_get },
+    { "environ_get", "i(**)", os_wasi_environ_get },
+    { "proc_exit", "v(i)", os_wasi_proc_exit },
+    { "random_get", "i(*i)", os_wasi_random_get },
+    { "fd_fdstat_get", "i(i*)", os_wasi_fd_fdstat_get },
+    { "fd_close", "i(i)", os_wasi_fd_close },
+    { "fd_seek", "i(iIi*)", os_wasi_fd_seek },
+    { "fd_read", "i(i*i*)", os_wasi_fd_read },
+    { "fd_prestat_get", "i(i*)", os_wasi_badf },
+    { "fd_prestat_dir_name", "i(i*i)", os_wasi_badf },
+};
+
+/* A WASI basic call, in either WASI namespace, or *out NULL. */
+WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
+                             WmFunc** out)
+{
+    uint32_t index = 0U;
+
+    *out = NULL;
+    if (!os_name_is(module, module_length, "wasi_unstable") &&
+        !os_name_is(module, module_length, "wasi_snapshot_preview1"))
+    {
+        return NULL;
+    }
+    for (index = 0U; index < (uint32_t)(sizeof(g_wasi_basics) / sizeof(g_wasi_basics[0])); ++index)
+    {
+        if (os_name_is(name, name_length, g_wasi_basics[index].name))
+        {
+            return os_host_function(g_wasi_basics[index].signature, g_wasi_basics[index].function, out);
+        }
+    }
+    return NULL;
 }
 #endif
 
@@ -2710,7 +2920,7 @@ typedef struct OsAbiImport
     const char* module;
     const char* name;
     const char* signature;
-    M3RawCall function;
+    OsHostImportFunction function;
     /* ABI minor version that added the call; kernel interfaces only. */
     uint8_t since;
 } OsAbiImport;
@@ -2929,51 +3139,59 @@ static const OsAbiImport g_abi_imports[] =
 #endif
 };
 
-/* Bind every ABI import the module uses; call after m3_LinkWASI to override it. */
-M3Result os_abi_link(IM3Module module)
+/*
+ * Whether an import's module name is the entry's: "<module>@1.<minor>.0"
+ * for kernel interfaces, with a minor from the one that added the call up
+ * to OS_ABI_VERSION_MINOR; the name itself otherwise.
+ */
+static int os_abi_module_matches(const OsAbiImport* import, const char* module, uint32_t length)
 {
     const size_t prefix_length = sizeof(WR_KERNEL_PREFIX) - 1U;
+    size_t base = strlen(import->module);
+    uint32_t minor = 0U;
+    uint32_t at = 0U;
+
+    if (length < base || memcmp(module, import->module, base) != 0)
+    {
+        return 0;
+    }
+    if (strncmp(import->module, WR_KERNEL_PREFIX, prefix_length) != 0)
+    {
+        return length == base;
+    }
+    at = (uint32_t)base;
+    if (length < at + 6U || memcmp(module + at, "@1.", 3U) != 0)
+    {
+        return 0;
+    }
+    at += 3U;
+    if (module[at] < '0' || module[at] > '9' || (module[at] == '0' && module[at + 1U] != '.'))
+    {
+        return 0;
+    }
+    while (at < length && module[at] >= '0' && module[at] <= '9' && minor < 1000U)
+    {
+        minor = minor * 10U + (uint32_t)(module[at++] - '0');
+    }
+    return length - at == 2U && memcmp(module + at, ".0", 2U) == 0 &&
+           minor >= import->since && minor <= OS_ABI_VERSION_MINOR;
+}
+
+/* The ABI call an import names, or *out NULL when it is not one. */
+WmResult os_abi_resolve(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
+                        WmFunc** out)
+{
     uint32_t index = 0U;
 
+    *out = NULL;
     for (index = 0U; index < (uint32_t)(sizeof(g_abi_imports) / sizeof(g_abi_imports[0])); ++index)
     {
         const OsAbiImport* import = &g_abi_imports[index];
-        uint32_t minor = import->since;
-        uint8_t versioned = strncmp(import->module, WR_KERNEL_PREFIX, prefix_length) == 0;
-
-        do
+        if (strlen(import->name) == name_length && memcmp(import->name, name, name_length) == 0 &&
+            os_abi_module_matches(import, module, module_length))
         {
-            /* "<module>@1.<minor>.0" for kernel interfaces, the name itself otherwise. */
-            char name[48];
-            const char* module_name = import->module;
-            M3Result result = m3Err_none;
-
-            if (versioned)
-            {
-                size_t length = strlen(import->module);
-                if (length + 8U > sizeof(name))
-                {
-                    return "wasm-rtos interface name too long";
-                }
-                memcpy(name, import->module, length);
-                name[length++] = '@';
-                name[length++] = '1';
-                name[length++] = '.';
-                if (minor >= 10U)
-                {
-                    name[length++] = (char)('0' + minor / 10U);
-                }
-                name[length++] = (char)('0' + minor % 10U);
-                memcpy(name + length, ".0", 3U);
-                module_name = name;
-            }
-            result = m3_LinkRawFunction(module, module_name, import->name, import->signature, import->function);
-            if (result != m3Err_none && result != m3Err_functionLookupFailed)
-            {
-                return result;
-            }
+            return os_host_function(import->signature, import->function, out);
         }
-        while (versioned && ++minor <= OS_ABI_VERSION_MINOR);
     }
-    return m3Err_none;
+    return NULL;
 }
