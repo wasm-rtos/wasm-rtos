@@ -16,7 +16,6 @@
  *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
  *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
  *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
- *   OS_HAS_UART       serial ports for programs through a platform UART port
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
@@ -47,9 +46,6 @@
 #endif
 #ifndef OS_HAS_PWM
 #define OS_HAS_PWM 1
-#endif
-#ifndef OS_HAS_UART
-#define OS_HAS_UART 1
 #endif
 #ifndef OS_HAS_PULSE
 #define OS_HAS_PULSE 1
@@ -1282,7 +1278,6 @@ typedef struct OsPwmPort
 OsStatus os_pwm_port_set(const OsPwmPort* port);
 #endif
 
-#if OS_HAS_UART
 /*
  * Serial ports, registered under the device profile's names ("uart1",
  * "gps"), one owner each. Received bytes go into a kernel buffer the port
@@ -1328,7 +1323,6 @@ void os_uart_error(uint32_t uart);
 void os_uart_writable(uint32_t uart);
 /* The id of the task that owns a port, 0 when it is free. */
 uint32_t os_uart_get_owner(uint32_t uart);
-#endif
 
 /*
  * Counters, registered under the device profile's names ("enc0", "flow"):

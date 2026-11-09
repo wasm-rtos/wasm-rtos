@@ -24,7 +24,6 @@ typedef enum OsObjectType
     OS_OBJECT_I2C,
     OS_OBJECT_SPI,
     OS_OBJECT_PWM,
-    OS_OBJECT_UART,
     OS_OBJECT_PULSE,
     OS_OBJECT_ONEWIRE
 } OsObjectType;
@@ -384,7 +383,6 @@ void os_pwm_close(uint32_t id);
 void os_pwm_shutdown(void);
 #endif
 
-#if OS_HAS_UART
 /* ---- Serial ports for programs (uart.c) ------------------------------------ */
 #define OS_UART_PROP_BAUD      1U
 #define OS_UART_PROP_AVAILABLE 2U
@@ -400,7 +398,6 @@ uint8_t os_uart_ready(uint32_t id);
 /* Deliver what ports reported from interrupt handlers. */
 void os_uart_poll(void);
 void os_uart_shutdown(void);
-#endif
 
 /* Ports that work on a program's memory in the background: buses and pulse trains. */
 #define OS_HAS_TRANSFERS (OS_HAS_BUSES || OS_HAS_PULSE)

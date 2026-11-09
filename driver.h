@@ -89,6 +89,9 @@ OsStatus os_driver_add(const OsDriver* driver);
 
 /* ---- For a driver's calls --------------------------------------------------- */
 
+/* The key for os_signal_wait and os_signal_wake on the driver's object id (24 bits). */
+uint32_t os_driver_signal_key(const OsDriver* driver, uint32_t id);
+
 /* A handle of the current program for the driver's object id, or a negative ABI error. */
 int32_t os_driver_handle_new(const OsDriver* driver, uint32_t id);
 /* The driver's object behind a handle of the current program: 1 and *out_id, or 0. */

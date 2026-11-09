@@ -163,13 +163,6 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
-#if OS_HAS_UART
-    if (handle->type == OS_OBJECT_UART)
-    {
-        os_uart_close(handle->id);
-    }
-    else
-#endif
 #if OS_HAS_PULSE
     if (handle->type == OS_OBJECT_PULSE)
     {
@@ -347,6 +340,18 @@ OsStatus os_driver_add(const OsDriver* driver)
     }
     g_drivers[g_driver_count++] = driver;
     return OS_STATUS_OK;
+}
+
+uint32_t os_driver_signal_key(const OsDriver* driver, uint32_t id)
+{
+    uint32_t index = 0U;
+
+    /* Kernel objects use the low type numbers; drivers take theirs from 0x80 up, by place. */
+    while (index < g_driver_count && g_drivers[index] != driver)
+    {
+        ++index;
+    }
+    return OS_SIGNAL_KEY(0x80U + index, id);
 }
 
 void os_drivers_poll(void)
@@ -1806,120 +1811,6 @@ static OS_HOST_FUNCTION(os_abi_pwm_get)
 }
 #endif
 
-#if OS_HAS_UART
-typedef struct OsAbiUartOpen
-{
-    uint32_t baud;
-    uint32_t format;
-} OsAbiUartOpen;
-
-static OsStatus os_abi_uart_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
-{
-    const OsAbiUartOpen* open = (const OsAbiUartOpen*)context;
-    return os_uart_open(name, length, open->baud, open->format, out_id);
-}
-
-static OS_HOST_FUNCTION(os_abi_uart_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, baud);
-    OS_HOST_ARG(uint32_t, format);
-    OsAbiUartOpen open = { baud, format };
-    OS_ABI_UNUSED();
-
-    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_UART, os_abi_uart_opener, &open,
-                                   os_uart_close));
-}
-
-static OS_HOST_FUNCTION(os_abi_uart_read)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, buffer_address);
-    OS_HOST_ARG(uint32_t, max);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
-    uint8_t* buffer = NULL;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (max > 0x7FFFFFFFU || (max > 0U && os_guest_memory(buffer_address, max, &buffer) != OS_STATUS_OK))
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    OS_HOST_RETURN((int32_t)os_uart_read(entry->id, buffer, max));
-}
-
-static OS_HOST_FUNCTION(os_abi_uart_write)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, data_address);
-    OS_HOST_ARG(uint32_t, length);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
-    uint8_t* data = NULL;
-    uint32_t written = 0U;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    status = os_uart_write(entry->id, data, length, &written);
-    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)written : os_abi_error(status));
-}
-
-static OS_HOST_FUNCTION(os_abi_uart_wait_writable)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, timeout_ms);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    status = os_uart_wait_writable(entry->id, timeout_ms);
-    *raw_return = os_abi_error(status);
-    return os_guest_end();
-}
-
-static OS_HOST_FUNCTION(os_abi_uart_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, property);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_UART);
-    uint32_t value = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    {
-        /* The call fills value: it must happen before value is read. */
-        OsStatus status = os_uart_get(entry->id, property, &value);
-        OS_HOST_RETURN(os_abi_property(status, value));
-    }
-}
-#endif
 
 /* ---------------------------------------------------------------------------
  * pulse
@@ -2215,7 +2106,7 @@ static OS_HOST_FUNCTION(os_abi_onewire_search)
 #endif
 
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
+    !OS_HAS_SPI || !OS_HAS_PWM || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
 {
@@ -2765,19 +2656,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("pwm"), "get", "i(ii)", os_abi_unsupported, 4U },
 #endif
 
-#if OS_HAS_UART
-    { WR_MODULE("uart"), "open", "i(iiii)", os_abi_uart_open, 4U },
-    { WR_MODULE("uart"), "read", "i(iii)", os_abi_uart_read, 4U },
-    { WR_MODULE("uart"), "write", "i(iii)", os_abi_uart_write, 4U },
-    { WR_MODULE("uart"), "wait-writable", "i(ii)", os_abi_uart_wait_writable, 4U },
-    { WR_MODULE("uart"), "get", "i(ii)", os_abi_uart_get, 4U },
-#else
-    { WR_MODULE("uart"), "open", "i(iiii)", os_abi_unsupported, 4U },
-    { WR_MODULE("uart"), "read", "i(iii)", os_abi_unsupported, 4U },
-    { WR_MODULE("uart"), "write", "i(iii)", os_abi_unsupported, 4U },
-    { WR_MODULE("uart"), "wait-writable", "i(ii)", os_abi_unsupported, 4U },
-    { WR_MODULE("uart"), "get", "i(ii)", os_abi_unsupported, 4U },
-#endif
 
 #if OS_HAS_PULSE
     { WR_MODULE("pulse"), "open", "i(iii)", os_abi_pulse_open, 5U },

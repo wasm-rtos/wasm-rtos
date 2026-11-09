@@ -810,9 +810,6 @@ void os_shutdown(void)
 #if OS_HAS_PWM
     os_pwm_shutdown();
 #endif
-#if OS_HAS_UART
-    os_uart_shutdown();
-#endif
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
@@ -3955,10 +3952,6 @@ OsStatus os_schedule(void)
 #if OS_HAS_PULSE
     /* Pulse trains sent or captured in the background. */
     os_pulse_poll();
-#endif
-#if OS_HAS_UART
-    /* Bytes received and room to send, reported from interrupt handlers. */
-    os_uart_poll();
 #endif
 
     if (g_os.clock_port.now_ms != NULL)
@@ -7195,10 +7188,6 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target)
 #if OS_HAS_INPUT
         case OS_OBJECT_INPUT:
             return os_input_ready(target->id);
-#endif
-#if OS_HAS_UART
-        case OS_OBJECT_UART:
-            return os_uart_ready(target->id);
 #endif
         default:
             return 0U;
