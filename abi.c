@@ -2508,16 +2508,16 @@ static OS_HOST_FUNCTION(os_abi_wasi_clock_res_get)
     uint8_t* out = NULL;
     OS_ABI_UNUSED();
 
-    if (clock_id > __WASI_CLOCKID_THREAD_CPUTIME_ID)
+    if (clock_id > OS_WASI_CLOCKID_THREAD_CPUTIME_ID)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
     if (os_guest_memory(resolution_address, 8U, &out) != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
     os_abi_write_le64(out, 1000000U);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_abi_wasi_clock_time_get)
@@ -2531,16 +2531,16 @@ static OS_HOST_FUNCTION(os_abi_wasi_clock_time_get)
     OS_ABI_UNUSED();
 
     /* Every clock reads kernel time until a platform supplies wall time. */
-    if (clock_id > __WASI_CLOCKID_THREAD_CPUTIME_ID)
+    if (clock_id > OS_WASI_CLOCKID_THREAD_CPUTIME_ID)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
     if (os_guest_memory(time_address, 8U, &out) != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
     os_abi_write_le64(out, os_time_ms64() * 1000000U);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_abi_wasi_sched_yield)
@@ -2549,7 +2549,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_sched_yield)
     (void)os_host_slot;
     OS_ABI_UNUSED();
 
-    *raw_return = __WASI_ERRNO_SUCCESS;
+    *raw_return = OS_WASI_ERRNO_SUCCESS;
     if (os_task_yield() != OS_STATUS_OK)
     {
         return NULL;
@@ -2578,14 +2578,14 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
         os_guest_memory(iovs_address, iovs_count * 8U, &iovs) != OS_STATUS_OK ||
         os_guest_memory(written_address, 4U, &written) != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
     if (fd != 1U && fd != 2U)
     {
 #if OS_HAS_FS
         OS_HOST_RETURN(os_fs_write_error(fd));
 #else
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
 #endif
     }
 
@@ -2597,7 +2597,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
         if (os_guest_memory(os_abi_read_le32(iovs + index * 8U), length, &data) != OS_STATUS_OK ||
             length > UINT32_MAX - total)
         {
-            OS_HOST_RETURN(__WASI_ERRNO_FAULT);
+            OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
         }
         total += length;
     }
@@ -2610,7 +2610,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
     }
 
     os_abi_write_le32(written, total);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 /*
@@ -2636,14 +2636,14 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
 
     if (count == 0U)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_INVAL);
+        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
     if (count > 0xFFFFFFFFU / 48U ||
         os_guest_memory(in_address, count * 48U, &in) != OS_STATUS_OK ||
         os_guest_memory(out_address, count * 32U, &out) != OS_STATUS_OK ||
         os_guest_memory(events_address, 4U, &events) != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_FAULT);
+        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
 
     for (index = 0U; index < count; ++index)
@@ -2651,11 +2651,11 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
         const uint8_t* subscription = in + index * 48U;
         uint8_t tag = subscription[8];
 
-        if (tag == __WASI_EVENTTYPE_CLOCK)
+        if (tag == OS_WASI_EVENTTYPE_CLOCK)
         {
             uint64_t timeout = os_abi_read_le64(subscription + 24U);
             uint16_t flags = (uint16_t)(subscription[40] | (subscription[41] << 8U));
-            uint64_t due = (flags & __WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME) != 0U
+            uint64_t due = (flags & OS_WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME) != 0U
                 ? timeout : now_ns + timeout;
             if (due < soonest_ns)
             {
@@ -2681,11 +2681,11 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
 
         memset(event, 0, 32U);
         memcpy(event, in + soonest * 48U, 8U);
-        event[10] = __WASI_EVENTTYPE_CLOCK;
+        event[10] = OS_WASI_EVENTTYPE_CLOCK;
         written = 1U;
         events[0] = 1U;
         events[1] = events[2] = events[3] = 0U;
-        *raw_return = __WASI_ERRNO_SUCCESS;
+        *raw_return = OS_WASI_ERRNO_SUCCESS;
         if (wait_ms > 0U && os_task_delay_ms(wait_ms > 0x7FFFFFFFU ? 0x7FFFFFFFU : (uint32_t)wait_ms) == OS_STATUS_OK)
         {
             return NULL;
@@ -2697,7 +2697,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
     events[1] = (uint8_t)(written >> 8U);
     events[2] = (uint8_t)(written >> 16U);
     events[3] = (uint8_t)(written >> 24U);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 #endif
 
@@ -2726,7 +2726,7 @@ static OS_HOST_FUNCTION(os_wasi_args_sizes_get)
     }
     OS_HOST_WRITE32(count, argc);
     OS_HOST_WRITE32(size, bytes);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_wasi_args_get)
@@ -2748,7 +2748,7 @@ static OS_HOST_FUNCTION(os_wasi_args_get)
         memcpy(buffer, argv[index], length);
         buffer += length;
     }
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 /* No environment variables. */
@@ -2763,7 +2763,7 @@ static OS_HOST_FUNCTION(os_wasi_environ_sizes_get)
     OS_HOST_CHECK_MEM(size, 4U);
     OS_HOST_WRITE32(count, 0U);
     OS_HOST_WRITE32(size, 0U);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_wasi_environ_get)
@@ -2771,7 +2771,7 @@ static OS_HOST_FUNCTION(os_wasi_environ_get)
     OS_HOST_RETURNS(uint32_t);
     (void)os_host_slot;
     OS_ABI_UNUSED();
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_wasi_proc_exit)
@@ -2798,7 +2798,7 @@ static OS_HOST_FUNCTION(os_wasi_random_get)
         state ^= state << 5;
         buffer[index] = (uint8_t)state;
     }
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 /* The standard streams are character devices; without a file system nothing else is open. */
@@ -2811,13 +2811,13 @@ static OS_HOST_FUNCTION(os_wasi_fd_fdstat_get)
 
     if (fd > 2U)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
     OS_HOST_CHECK_MEM(stat, 24U);
     memset(stat, 0, 24U);
-    stat[0] = __WASI_FILETYPE_CHARACTER_DEVICE;
+    stat[0] = OS_WASI_FILETYPE_CHARACTER_DEVICE;
     memset(stat + 8, 0xFF, 16U);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_wasi_fd_close)
@@ -2825,7 +2825,7 @@ static OS_HOST_FUNCTION(os_wasi_fd_close)
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(uint32_t, fd);
     OS_ABI_UNUSED();
-    OS_HOST_RETURN(fd <= 2U ? __WASI_ERRNO_SUCCESS : __WASI_ERRNO_BADF);
+    OS_HOST_RETURN(fd <= 2U ? OS_WASI_ERRNO_SUCCESS : OS_WASI_ERRNO_BADF);
 }
 
 static OS_HOST_FUNCTION(os_wasi_fd_seek)
@@ -2833,7 +2833,7 @@ static OS_HOST_FUNCTION(os_wasi_fd_seek)
     OS_HOST_RETURNS(uint32_t);
     (void)os_host_slot;
     OS_ABI_UNUSED();
-    OS_HOST_RETURN(__WASI_ERRNO_SPIPE);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SPIPE);
 }
 
 static OS_HOST_FUNCTION(os_wasi_badf)
@@ -2841,7 +2841,7 @@ static OS_HOST_FUNCTION(os_wasi_badf)
     OS_HOST_RETURNS(uint32_t);
     (void)os_host_slot;
     OS_ABI_UNUSED();
-    OS_HOST_RETURN(__WASI_ERRNO_BADF);
+    OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
 }
 
 /* Standard input has nothing to read. */
@@ -2858,11 +2858,11 @@ static OS_HOST_FUNCTION(os_wasi_fd_read)
 
     if (fd != 0U)
     {
-        OS_HOST_RETURN(__WASI_ERRNO_BADF);
+        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
     OS_HOST_CHECK_MEM(nread, 4U);
     OS_HOST_WRITE32(nread, 0U);
-    OS_HOST_RETURN(__WASI_ERRNO_SUCCESS);
+    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 typedef struct OsWasiImport
