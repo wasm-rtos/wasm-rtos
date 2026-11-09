@@ -107,8 +107,9 @@ typedef struct OsFsImage
 OsStatus os_fs_image_open(const char* path, OsFsImage* out_image);
 void os_fs_image_close(OsFsImage* image);
 
-/* Kernel internal. */
-M3Result os_fs_link_wasi(IM3Module module);
+/* The WASI file call an import names, answered by the virtual file system, or *out NULL. */
+WmResult os_fs_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
+                            WmFunc** out);
 /* WASI errno for a write to fd other than stdout and stderr: files are read only. */
 uint16_t os_fs_write_error(uint32_t fd);
 void os_fs_release_task(uint32_t task_id);

@@ -2,12 +2,9 @@
 #define WASM_RTOS_H
 
 #include <stdint.h>
+#include <string.h>
 
-#include "wasm3/source/m3_config.h"
-#include "wasm3/source/wasm3.h"
-#if d_m3HasDylink
-#include "wasm3/source/m3_dylink.h"
-#endif
+#include "vm/source/wm.h"
 
 /*
  * Build options (define to 0 to leave a feature out of the image):
@@ -26,6 +23,10 @@
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_COUNTER    pulse counters and quadrature encoders through a platform port
  *   OS_HAS_DAC        analog outputs for programs through a platform DAC port
+ *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
+ * Off unless defined to 1:
+ *   OS_HAS_DYLINK     dylink.0 programs and shared libraries (vm/source/wm_dylink.c)
+ *   OS_HAS_MEMORY_ACCOUNTING  all interpreter memory per task in os_task_get_memory_usage
  */
 #ifndef OS_HAS_PROCESSES
 #define OS_HAS_PROCESSES 1
@@ -80,6 +81,18 @@
 #ifndef OS_HAS_DAC
 #define OS_HAS_DAC 1
 #endif
+#ifndef OS_HAS_WASI
+#define OS_HAS_WASI 1
+#endif
+#ifndef OS_HAS_DYLINK
+#define OS_HAS_DYLINK 0
+#endif
+#ifndef OS_HAS_MEMORY_ACCOUNTING
+#define OS_HAS_MEMORY_ACCOUNTING 0
+#endif
+#if OS_HAS_DYLINK
+#include "vm/source/wm_dylink.h"
+#endif
 /* Buses of any kind: the shared machinery of bus.c. */
 #define OS_HAS_BUSES (OS_HAS_I2C || OS_HAS_SPI || OS_HAS_ONEWIRE)
 
@@ -92,11 +105,65 @@ typedef struct OsMutex* OsMutexHandle;
 typedef struct OsSemaphore* OsSemaphoreHandle;
 typedef struct OsEventGroup* OsEventGroupHandle;
 typedef struct OsTimer* OsTimerHandle;
-#if d_m3HasDylink
+#if OS_HAS_DYLINK
 typedef struct OsWasmLibrary* OsWasmLibraryHandle;
 #endif
 
-typedef M3RawCall OsHostImportFunction;
+/*
+ * Host functions (the kernel's imports and os_host_import_register's) get
+ * their arguments in 32-bit slots, i64 and f64 taking two, and leave their
+ * result in the first. OS_HOST_FUNCTION declares one. Inside it,
+ * OS_HOST_RETURNS(type) comes first and names the result slot raw_return;
+ * OS_HOST_ARG reads the next argument and OS_HOST_ARG_MEM the next one as a
+ * pointer into linear memory, which OS_HOST_CHECK_MEM bounds-checks before
+ * use. OS_HOST_RETURN sets the result and returns.
+ */
+typedef WmHostFunction OsHostImportFunction;
+
+#define OS_HOST_FUNCTION(NAME) \
+    WmResult NAME(WmRuntime* runtime, void* os_host_user, uint32_t* os_host_slot, WmMemory* os_host_memory)
+#define OS_HOST_RETURNS(TYPE) TYPE* const raw_return = (TYPE*)(void*)os_host_slot
+#define OS_HOST_ARG(TYPE, NAME) \
+    TYPE NAME; \
+    memcpy(&NAME, os_host_slot, sizeof(TYPE)); \
+    os_host_slot += (sizeof(TYPE) + 3U) / 4U
+#define OS_HOST_ARG_MEM(TYPE, NAME) TYPE NAME = (TYPE)OS_HOST_PTR(*os_host_slot++)
+#define OS_HOST_PTR(OFFSET) ((void*)(os_host_memory_base(os_host_memory) + (uint32_t)(OFFSET)))
+#define OS_HOST_OFFSET(POINTER) ((uint32_t)((uint8_t*)(POINTER) - os_host_memory_base(os_host_memory)))
+#define OS_HOST_RETURN(VALUE) \
+    do \
+    { \
+        *raw_return = (VALUE); \
+        return NULL; \
+    } while (0)
+#define OS_HOST_CHECK_MEM(ADDRESS, LENGTH) \
+    do \
+    { \
+        if (!os_host_memory_check(os_host_memory, (const void*)(ADDRESS), (uint64_t)(LENGTH))) \
+            return os_host_out_of_bounds; \
+    } while (0)
+/* Linear memory is little-endian, like every target the kernel runs on. */
+#define OS_HOST_READ32(POINTER) os_host_read32(POINTER)
+#define OS_HOST_WRITE8(POINTER, VALUE) (*(uint8_t*)(POINTER) = (uint8_t)(VALUE))
+#define OS_HOST_WRITE32(POINTER, VALUE) os_host_write32((POINTER), (uint32_t)(VALUE))
+#define OS_HOST_WRITE64(POINTER, VALUE) os_host_write64((POINTER), (uint64_t)(VALUE))
+
+static inline uint8_t* os_host_memory_base(const WmMemory* memory)
+{
+    return memory != NULL ? wm_memory_data(memory, NULL) : NULL;
+}
+static inline uint32_t os_host_read32(const void* pointer)
+{
+    uint32_t value;
+    memcpy(&value, pointer, sizeof(value));
+    return value;
+}
+static inline void os_host_write32(void* pointer, uint32_t value) { memcpy(pointer, &value, sizeof(value)); }
+static inline void os_host_write64(void* pointer, uint64_t value) { memcpy(pointer, &value, sizeof(value)); }
+/* Whether length bytes from address lie in the memory. */
+int os_host_memory_check(const WmMemory* memory, const void* address, uint64_t length);
+/* The trap OS_HOST_CHECK_MEM returns. */
+extern const char os_host_out_of_bounds[];
 
 typedef enum OsStatus
 {
@@ -349,9 +416,9 @@ void os_host_import_clear_all(void);
  * the wait's status (or value) when it wakes.
  */
 OsStatus os_host_wait_begin(uint32_t* result_slot);
-M3Result os_host_wait_end(void);
+WmResult os_host_wait_end(void);
 
-#if d_m3HasDylink
+#if OS_HAS_DYLINK
 /*
  * Register a dylink.0 side module (a shared library) under the name programs
  * list as needed. The byte buffer must remain valid until os_shutdown().
@@ -589,7 +656,7 @@ OsStatus os_task_get_return_values(
  * RAM a task uses, in bytes. stack, linear memory and code are measured
  * exactly in every build. interpreter_bytes is everything the interpreter
  * allocated for the task (those three plus module tables, names, types and
- * the like) and needs d_m3HasHeapAccounting=1; otherwise it is 0 and
+ * the like) and needs OS_HAS_MEMORY_ACCOUNTING=1; otherwise it is 0 and
  * total_bytes leaves that metadata out.
  */
 typedef struct OsTaskMemoryUsage
@@ -694,7 +761,7 @@ const char* os_get_last_error_result(void);
 const char* os_get_last_error_task_name(void);
 /*
  * Why a task ended with OS_TASK_EXIT_WASM_ERROR, kept until it is deleted:
- * "phase: result", and with d_m3RecordBacktraces the functions it was in,
+ * "phase: result", and the functions it was in when the interpreter keeps them,
  * innermost first ("call: [trap] unreachable executed in parse < main").
  * NULL for tasks that did not fail.
  */

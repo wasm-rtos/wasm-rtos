@@ -5,10 +5,11 @@ processes, the way an operating system runs executables. The same `.wasm`
 file runs on a microcontroller and in the browser simulator at
 <https://wasm-rtos.github.io>.
 
-Programs are interpreted by a fork of [wasm3](https://github.com/wasm-rtos/wasm3)
-(the `wasm3` submodule). The scheduler preempts programs by counting the
-interpreter work they do ("fuel"), so a plain `int main` with an endless loop
-still shares the processor with other programs.
+Programs are interpreted by [wasm-rtos-vm](https://github.com/wasm-rtos/wasm-rtos-vm)
+(the `vm` submodule), which runs WebAssembly instructions as they are, one
+unit of fuel each. The scheduler preempts programs by counting that fuel, so a
+plain `int main` with an endless loop still shares the processor with other
+programs, and the same program uses the same fuel on every device.
 
 ## Features
 
@@ -34,14 +35,14 @@ still shares the processor with other programs.
 
 ## Building
 
-Compile the kernel sources together with wasm3 and WASI support:
+Compile the kernel sources together with the interpreter:
 
 ```sh
-cc -std=c11 -Dd_m3HasWASI -I. your_main.c os.c abi.c fs.c wasm3/source/*.c -lm
+cc -std=c11 -I. your_main.c *.c vm/source/*.c -lm
 ```
 
 Clone with `--recurse-submodules`, or run `git submodule update --init`, to get
-wasm3. Every subsystem can be left out to save space:
+the interpreter. Every subsystem can be left out to save space:
 
 | Option | Default | Effect |
 |---|---|---|
@@ -71,9 +72,9 @@ wasm3. Every subsystem can be left out to save space:
 | `OS_HAS_PULSE` / `OS_PULSE_MAX` | `OS_HAS_GPIO` / 4 | timed pulse trains on GPIO pins with `OS_GPIO_CAN_PULSE`, and channels at once |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
-| `OS_NATIVE_STACK_BUDGET` | 16 KiB | C stack nested Wasm calls may use in one slice before it ends early (0 = unlimited) |
-| `d_m3HasDylink` | 0 | `dylink.0` libraries (`os_wasm_library_register`) |
-| `d_m3HasHeapAccounting` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
+| `OS_HAS_WASI` | 1 | the WASI preview 1 calls (arguments, exit, clocks, standard streams, files) |
+| `OS_HAS_DYLINK` | 0 | `dylink.0` libraries (`os_wasm_library_register`) |
+| `OS_HAS_MEMORY_ACCOUNTING` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
 
 The `*_MAX` limits are slots: each costs a pointer. A pin, display, input
 device, bus, serial port or analog channel takes memory when the platform
@@ -427,8 +428,8 @@ every change, also under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ## License
 
-The kernel is released into the public domain (see `LICENSE`). wasm3 is
-MIT-licensed.
+The kernel and the interpreter are released into the public domain (see
+`LICENSE`).
 
 ## Arduino
 
