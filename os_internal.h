@@ -103,6 +103,10 @@ void os_drivers_poll(void);
 void os_drivers_shutdown(void);
 /* The soonest any driver needs polling, in milliseconds (UINT32_MAX: none). */
 uint32_t os_drivers_next_deadline_ms(void);
+/* The kernel clock moved: every driver's time. */
+void os_drivers_time(void);
+/* Every driver ends the task's background work now. */
+void os_drivers_finish_task(uint32_t task_id);
 /* The ABI's negative error code for a kernel status (0 for OS_STATUS_OK). */
 int32_t os_abi_error(OsStatus status);
 

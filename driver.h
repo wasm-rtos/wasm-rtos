@@ -68,6 +68,13 @@ typedef struct OsDriver
     void (*poll)(void);
     /* Milliseconds until poll is due even if nothing happens (UINT32_MAX: never), for a sleeping kernel. May be NULL. */
     uint32_t (*next_deadline_ms)(void);
+    /* The kernel clock moved: deliver what is due by now (held keys...). May be NULL. */
+    void (*time)(void);
+    /*
+     * End the background work of a task now (it ends, is saved or moves out
+     * of RAM): the device must be done with the task's memory. May be NULL.
+     */
+    void (*finish_task)(uint32_t task_id);
     /* os_shutdown: release everything. May be NULL. */
     void (*shutdown)(void);
 } OsDriver;

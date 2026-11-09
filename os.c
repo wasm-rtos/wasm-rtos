@@ -6156,6 +6156,7 @@ static void os_update_time_events(void)
 {
     g_os.processing_time_events = 1U;
     os_process_timers();
+    os_drivers_time();
 #if OS_HAS_INPUT
     os_input_update_time();
 #endif
@@ -7379,6 +7380,7 @@ void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value)
 
 void os_transfer_finish_task(uint32_t task_id)
 {
+    os_drivers_finish_task(task_id);
 #if OS_HAS_BUSES
     os_bus_finish_task(task_id);
 #endif

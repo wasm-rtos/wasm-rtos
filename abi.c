@@ -381,6 +381,32 @@ uint32_t os_drivers_next_deadline_ms(void)
     return next;
 }
 
+void os_drivers_time(void)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < g_driver_count; ++index)
+    {
+        if (g_drivers[index]->time != NULL)
+        {
+            g_drivers[index]->time();
+        }
+    }
+}
+
+void os_drivers_finish_task(uint32_t task_id)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < g_driver_count; ++index)
+    {
+        if (g_drivers[index]->finish_task != NULL)
+        {
+            g_drivers[index]->finish_task(task_id);
+        }
+    }
+}
+
 void os_drivers_shutdown(void)
 {
     while (g_driver_count > 0U)
