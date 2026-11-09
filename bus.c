@@ -6,7 +6,6 @@
 
 #include "driver.h"
 
-#if OS_HAS_BUSES
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,19 +51,15 @@ typedef struct OsBus
     {
         OsI2cOp i2c[OS_BUS_MAX_OPS];
         OsSpiOp spi[OS_BUS_MAX_OPS];
-#if OS_HAS_ONEWIRE
         /* The kernel's RESET and match ROM come first. */
         OsOneWireOp onewire[OS_BUS_MAX_OPS + 2U];
-#endif
     } ops;
     OsBusFlag done;
     volatile OsStatus result;
-#if OS_HAS_ONEWIRE
     /* Match ROM and the code, which the port reads during the transfer. */
     uint8_t select[9];
     /* A strong pull-up was left on (POWER 0 last). */
     uint8_t powered;
-#endif
 } OsBus;
 
 static struct
@@ -190,12 +185,10 @@ static void os_bus_finish_all(uint8_t kind);
 /* The kernel's copy of a transfer's ops, of the bus's kind. */
 static const void* os_bus_ops(uint8_t kind, const OsBus* bus)
 {
-#if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
         return bus->ops.onewire;
     }
-#endif
     return kind == OS_BUS_I2C ? (const void*)bus->ops.i2c : (const void*)bus->ops.spi;
 }
 
@@ -493,6 +486,7 @@ static void os_i2c_finish_task(uint32_t task_id)
 void os_i2c_shutdown(void)
 {
     os_bus_finish_all(OS_BUS_I2C);
+    memset(&g_bus_trace, 0, sizeof(g_bus_trace));
     os_bus_free_all(g_i2c.buses, OS_I2C_MAX_BUSES);
     memset(&g_i2c, 0, sizeof(g_i2c));
 }
@@ -701,6 +695,7 @@ static void os_spi_finish_task(uint32_t task_id)
 void os_spi_shutdown(void)
 {
     os_bus_finish_all(OS_BUS_SPI);
+    memset(&g_bus_trace, 0, sizeof(g_bus_trace));
     os_bus_free_all(g_spi.buses, OS_SPI_MAX_BUSES);
     memset(&g_spi, 0, sizeof(g_spi));
 }
@@ -709,7 +704,6 @@ void os_spi_shutdown(void)
  * 1-Wire
  * ------------------------------------------------------------------------ */
 
-#if OS_HAS_ONEWIRE
 #define OS_ONEWIRE_MATCH_ROM 0x55U
 #define OS_ONEWIRE_SEARCH_ROM 0xF0U
 #define OS_ONEWIRE_ALARM_SEARCH 0xECU
@@ -783,6 +777,8 @@ OsStatus os_onewire_port_set(const OsOneWirePort* port)
     return OS_STATUS_OK;
 }
 
+extern const OsDriver os_onewire_driver;
+
 OsStatus os_onewire_add_bus(const char* name, uint32_t bus)
 {
     /* The speed is the standard one; the field only matters to the other kinds. */
@@ -791,6 +787,11 @@ OsStatus os_onewire_add_bus(const char* name, uint32_t bus)
     if (status != OS_STATUS_OK)
     {
         return status;
+    }
+    /* A platform with these devices gives programs the onewire interface. */
+    if (os_driver_add(&os_onewire_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
     }
     return OS_STATUS_OK;
 }
@@ -1103,10 +1104,10 @@ static void os_onewire_finish_task(uint32_t task_id)
 void os_onewire_shutdown(void)
 {
     os_bus_finish_all(OS_BUS_ONEWIRE);
+    memset(&g_bus_trace, 0, sizeof(g_bus_trace));
     os_bus_free_all(g_onewire.buses, OS_ONEWIRE_MAX_BUSES);
     memset(&g_onewire, 0, sizeof(g_onewire));
 }
-#endif
 
 static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
 {
@@ -1124,13 +1125,11 @@ static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
         buses = g_spi.buses;
         max = OS_SPI_MAX_BUSES;
     }
-#if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
         buses = g_onewire.buses;
         max = OS_ONEWIRE_MAX_BUSES;
     }
-#endif
     for (index = 0U; index < max; ++index)
     {
         if (buses[index] != NULL && buses[index]->bus == number)
@@ -1151,12 +1150,10 @@ static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t)
     {
         return g_spi.port.finish;
     }
-#if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
         return g_onewire.port.finish;
     }
-#endif
     return NULL;
 }
 
@@ -1170,12 +1167,10 @@ static void* os_bus_port_context(uint8_t kind)
     {
         return g_spi.port.context;
     }
-#if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
         return g_onewire.port.context;
     }
-#endif
     return NULL;
 }
 
@@ -1196,13 +1191,11 @@ static void os_bus_each(uint8_t kind, void (*visit)(uint8_t kind, OsBus* bus, ui
         buses = g_spi.buses;
         max = OS_SPI_MAX_BUSES;
     }
-#if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
         buses = g_onewire.buses;
         max = OS_ONEWIRE_MAX_BUSES;
     }
-#endif
     for (index = 0U; index < max; ++index)
     {
         if (buses[index] != NULL)
@@ -1248,34 +1241,6 @@ static void os_bus_finish_task_kind(uint8_t kind, uint32_t task_id)
 static void os_bus_finish_all(uint8_t kind)
 {
     os_bus_each(kind, os_bus_finish_one, 0U);
-}
-
-void os_bus_poll(void)
-{
-    os_i2c_poll();
-    os_spi_poll();
-#if OS_HAS_ONEWIRE
-    os_onewire_poll();
-#endif
-}
-
-void os_bus_finish_task(uint32_t task_id)
-{
-    os_i2c_finish_task(task_id);
-    os_spi_finish_task(task_id);
-#if OS_HAS_ONEWIRE
-    os_onewire_finish_task(task_id);
-#endif
-}
-
-void os_bus_shutdown(void)
-{
-    os_i2c_shutdown();
-    os_spi_shutdown();
-#if OS_HAS_ONEWIRE
-    os_onewire_shutdown();
-#endif
-    memset(&g_bus_trace, 0, sizeof(g_bus_trace));
 }
 
 /* ---------------------------------------------------------------------------
@@ -1516,4 +1481,161 @@ const OsDriver os_spi_driver =
     .shutdown = os_spi_shutdown,
 };
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The onewire interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OS_HOST_FUNCTION(os_onewire_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint64_t, rom);
+    OS_HOST_ARG(uint32_t, flags);
+    const char* bus = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    if (handle < 0)
+    {
+        OS_HOST_RETURN(handle);
+    }
+    if (bus == NULL || flags != 0U)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    status = os_onewire_open(bus, bus_length, rom, &id);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_driver_handle_new(&os_onewire_driver, id);
+    if (handle < 0)
+    {
+        os_onewire_close(id);
+    }
+    OS_HOST_RETURN(handle);
+}
+
+/* ops: count records of 12 bytes, u32 kind, u32 data, u32 length (bits for the _BITS kinds, ms for POWER). */
+static OS_HOST_FUNCTION(os_onewire_call_transaction)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, ops_address);
+    OS_HOST_ARG(uint32_t, count);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_onewire_driver, handle, &id);
+    OsOneWireOp ops[OS_BUS_MAX_OPS];
+    uint8_t* records = NULL;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (count > OS_BUS_MAX_OPS)
+    {
+        OS_HOST_RETURN(-WR_ELIMIT);
+    }
+    if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        const uint8_t* record = records + index * 12U;
+        uint32_t kind = OS_HOST_READ32(record);
+        uint32_t length = OS_HOST_READ32(record + 8U);
+        /* Bit ops use whole bytes, a pull-up and a reset none. */
+        uint32_t bytes = kind == OS_ONEWIRE_WRITE || kind == OS_ONEWIRE_READ ? length
+                         : kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS ? (length + 7U) / 8U
+                                                                                         : 0U;
+        int32_t result = 0;
+        if (kind < OS_ONEWIRE_WRITE || kind > OS_ONEWIRE_RESET ||
+            ((kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS) && length > 0xFFFFFFF8U))
+        {
+            OS_HOST_RETURN(-WR_EINVAL);
+        }
+        result = os_bus_guest_data(OS_HOST_READ32(record + 4U), bytes, &ops[index].data);
+        if (result < 0)
+        {
+            OS_HOST_RETURN(result);
+        }
+        ops[index].kind = (uint8_t)kind;
+        ops[index].length = length;
+    }
+    /* A port working in the background leaves the program waiting; the end writes the result. */
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_onewire_transaction(id, ops, count));
+    return os_guest_end();
+}
+
+/* state: 16 bytes, u64 rom, u32 discrepancy, u32 done. 1 and the next ROM, or 0 when there are no more. */
+static OS_HOST_FUNCTION(os_onewire_call_search)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint32_t, state_address);
+    OS_HOST_ARG(uint32_t, flags);
+    const char* bus = NULL;
+    uint8_t* memory = NULL;
+    OsOneWireSearch state;
+    uint8_t found = 0U;
+    int32_t result = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    result = os_abi_read_name(bus_address, bus_length, &bus);
+    if (result < 0)
+    {
+        OS_HOST_RETURN(result);
+    }
+    if (bus == NULL)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    if (os_guest_memory(state_address, 16U, &memory) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    state.rom = OS_HOST_READ64(memory);
+    state.discrepancy = OS_HOST_READ32(memory + 8U);
+    state.done = OS_HOST_READ32(memory + 12U);
+    status = os_onewire_search(bus, bus_length, &state, flags, &found);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    OS_HOST_WRITE64(memory, state.rom);
+    OS_HOST_WRITE32(memory + 8U, state.discrepancy);
+    OS_HOST_WRITE32(memory + 12U, state.done);
+    OS_HOST_RETURN((int32_t)found);
+}
+
+static const OsDriverCall os_onewire_calls[] =
+{
+    { "open", "i(iiIi)", os_onewire_call_open, 6U },
+    { "transaction", "i(iii)", os_onewire_call_transaction, 6U },
+    { "search", "i(iiii)", os_onewire_call_search, 6U },
+};
+
+const OsDriver os_onewire_driver =
+{
+    .interface = "onewire",
+    .calls = os_onewire_calls,
+    .call_count = (uint32_t)(sizeof(os_onewire_calls) / sizeof(os_onewire_calls[0])),
+    .close = os_onewire_close,
+    .poll = os_onewire_poll,
+    .finish_task = os_onewire_finish_task,
+    .shutdown = os_onewire_shutdown,
+};
+

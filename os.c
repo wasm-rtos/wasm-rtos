@@ -801,9 +801,6 @@ void os_shutdown(void)
     os_timer_free_all();
     os_host_import_free_list();
     os_host_functions_free();
-#if OS_HAS_BUSES
-    os_bus_shutdown();
-#endif
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
@@ -3919,10 +3916,6 @@ OsStatus os_schedule(void)
 
     /* What drivers saw in the background, such as edges from interrupt handlers. */
     os_drivers_poll();
-#if OS_HAS_BUSES
-    /* Background bus transfers that have ended. */
-    os_bus_poll();
-#endif
 
     if (g_os.clock_port.now_ms != NULL)
     {
@@ -7328,9 +7321,6 @@ void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value)
 void os_transfer_finish_task(uint32_t task_id)
 {
     os_drivers_finish_task(task_id);
-#if OS_HAS_BUSES
-    os_bus_finish_task(task_id);
-#endif
 }
 
 OsStatus os_signal_wait(uint32_t key, uint32_t timeout_ms)

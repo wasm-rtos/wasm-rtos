@@ -18,8 +18,7 @@ typedef enum OsObjectType
     OS_OBJECT_TIMER,
     OS_OBJECT_TASK,
     /* An object of a driver (driver.h): the handle and the wait target name the driver. */
-    OS_OBJECT_DRIVER,
-    OS_OBJECT_ONEWIRE
+    OS_OBJECT_DRIVER
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -284,7 +283,6 @@ void os_spi_close(uint32_t id);
 OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count);
 void os_spi_shutdown(void);
 
-#if OS_HAS_ONEWIRE
 /* ---- 1-Wire for programs (bus.c) ------------------------------------------- */
 
 /*
@@ -310,7 +308,6 @@ typedef struct OsOneWireSearch
 OsStatus os_onewire_search(const char* bus_name, uint32_t length, OsOneWireSearch* state, uint32_t flags,
                            uint8_t* out_found);
 void os_onewire_shutdown(void);
-#endif
 
 /* ---- Counters for programs (counter.c) ------------------------------------- */
 #define OS_COUNTER_PROP_KIND      1U
@@ -382,14 +379,6 @@ uint8_t os_uart_ready(uint32_t id);
 /* Deliver what ports reported from interrupt handlers. */
 void os_uart_poll(void);
 void os_uart_shutdown(void);
-
-#if OS_HAS_BUSES
-void os_bus_shutdown(void);
-/* Deliver background transfers that have ended. */
-void os_bus_poll(void);
-/* End the background transfer task_id waits for, at once (the port's finish). */
-void os_bus_finish_task(uint32_t task_id);
-#endif
 
 /* ---- Pulse trains for programs (pulse.c) ----------------------------------- */
 #define OS_PULSE_PROP_RESOLUTION 1U

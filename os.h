@@ -11,7 +11,6 @@
  *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
- *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
  * Off unless defined to 1:
  *   OS_HAS_DYLINK     dylink.0 programs and shared libraries (vm/source/wm_dylink.c)
@@ -26,9 +25,6 @@
 #ifndef OS_FS_TAR
 #define OS_FS_TAR OS_HAS_FS
 #endif
-#ifndef OS_HAS_ONEWIRE
-#define OS_HAS_ONEWIRE 1
-#endif
 #ifndef OS_HAS_WASI
 #define OS_HAS_WASI 1
 #endif
@@ -41,8 +37,6 @@
 #if OS_HAS_DYLINK
 #include "vm/source/wm_dylink.h"
 #endif
-/* Buses of any kind: the shared machinery of bus.c. */
-#define OS_HAS_BUSES (OS_HAS_I2C || OS_HAS_SPI || OS_HAS_ONEWIRE)
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
@@ -933,7 +927,6 @@ OsStatus os_input_text(uint32_t device, uint32_t code_point);
 /* The id of the task that owns a device, 0 when it is free or unknown. */
 uint32_t os_input_get_owner(uint32_t device);
 
-#if OS_HAS_BUSES
 /*
  * Buses. The platform registers each bus under the device profile's name
  * ("i2c0", "spi0", "ow0") and moves the bytes through a port; the kernel lends
@@ -995,7 +988,6 @@ typedef struct OsOneWireOp
     uint8_t* data;     /* written from, or read into; bits least significant first */
     uint32_t length;   /* bytes, bits for the _BITS kinds, milliseconds for POWER */
 } OsOneWireOp;
-#endif
 
 /*
  * I2C: ops in order, a repeated start where a read follows a write or a
@@ -1060,7 +1052,6 @@ OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz);
 /* The id of the task that holds bus exclusively or has a device on it with chip select pin cs_pin; 0 when none. */
 uint32_t os_spi_get_owner(uint32_t bus, uint32_t cs_pin);
 
-#if OS_HAS_ONEWIRE
 /*
  * 1-Wire: one data line with a pull-up, devices told apart by a 64-bit ROM
  * code (family code in the low byte, CRC in the high one). Ops in order:
@@ -1114,9 +1105,7 @@ OsStatus os_onewire_add_bus(const char* name, uint32_t bus);
 uint32_t os_onewire_get_owner(uint32_t bus, uint64_t rom);
 /* The 1-Wire CRC-8 (polynomial x^8 + x^5 + x^4 + 1) of length bytes. */
 uint8_t os_onewire_crc8(const uint8_t* data, uint32_t length);
-#endif
 
-#if OS_HAS_BUSES
 /*
  * Every finished transaction, for bus analyzers and logs: which program,
  * which bus and device, the ops with the bytes written and read (valid
@@ -1155,7 +1144,6 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context);
 void os_bus_complete(uint32_t kind, uint32_t bus, OsStatus status);
 /* Whether a background transfer is in progress on a bus. */
 uint8_t os_bus_is_busy(uint32_t kind, uint32_t bus);
-#endif
 
 /*
  * Analog inputs, registered under the device profile's names ("a0",
