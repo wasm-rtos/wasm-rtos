@@ -6,7 +6,6 @@
 
 #include "driver.h"
 
-
 #include <string.h>
 
 #ifndef OS_PWM_MAX

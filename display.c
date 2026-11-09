@@ -5,7 +5,6 @@
 
 #include "driver.h"
 
-
 #include <string.h>
 
 /* Bytes of pixels fill writes at a time when the port has no fill of its own. */
