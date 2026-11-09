@@ -32,7 +32,6 @@
 /* Event groups keep 24 bits so every value fits a non-negative i32. */
 #define OS_ABI_EVENT_BITS 0x00FFFFFFU
 
-
 #define WR_SYNC_EVENT_ALL 1U
 #define WR_SYNC_EVENT_CLEAR 2U
 #define WR_TIMER_PERIODIC 1U
@@ -139,13 +138,6 @@ static void os_abi_drop(OsAbiHandle* handle)
     if (handle->type == OS_OBJECT_SPI)
     {
         os_spi_close(handle->id);
-    }
-    else
-#endif
-#if OS_HAS_PULSE
-    if (handle->type == OS_OBJECT_PULSE)
-    {
-        os_pulse_close(handle->id);
     }
     else
 #endif
@@ -487,7 +479,6 @@ static uint64_t os_abi_read_le64(const uint8_t* bytes)
 {
     return (uint64_t)os_abi_read_le32(bytes) | ((uint64_t)os_abi_read_le32(bytes + 4U) << 32U);
 }
-
 
 /* ---------------------------------------------------------------------------
  * handle
@@ -1018,7 +1009,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
             (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)  ||
-            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI   || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE )
+            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI    || entry->type == OS_OBJECT_ONEWIRE )
         {
             OS_HOST_RETURN(-WR_EBADH);
         }
@@ -1457,202 +1448,6 @@ static OS_HOST_FUNCTION(os_abi_spi_transaction)
 #endif
 
 /* ---------------------------------------------------------------------------
- * adc, pwm, uart
- * ------------------------------------------------------------------------ */
-
-/* A property value for the program, or the error. */
-static int32_t os_abi_property(OsStatus status, uint32_t value)
-{
-    return os_driver_property(status, value);
-}
-
-/* Read a name, then make a handle for what opener opened, closing it again when no handle is left. */
-static int32_t os_abi_open_device(uint32_t name_address, uint32_t name_length, OsObjectType type,
-                                  OsStatus (*opener)(const char* name, uint32_t length, void* context, uint32_t* out_id),
-                                  void* context, void (*closer)(uint32_t id))
-{
-    const char* name = NULL;
-    uint32_t id = 0U;
-    int32_t handle = os_abi_read_name(name_address, name_length, &name);
-    OsStatus status = OS_STATUS_OK;
-
-    if (handle < 0)
-    {
-        return handle;
-    }
-    if (name == NULL)
-    {
-        return -WR_EINVAL;
-    }
-    status = opener(name, name_length, context, &id);
-    if (status != OS_STATUS_OK)
-    {
-        return status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status);
-    }
-    handle = os_abi_handle_new(type, id);
-    if (handle < 0 && closer != NULL)
-    {
-        closer(id);
-    }
-    return handle;
-}
-
-
-
-
-/* ---------------------------------------------------------------------------
- * pulse
- * ------------------------------------------------------------------------ */
-
-#if OS_HAS_PULSE
-static OsStatus os_abi_pulse_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
-{
-    return os_pulse_open(name, length, *(const uint32_t*)context, out_id);
-}
-
-static OS_HOST_FUNCTION(os_abi_pulse_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, flags);
-    OS_ABI_UNUSED();
-
-    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_PULSE, os_abi_pulse_opener, &flags,
-                                   os_pulse_close));
-}
-
-/* Items are 32-bit words the port reads in place: they must be aligned. */
-static int32_t os_abi_pulse_items(uint32_t address, uint32_t count, uint32_t** out_items)
-{
-    uint8_t* memory = NULL;
-
-    if (count > 0x3FFFFFFFU || (address & 3U) != 0U)
-    {
-        return count > 0x3FFFFFFFU ? -WR_EFAULT : -WR_EINVAL;
-    }
-    if (count > 0U && os_guest_memory(address, count * 4U, &memory) != OS_STATUS_OK)
-    {
-        return -WR_EFAULT;
-    }
-    *out_items = (uint32_t*)(void*)memory;
-    return 0;
-}
-
-static OS_HOST_FUNCTION(os_abi_pulse_send)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, items_address);
-    OS_HOST_ARG(uint32_t, count);
-    OS_HOST_ARG(uint32_t, carrier_hz);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
-    uint32_t* items = NULL;
-    int32_t result = 0;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    result = os_abi_pulse_items(items_address, count, &items);
-    if (result < 0)
-    {
-        OS_HOST_RETURN(result);
-    }
-    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    *raw_return = os_abi_error(os_pulse_send(entry->id, items, count, carrier_hz));
-    return os_guest_end();
-}
-
-static OS_HOST_FUNCTION(os_abi_pulse_send_bits)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, data_address);
-    OS_HOST_ARG(uint32_t, length);
-    OS_HOST_ARG(uint32_t, zero_high_ns);
-    OS_HOST_ARG(uint32_t, zero_low_ns);
-    OS_HOST_ARG(uint32_t, one_high_ns);
-    OS_HOST_ARG(uint32_t, one_low_ns);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
-    uint32_t timing[4] = { zero_high_ns, zero_low_ns, one_high_ns, one_low_ns };
-    uint8_t* data = NULL;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    *raw_return = os_abi_error(os_pulse_send_bits(entry->id, data, length, timing));
-    return os_guest_end();
-}
-
-static OS_HOST_FUNCTION(os_abi_pulse_receive)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, items_address);
-    OS_HOST_ARG(uint32_t, max);
-    OS_HOST_ARG(uint32_t, idle_ns);
-    OS_HOST_ARG(uint32_t, timeout_ms);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
-    uint32_t* items = NULL;
-    uint32_t count = 0U;
-    int32_t result = 0;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    result = os_abi_pulse_items(items_address, max, &items);
-    if (result < 0)
-    {
-        OS_HOST_RETURN(result);
-    }
-    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    /* Done at once: the count now; in the background, the wakeup writes it. */
-    status = os_pulse_receive(entry->id, items, max, idle_ns, timeout_ms, &count);
-    *raw_return = status == OS_STATUS_OK ? (int32_t)count : os_abi_error(status);
-    return os_guest_end();
-}
-
-static OS_HOST_FUNCTION(os_abi_pulse_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, property);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_PULSE);
-    uint32_t value = 0U;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    status = os_pulse_get(entry->id, property, &value);
-    OS_HOST_RETURN(os_abi_property(status, value));
-}
-#endif
-
-/* ---------------------------------------------------------------------------
  * onewire
  * ------------------------------------------------------------------------ */
 
@@ -1794,7 +1589,7 @@ static OS_HOST_FUNCTION(os_abi_onewire_search)
 #endif
 
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
+    !OS_HAS_SPI || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
 {
@@ -2289,8 +2084,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("proc"), "self", "i()", os_abi_proc_self, 0U },
     { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
 
-
-
 #if OS_HAS_I2C
     { WR_MODULE("i2c"), "open", "i(iiii)", os_abi_i2c_open, 3U },
     { WR_MODULE("i2c"), "transaction", "i(iii)", os_abi_i2c_transaction, 3U },
@@ -2307,23 +2100,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("spi"), "transaction", "i(iii)", os_abi_unsupported, 3U },
 #endif
 
-
-
-
-#if OS_HAS_PULSE
-    { WR_MODULE("pulse"), "open", "i(iii)", os_abi_pulse_open, 5U },
-    { WR_MODULE("pulse"), "send", "i(iiii)", os_abi_pulse_send, 5U },
-    { WR_MODULE("pulse"), "send-bits", "i(iiiiiii)", os_abi_pulse_send_bits, 5U },
-    { WR_MODULE("pulse"), "receive", "i(iiiii)", os_abi_pulse_receive, 5U },
-    { WR_MODULE("pulse"), "get", "i(ii)", os_abi_pulse_get, 5U },
-#else
-    { WR_MODULE("pulse"), "open", "i(iii)", os_abi_unsupported, 5U },
-    { WR_MODULE("pulse"), "send", "i(iiii)", os_abi_unsupported, 5U },
-    { WR_MODULE("pulse"), "send-bits", "i(iiiiiii)", os_abi_unsupported, 5U },
-    { WR_MODULE("pulse"), "receive", "i(iiiii)", os_abi_unsupported, 5U },
-    { WR_MODULE("pulse"), "get", "i(ii)", os_abi_unsupported, 5U },
-#endif
-
 #if OS_HAS_ONEWIRE
     { WR_MODULE("onewire"), "open", "i(iiIi)", os_abi_onewire_open, 6U },
     { WR_MODULE("onewire"), "transaction", "i(iii)", os_abi_onewire_transaction, 6U },
@@ -2333,8 +2109,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("onewire"), "transaction", "i(iii)", os_abi_unsupported, 6U },
     { WR_MODULE("onewire"), "search", "i(iiii)", os_abi_unsupported, 6U },
 #endif
-
-
 
 #if defined(OS_ABI_HAS_WASI)
     { "wasi_snapshot_preview1", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get, 0U },

@@ -21,7 +21,6 @@ typedef enum OsObjectType
     OS_OBJECT_DRIVER,
     OS_OBJECT_I2C,
     OS_OBJECT_SPI,
-    OS_OBJECT_PULSE,
     OS_OBJECT_ONEWIRE
 } OsObjectType;
 
@@ -390,9 +389,6 @@ uint8_t os_uart_ready(uint32_t id);
 void os_uart_poll(void);
 void os_uart_shutdown(void);
 
-/* Ports that work on a program's memory in the background: buses and pulse trains. */
-#define OS_HAS_TRANSFERS (OS_HAS_BUSES || OS_HAS_PULSE)
-
 #if OS_HAS_BUSES
 void os_bus_shutdown(void);
 /* Deliver background transfers that have ended. */
@@ -401,7 +397,6 @@ void os_bus_poll(void);
 void os_bus_finish_task(uint32_t task_id);
 #endif
 
-#if OS_HAS_PULSE
 /* ---- Pulse trains for programs (pulse.c) ----------------------------------- */
 #define OS_PULSE_PROP_RESOLUTION 1U
 OsStatus os_pulse_open(const char* name, uint32_t length, uint32_t flags, uint32_t* out_id);
@@ -415,15 +410,12 @@ OsStatus os_pulse_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_pulse_poll(void);
 void os_pulse_finish_task(uint32_t task_id);
 void os_pulse_shutdown(void);
-#endif
 
-#if OS_HAS_TRANSFERS
 /* The current task waits for its background transfer (os.c). */
 OsStatus os_transfer_wait_begin(void);
 /* The transfer of task_id ended with status and value; wakes it (os.c). */
 void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value);
 /* End every background transfer of task_id now, through the ports' finish. */
 void os_transfer_finish_task(uint32_t task_id);
-#endif
 
 #endif

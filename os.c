@@ -804,9 +804,6 @@ void os_shutdown(void)
 #if OS_HAS_BUSES
     os_bus_shutdown();
 #endif
-#if OS_HAS_PULSE
-    os_pulse_shutdown();
-#endif
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
@@ -2334,7 +2331,6 @@ OsStatus os_task_abort_wait(OsTaskHandle task)
         return OS_STATUS_NOT_WAITING;
     }
 
-#if OS_HAS_TRANSFERS
     /* Bytes on the wire cannot be called back: the transfer ends and the program gets its result. */
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
@@ -2342,7 +2338,6 @@ OsStatus os_task_abort_wait(OsTaskHandle task)
         os_recalculate_task_counters();
         return OS_STATUS_OK;
     }
-#endif
     os_cancel_task_wait(task, OS_STATUS_ABORTED);
     os_recalculate_task_counters();
     os_preempt_for_higher_priority_ready_task();
@@ -2408,13 +2403,11 @@ OsStatus os_task_suspend(OsTaskHandle task)
         os_request_task_stop(task);
     }
 
-#if OS_HAS_TRANSFERS
     /* A transfer in progress ends first; its result reaches the program when it resumes. */
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
         os_transfer_finish_task(task->id);
     }
-#endif
     if (task->state == OS_TASK_WAITING)
     {
         os_cancel_task_wait(task, OS_STATUS_BUSY);
@@ -3929,10 +3922,6 @@ OsStatus os_schedule(void)
 #if OS_HAS_BUSES
     /* Background bus transfers that have ended. */
     os_bus_poll();
-#endif
-#if OS_HAS_PULSE
-    /* Pulse trains sent or captured in the background. */
-    os_pulse_poll();
 #endif
 
     if (g_os.clock_port.now_ms != NULL)
@@ -6750,12 +6739,10 @@ static void os_set_task_dead(OsTaskHandle task)
         g_os.current_task = NULL;
     }
 
-#if OS_HAS_TRANSFERS
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
         os_transfer_finish_task(task->id);
     }
-#endif
     os_cancel_task_wait(task, OS_STATUS_TASK_DEAD);
     os_release_task_mutexes(task);
     os_timer_delete_for_task(task);
@@ -6834,13 +6821,11 @@ static void os_destroy_task(OsTaskHandle task)
         g_os.last_scheduled_task = task->previous;
     }
 
-#if OS_HAS_TRANSFERS
     /* The port must be done with the task's memory before it is freed. */
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
         os_transfer_finish_task(task->id);
     }
-#endif
     os_cancel_task_wait(task, OS_STATUS_TASK_DEAD);
     os_release_task_mutexes(task);
     os_timer_delete_for_task(task);
@@ -7323,7 +7308,6 @@ uint32_t os_current_parent_id(void)
 }
 #endif
 
-#if OS_HAS_TRANSFERS
 OsStatus os_transfer_wait_begin(void)
 {
     return os_begin_task_wait(g_os.current_task, OS_TASK_WAIT_TRANSFER, OS_WAIT_FOREVER);
@@ -7347,11 +7331,7 @@ void os_transfer_finish_task(uint32_t task_id)
 #if OS_HAS_BUSES
     os_bus_finish_task(task_id);
 #endif
-#if OS_HAS_PULSE
-    os_pulse_finish_task(task_id);
-#endif
 }
-#endif
 
 OsStatus os_signal_wait(uint32_t key, uint32_t timeout_ms)
 {

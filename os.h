@@ -13,7 +13,6 @@
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
  *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
  *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
- *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
  * Off unless defined to 1:
@@ -34,9 +33,6 @@
 #endif
 #ifndef OS_HAS_SPI
 #define OS_HAS_SPI 1
-#endif
-#ifndef OS_HAS_PULSE
-#define OS_HAS_PULSE 1
 #endif
 #ifndef OS_HAS_ONEWIRE
 #define OS_HAS_ONEWIRE 1
@@ -1367,7 +1363,6 @@ void os_counter_event(uint32_t unit);
 /* The id of the task that owns a counter, 0 when it is free. */
 uint32_t os_counter_get_owner(uint32_t unit);
 
-#if OS_HAS_PULSE
 /*
  * Timed pulse trains on GPIO pins that have OS_GPIO_CAN_PULSE, for what needs
  * timing finer than a program can keep: addressable LEDs, infrared remotes,
@@ -1423,7 +1418,6 @@ OsStatus os_pulse_port_set(const OsPulsePort* port);
  * for receive, how many items it wrote. Safe in an interrupt handler.
  */
 void os_pulse_complete(uint32_t pin, OsStatus status, uint32_t count);
-#endif
 
 uint32_t os_get_task_count(void);
 uint32_t os_get_ready_task_count(void);
