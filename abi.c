@@ -188,13 +188,6 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     else
 #endif
-#if OS_HAS_DAC
-    if (handle->type == OS_OBJECT_DAC)
-    {
-        os_dac_close(handle->id);
-    }
-    else
-#endif
     if (handle->type != OS_OBJECT_TASK)
     {
         os_object_release(handle->type, handle->id);
@@ -1003,8 +996,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
             (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL) || entry->type == OS_OBJECT_DISPLAY ||
             entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI || entry->type == OS_OBJECT_ADC ||
-            entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE ||
-            entry->type == OS_OBJECT_DAC)
+            entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE )
         {
             OS_HOST_RETURN(-WR_EBADH);
         }
@@ -1660,7 +1652,6 @@ static OS_HOST_FUNCTION(os_abi_spi_transaction)
  * adc, pwm, uart
  * ------------------------------------------------------------------------ */
 
-#if OS_HAS_ADC || OS_HAS_PWM || OS_HAS_UART || OS_HAS_PULSE || OS_HAS_COUNTER || OS_HAS_DAC
 /* A property value for the program, or the error. */
 static int32_t os_abi_property(OsStatus status, uint32_t value)
 {
@@ -1697,7 +1688,6 @@ static int32_t os_abi_open_device(uint32_t name_address, uint32_t name_length, O
     }
     return handle;
 }
-#endif
 
 #if OS_HAS_ADC
 static OsStatus os_abi_adc_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
@@ -2374,84 +2364,8 @@ static OS_HOST_FUNCTION(os_abi_counter_get)
 }
 #endif
 
-/* ---------------------------------------------------------------------------
- * dac
- * ------------------------------------------------------------------------ */
-
-#if OS_HAS_DAC
-static OsStatus os_abi_dac_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
-{
-    (void)context;
-    return os_dac_open(name, length, out_id);
-}
-
-static OS_HOST_FUNCTION(os_abi_dac_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, flags);
-    OS_ABI_UNUSED();
-
-    if (flags != 0U)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_DAC, os_abi_dac_opener, NULL, os_dac_close));
-}
-
-static OS_HOST_FUNCTION(os_abi_dac_write)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, raw);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DAC);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_dac_write(entry->id, raw)));
-}
-
-static OS_HOST_FUNCTION(os_abi_dac_write_mv)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, mv);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DAC);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_dac_write_mv(entry->id, mv)));
-}
-
-static OS_HOST_FUNCTION(os_abi_dac_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, property);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DAC);
-    uint32_t value = 0U;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    status = os_dac_get(entry->id, property, &value);
-    OS_HOST_RETURN(os_abi_property(status, value));
-}
-#endif
-
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE || !OS_HAS_COUNTER || \
-    !OS_HAS_DAC
+    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE || !OS_HAS_COUNTER
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
 {
@@ -3064,17 +2978,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("counter"), "get", "i(ii)", os_abi_unsupported, 7U },
 #endif
 
-#if OS_HAS_DAC
-    { WR_MODULE("dac"), "open", "i(iii)", os_abi_dac_open, 8U },
-    { WR_MODULE("dac"), "write", "i(ii)", os_abi_dac_write, 8U },
-    { WR_MODULE("dac"), "write-mv", "i(ii)", os_abi_dac_write_mv, 8U },
-    { WR_MODULE("dac"), "get", "i(ii)", os_abi_dac_get, 8U },
-#else
-    { WR_MODULE("dac"), "open", "i(iii)", os_abi_unsupported, 8U },
-    { WR_MODULE("dac"), "write", "i(ii)", os_abi_unsupported, 8U },
-    { WR_MODULE("dac"), "write-mv", "i(ii)", os_abi_unsupported, 8U },
-    { WR_MODULE("dac"), "get", "i(ii)", os_abi_unsupported, 8U },
-#endif
 
 #if defined(OS_ABI_HAS_WASI)
     { "wasi_snapshot_preview1", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get, 0U },

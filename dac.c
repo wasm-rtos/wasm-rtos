@@ -3,9 +3,8 @@
  * A channel named like a GPIO pin takes that pin while it is open.
  */
 
-#include "os_internal.h"
+#include "driver.h"
 
-#if OS_HAS_DAC
 
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +58,8 @@ OsStatus os_dac_port_set(const OsDacPort* port)
     return OS_STATUS_OK;
 }
 
+extern const OsDriver os_dac_driver;
+
 OsStatus os_dac_add_channel(const char* name, uint32_t channel, const OsDacInfo* info)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
@@ -98,6 +99,11 @@ OsStatus os_dac_add_channel(const char* name, uint32_t channel, const OsDacInfo*
     slot->name_length = (uint8_t)length;
     slot->info = *info;
     g_dac.channels[free_index] = slot;
+    /* A platform with these devices gives programs the dac interface. */
+    if (os_driver_add(&os_dac_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -267,4 +273,98 @@ void os_dac_shutdown(void)
     memset(&g_dac, 0, sizeof(g_dac));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The dac interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OsStatus os_dac_call_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    (void)context;
+    return os_dac_open(name, length, out_id);
+}
+
+static OS_HOST_FUNCTION(os_dac_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
+    OS_ABI_UNUSED();
+
+    if (flags != 0U)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    OS_HOST_RETURN(os_driver_open(&os_dac_driver, name_address, name_length, os_dac_call_opener, NULL));
+}
+
+static OS_HOST_FUNCTION(os_dac_call_write)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, raw);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_dac_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_dac_write(id, raw)));
+}
+
+static OS_HOST_FUNCTION(os_dac_call_write_mv)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, mv);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_dac_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_dac_write_mv(id, mv)));
+}
+
+static OS_HOST_FUNCTION(os_dac_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_dac_driver, handle, &id);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    status = os_dac_get(id, property, &value);
+    OS_HOST_RETURN(os_driver_property(status, value));
+}
+
+static const OsDriverCall os_dac_calls[] =
+{
+    { "open", "i(iii)", os_dac_call_open, 8U },
+    { "write", "i(ii)", os_dac_call_write, 8U },
+    { "write-mv", "i(ii)", os_dac_call_write_mv, 8U },
+    { "get", "i(ii)", os_dac_call_get, 8U },
+};
+
+const OsDriver os_dac_driver =
+{
+    "dac",
+    os_dac_calls,
+    (uint32_t)(sizeof(os_dac_calls) / sizeof(os_dac_calls[0])),
+    os_dac_close,
+    NULL,
+    NULL,
+    os_dac_shutdown,
+};
+

@@ -28,8 +28,7 @@ typedef enum OsObjectType
     OS_OBJECT_UART,
     OS_OBJECT_PULSE,
     OS_OBJECT_ONEWIRE,
-    OS_OBJECT_COUNTER,
-    OS_OBJECT_DAC
+    OS_OBJECT_COUNTER
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -345,7 +344,6 @@ uint32_t os_counter_next_deadline_ms(void);
 void os_counter_shutdown(void);
 #endif
 
-#if OS_HAS_DAC
 /* ---- Analog outputs for programs (dac.c) ----------------------------------- */
 #define OS_DAC_PROP_RESOLUTION 1U
 #define OS_DAC_PROP_MAX        2U
@@ -359,7 +357,6 @@ OsStatus os_dac_write(uint32_t id, uint32_t raw);
 OsStatus os_dac_write_mv(uint32_t id, uint32_t mv);
 OsStatus os_dac_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_dac_shutdown(void);
-#endif
 
 #if OS_HAS_ADC
 /* ---- Analog inputs for programs (adc.c) ------------------------------------ */

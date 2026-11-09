@@ -810,9 +810,6 @@ void os_shutdown(void)
 #if OS_HAS_COUNTER
     os_counter_shutdown();
 #endif
-#if OS_HAS_DAC
-    os_dac_shutdown();
-#endif
 #if OS_HAS_ADC
     os_adc_shutdown();
 #endif

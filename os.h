@@ -21,7 +21,6 @@
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_COUNTER    pulse counters and quadrature encoders through a platform port
- *   OS_HAS_DAC        analog outputs for programs through a platform DAC port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
  * Off unless defined to 1:
  *   OS_HAS_DYLINK     dylink.0 programs and shared libraries (vm/source/wm_dylink.c)
@@ -65,9 +64,6 @@
 #endif
 #ifndef OS_HAS_COUNTER
 #define OS_HAS_COUNTER 1
-#endif
-#ifndef OS_HAS_DAC
-#define OS_HAS_DAC 1
 #endif
 #ifndef OS_HAS_WASI
 #define OS_HAS_WASI 1
@@ -1229,7 +1225,6 @@ OsStatus os_adc_port_set(const OsAdcPort* port);
 OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo* info);
 #endif
 
-#if OS_HAS_DAC
 /*
  * Analog outputs, registered under the device profile's names. One program
  * owns an output at a time. A channel named like a GPIO pin ("gpio25") is
@@ -1266,7 +1261,6 @@ OsStatus os_dac_port_set(const OsDacPort* port);
 OsStatus os_dac_add_channel(const char* name, uint32_t channel, const OsDacInfo* info);
 /* The id of the task that owns a channel, 0 when it is free. */
 uint32_t os_dac_get_owner(uint32_t channel);
-#endif
 
 #if OS_HAS_PWM
 /*
