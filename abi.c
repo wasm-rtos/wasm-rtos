@@ -8,7 +8,7 @@
  * when its process ends. docs/abi.md and wit/ describe the interfaces.
  */
 
-#include "os_internal.h"
+#include "driver.h"
 #include "fs.h"
 
 #if OS_HAS_WASI
@@ -32,34 +32,6 @@
 /* Event groups keep 24 bits so every value fits a non-negative i32. */
 #define OS_ABI_EVENT_BITS 0x00FFFFFFU
 
-/* ABI error codes; the calls return their negatives. Keep in sync with wasm-rtos.h. */
-enum
-{
-    WR_EFAULT = 1,
-    WR_EINVAL = 2,
-    WR_EBADH = 3,
-    WR_ENOMEM = 4,
-    WR_ELIMIT = 5,
-    WR_ENOTFOUND = 6,
-    WR_ETIMEOUT = 7,
-    WR_EABORTED = 8,
-    WR_EBUSY = 9,
-    WR_ENOTOWNER = 10,
-    WR_EFULL = 11,
-    WR_EEMPTY = 12,
-    WR_EUNSUPPORTED = 13,
-    WR_ETOOLONG = 14,
-    WR_EBADPROGRAM = 15,
-    WR_EISDIR = 16,
-    WR_ENOTDIR = 17,
-    WR_EDEAD = 18,
-    WR_EMISMATCH = 19,
-    WR_ETRAPPED = 20,
-    WR_EKILLED = 21,
-    WR_EINUSE = 22,
-    WR_ENACK = 23,
-    WR_EBUS = 24
-};
 
 #define WR_SYNC_EVENT_ALL 1U
 #define WR_SYNC_EVENT_CLEAR 2U
@@ -122,6 +94,8 @@ typedef struct OsAbiHandle
 {
     OsObjectType type;
     uint32_t id;
+    /* For OS_OBJECT_DRIVER. */
+    const OsDriver* driver;
 } OsAbiHandle;
 
 typedef struct OsAbiState
@@ -146,13 +120,11 @@ static OsAbiState* os_abi_state(uint8_t create)
 
 static void os_abi_drop(OsAbiHandle* handle)
 {
-#if OS_HAS_GPIO
-    if (handle->type == OS_OBJECT_GPIO)
+    if (handle->type == OS_OBJECT_DRIVER)
     {
-        os_gpio_close(handle->id);
+        handle->driver->close(handle->id);
     }
     else
-#endif
 #if OS_HAS_DISPLAY
     if (handle->type == OS_OBJECT_DISPLAY)
     {
@@ -229,6 +201,7 @@ static void os_abi_drop(OsAbiHandle* handle)
     }
     handle->type = OS_OBJECT_NONE;
     handle->id = 0U;
+    handle->driver = NULL;
 }
 
 void os_abi_release_task(OsTaskHandle task)
@@ -301,6 +274,82 @@ static int32_t os_abi_handle_for_new(OsObjectType type, uint32_t id)
     return handle;
 }
 
+int32_t os_driver_handle_new(const OsDriver* driver, uint32_t id)
+{
+    int32_t handle = os_abi_handle_new(OS_OBJECT_DRIVER, id);
+    if (handle > 0)
+    {
+        os_abi_state(0U)->handles[handle - 1].driver = driver;
+    }
+    return handle;
+}
+
+int os_driver_handle_get(const OsDriver* driver, int32_t handle, uint32_t* out_id)
+{
+    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DRIVER);
+    if (entry == NULL || entry->driver != driver)
+    {
+        return 0;
+    }
+    *out_id = entry->id;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Drivers
+ * ------------------------------------------------------------------------ */
+
+static const OsDriver* g_drivers[OS_MAX_DRIVERS];
+static uint32_t g_driver_count;
+
+OsStatus os_driver_add(const OsDriver* driver)
+{
+    uint32_t index = 0U;
+
+    if (driver == NULL || driver->interface == NULL || driver->close == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    for (index = 0U; index < g_driver_count; ++index)
+    {
+        if (g_drivers[index] == driver)
+        {
+            return OS_STATUS_OK;
+        }
+    }
+    if (g_driver_count == OS_MAX_DRIVERS)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
+    g_drivers[g_driver_count++] = driver;
+    return OS_STATUS_OK;
+}
+
+void os_drivers_poll(void)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < g_driver_count; ++index)
+    {
+        if (g_drivers[index]->poll != NULL)
+        {
+            g_drivers[index]->poll();
+        }
+    }
+}
+
+void os_drivers_shutdown(void)
+{
+    while (g_driver_count > 0U)
+    {
+        const OsDriver* driver = g_drivers[--g_driver_count];
+        if (driver->shutdown != NULL)
+        {
+            driver->shutdown();
+        }
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * Guest memory and strings
  * ------------------------------------------------------------------------ */
@@ -333,7 +382,7 @@ static uint8_t os_abi_utf8_valid(const uint8_t* text, uint32_t length)
 }
 
 /* An optional object name: (0, 0) means none. */
-static int32_t os_abi_read_name(uint32_t address, uint32_t length, const char** out_name)
+int32_t os_abi_read_name(uint32_t address, uint32_t length, const char** out_name)
 {
     uint8_t* memory = NULL;
 
@@ -388,7 +437,6 @@ static uint64_t os_abi_read_le64(const uint8_t* bytes)
 }
 #endif
 
-#define OS_ABI_UNUSED() (void)runtime; (void)os_host_user; (void)os_host_memory
 
 /* ---------------------------------------------------------------------------
  * handle
@@ -917,7 +965,8 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
     for (index = 0U; index < count; ++index)
     {
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
-        if (entry == NULL || entry->type == OS_OBJECT_MUTEX || entry->type == OS_OBJECT_DISPLAY ||
+        if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
+            (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL) || entry->type == OS_OBJECT_DISPLAY ||
             entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI || entry->type == OS_OBJECT_ADC ||
             entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE ||
             entry->type == OS_OBJECT_DAC)
@@ -926,6 +975,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
         }
         targets[index].type = entry->type;
         targets[index].id = entry->id;
+        targets[index].driver = entry->driver;
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
@@ -1141,124 +1191,6 @@ static OS_HOST_FUNCTION(os_abi_proc_parent)
     OS_HOST_RETURN(0);
 #endif
 }
-
-/* ---------------------------------------------------------------------------
- * gpio
- * ------------------------------------------------------------------------ */
-
-#if OS_HAS_GPIO
-static OS_HOST_FUNCTION(os_abi_gpio_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, flags);
-    const char* name = NULL;
-    uint32_t id = 0U;
-    int32_t handle = 0;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    handle = os_abi_read_name(name_address, name_length, &name);
-    if (handle < 0)
-    {
-        OS_HOST_RETURN(handle);
-    }
-    if (name == NULL)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    status = os_gpio_open(name, name_length, flags, &id);
-    if (status != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
-    }
-    handle = os_abi_handle_new(OS_OBJECT_GPIO, id);
-    if (handle < 0)
-    {
-        os_gpio_close(id);
-    }
-    OS_HOST_RETURN(handle);
-}
-
-static OS_HOST_FUNCTION(os_abi_gpio_set)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, level);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_gpio_set(entry->id, level)));
-}
-
-static OS_HOST_FUNCTION(os_abi_gpio_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
-    uint32_t level = 0U;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    status = os_gpio_get(entry->id, &level);
-    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)level : os_abi_error(status));
-}
-
-static OS_HOST_FUNCTION(os_abi_gpio_set_mode)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, flags);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_gpio_set_mode(entry->id, flags)));
-}
-
-static OS_HOST_FUNCTION(os_abi_gpio_watch)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, edges);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_gpio_watch(entry->id, edges)));
-}
-
-static OS_HOST_FUNCTION(os_abi_gpio_events)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_GPIO);
-    uint32_t events = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    events = os_gpio_take_events(entry->id);
-    OS_HOST_RETURN((int32_t)(events > 0x7FFFFFFFU ? 0x7FFFFFFFU : events));
-}
-#endif
 
 /* ---------------------------------------------------------------------------
  * display
@@ -2482,7 +2414,7 @@ static OS_HOST_FUNCTION(os_abi_dac_get)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_GPIO || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
     !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE || !OS_HAS_COUNTER || \
     !OS_HAS_DAC
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
@@ -2979,22 +2911,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("proc"), "self", "i()", os_abi_proc_self, 0U },
     { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
 
-#if OS_HAS_GPIO
-    { WR_MODULE("gpio"), "open", "i(iii)", os_abi_gpio_open, 1U },
-    { WR_MODULE("gpio"), "set", "i(ii)", os_abi_gpio_set, 1U },
-    { WR_MODULE("gpio"), "get", "i(i)", os_abi_gpio_get, 1U },
-    { WR_MODULE("gpio"), "set-mode", "i(ii)", os_abi_gpio_set_mode, 1U },
-    { WR_MODULE("gpio"), "watch", "i(ii)", os_abi_gpio_watch, 1U },
-    { WR_MODULE("gpio"), "events", "i(i)", os_abi_gpio_events, 1U },
-#else
-    { WR_MODULE("gpio"), "open", "i(iii)", os_abi_unsupported, 1U },
-    { WR_MODULE("gpio"), "set", "i(ii)", os_abi_unsupported, 1U },
-    { WR_MODULE("gpio"), "get", "i(i)", os_abi_unsupported, 1U },
-    { WR_MODULE("gpio"), "set-mode", "i(ii)", os_abi_unsupported, 1U },
-    { WR_MODULE("gpio"), "watch", "i(ii)", os_abi_unsupported, 1U },
-    { WR_MODULE("gpio"), "events", "i(i)", os_abi_unsupported, 1U },
-#endif
-
 #if OS_HAS_DISPLAY
     { WR_MODULE("display"), "open", "i(iii)", os_abi_display_open, 2U },
     { WR_MODULE("display"), "get", "i(ii)", os_abi_display_get, 2U },
@@ -3140,27 +3056,26 @@ static const OsAbiImport g_abi_imports[] =
 };
 
 /*
- * Whether an import's module name is the entry's: "<module>@1.<minor>.0"
- * for kernel interfaces, with a minor from the one that added the call up
- * to OS_ABI_VERSION_MINOR; the name itself otherwise.
+ * Whether module is "wasm-rtos:kernel/<interface>@1.<minor>.0": then 1, the
+ * interface's length and the minor.
  */
-static int os_abi_module_matches(const OsAbiImport* import, const char* module, uint32_t length)
+static int os_abi_kernel_module(const char* module, uint32_t length, uint32_t* out_interface_length,
+                                uint32_t* out_minor)
 {
-    const size_t prefix_length = sizeof(WR_KERNEL_PREFIX) - 1U;
-    size_t base = strlen(import->module);
+    const uint32_t prefix_length = (uint32_t)(sizeof(WR_KERNEL_PREFIX) - 1U);
+    uint32_t at = prefix_length;
     uint32_t minor = 0U;
-    uint32_t at = 0U;
 
-    if (length < base || memcmp(module, import->module, base) != 0)
+    if (length <= prefix_length || memcmp(module, WR_KERNEL_PREFIX, prefix_length) != 0)
     {
         return 0;
     }
-    if (strncmp(import->module, WR_KERNEL_PREFIX, prefix_length) != 0)
+    while (at < length && module[at] != '@')
     {
-        return length == base;
+        ++at;
     }
-    at = (uint32_t)base;
-    if (length < at + 6U || memcmp(module + at, "@1.", 3U) != 0)
+    *out_interface_length = at - prefix_length;
+    if (*out_interface_length == 0U || length < at + 6U || memcmp(module + at, "@1.", 3U) != 0)
     {
         return 0;
     }
@@ -3173,25 +3088,116 @@ static int os_abi_module_matches(const OsAbiImport* import, const char* module, 
     {
         minor = minor * 10U + (uint32_t)(module[at++] - '0');
     }
-    return length - at == 2U && memcmp(module + at, ".0", 2U) == 0 &&
-           minor >= import->since && minor <= OS_ABI_VERSION_MINOR;
+    *out_minor = minor;
+    return length - at == 2U && memcmp(module + at, ".0", 2U) == 0 && minor <= OS_ABI_VERSION_MINOR;
 }
 
-/* The ABI call an import names, or *out NULL when it is not one. */
-WmResult os_abi_resolve(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
-                        WmFunc** out)
+/* A call nothing in this build answers: an i32 result says so, other results stay 0. */
+static OS_HOST_FUNCTION(os_abi_absent)
 {
+    OS_HOST_RETURNS(int32_t);
+    OS_ABI_UNUSED();
+    OS_HOST_RETURN(-WR_EUNSUPPORTED);
+}
+
+static OS_HOST_FUNCTION(os_abi_absent_quiet)
+{
+    OS_ABI_UNUSED();
+    (void)os_host_slot;
+    return NULL;
+}
+
+/* A function of the type the program declares for the import, that reports the call unsupported. */
+static WmResult os_abi_absent_function(const WmModule* program, const char* name, WmFunc** out)
+{
+    static const char letters[] = { 'i', 'I', 'f', 'F' };
+    const uint8_t* params = NULL;
+    const uint8_t* results = NULL;
+    uint32_t param_count = 0U;
+    uint32_t result_count = 0U;
+    char signature[24];
+    uint32_t length = 0U;
+    uint32_t index = 0U;
+
+    if (program == NULL ||
+        !wm_module_import_type(program, name, &params, &param_count, &results, &result_count) ||
+        param_count + 4U > sizeof(signature) || result_count > 1U)
+    {
+        return NULL;
+    }
+    for (index = 0U; index < param_count + result_count; ++index)
+    {
+        uint8_t type = index < result_count ? results[index] : params[index - result_count];
+        if (type != WM_I32 && type != WM_I64 && type != WM_F32 && type != WM_F64)
+        {
+            return NULL;
+        }
+    }
+    signature[length++] = result_count != 0U ? letters[WM_I32 - results[0]] : 'v';
+    signature[length++] = '(';
+    for (index = 0U; index < param_count; ++index)
+    {
+        signature[length++] = letters[WM_I32 - params[index]];
+    }
+    signature[length++] = ')';
+    signature[length] = '\0';
+    return os_host_function(signature, result_count == 1U && results[0] == WM_I32 ? os_abi_absent : os_abi_absent_quiet,
+                            out);
+}
+
+/*
+ * The ABI call an import names, or *out NULL when it is not one: the
+ * kernel's own interfaces, then the drivers'. A kernel interface no driver
+ * offers gets calls that report themselves unsupported, made to the type
+ * program declares (when program is given).
+ */
+WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t module_length, const char* name,
+                        uint32_t name_length, WmFunc** out)
+{
+    const uint32_t prefix_length = (uint32_t)(sizeof(WR_KERNEL_PREFIX) - 1U);
+    uint32_t interface_length = 0U;
+    uint32_t minor = 0U;
+    uint8_t versioned = (uint8_t)os_abi_kernel_module(module, module_length, &interface_length, &minor);
+    const char* interface = module + prefix_length;
+    uint8_t known = 0U;
     uint32_t index = 0U;
 
     *out = NULL;
     for (index = 0U; index < (uint32_t)(sizeof(g_abi_imports) / sizeof(g_abi_imports[0])); ++index)
     {
         const OsAbiImport* import = &g_abi_imports[index];
-        if (strlen(import->name) == name_length && memcmp(import->name, name, name_length) == 0 &&
-            os_abi_module_matches(import, module, module_length))
+        uint8_t kernel = strncmp(import->module, WR_KERNEL_PREFIX, prefix_length) == 0;
+        uint8_t same_module = kernel ? versioned && os_name_is(interface, interface_length, import->module + prefix_length)
+                                     : os_name_is(module, module_length, import->module);
+        if (!same_module)
+        {
+            continue;
+        }
+        known = 1U;
+        if (os_name_is(name, name_length, import->name) && (!kernel || minor >= import->since))
         {
             return os_host_function(import->signature, import->function, out);
         }
     }
-    return NULL;
+    if (!versioned || known)
+    {
+        return NULL;
+    }
+    for (index = 0U; index < g_driver_count; ++index)
+    {
+        const OsDriver* driver = g_drivers[index];
+        if (!os_name_is(interface, interface_length, driver->interface))
+        {
+            continue;
+        }
+        for (uint32_t call = 0U; call < driver->call_count; ++call)
+        {
+            if (os_name_is(name, name_length, driver->calls[call].name) && minor >= driver->calls[call].since)
+            {
+                return os_host_function(driver->calls[call].signature, driver->calls[call].function, out);
+            }
+        }
+        return NULL;
+    }
+    return os_abi_absent_function(program, name, out);
 }

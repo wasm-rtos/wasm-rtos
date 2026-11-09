@@ -1,6 +1,6 @@
 #include "os.h"
 #include "fs.h"
-#include "os_internal.h"
+#include "driver.h"
 
 
 #include <stddef.h>
@@ -629,6 +629,7 @@ static int os_host_import_exists(const char* module_name, const char* import_nam
 static void os_wasm_library_free_all(void);
 static WmResult os_dylink_find(void* context, const char* name, WmModule** out);
 static WmResult os_resolve_host_import(
+    const WmModule* program,
     const char* module,
     uint32_t module_length,
     const char* name,
@@ -824,9 +825,7 @@ void os_shutdown(void)
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
-#if OS_HAS_GPIO
-    os_gpio_shutdown();
-#endif
+    os_drivers_shutdown();
 #if OS_HAS_DISPLAY
     os_display_shutdown();
 #endif
@@ -1966,7 +1965,7 @@ static WmResult os_dylink_host_import(
     (void)context;
     out->kind = kind;
     out->as.func = NULL;
-    return os_resolve_host_import(module, module_length, name, name_length, &out->as.func);
+    return os_resolve_host_import(NULL, module, module_length, name, name_length, &out->as.func);
 }
 #endif
 
@@ -3958,10 +3957,8 @@ OsStatus os_schedule(void)
         return OS_STATUS_NO_READY_TASKS;
     }
 
-#if OS_HAS_GPIO
-    /* Edges reported since the last call, also from interrupt handlers. */
-    os_gpio_poll();
-#endif
+    /* What drivers saw in the background, such as edges from interrupt handlers. */
+    os_drivers_poll();
 #if OS_HAS_BUSES
     /* Background bus transfers that have ended. */
     os_bus_poll();
@@ -4910,6 +4907,8 @@ static int os_host_import_exists(const char* module_name, const char* import_nam
 /* Imports no host function answers, counted while a program is linked; the first is named in the error. */
 typedef struct OsImportLink
 {
+    /* The program being linked. */
+    const WmModule* program;
     uint32_t missing;
     const char* module;
     uint32_t module_length;
@@ -4923,6 +4922,7 @@ typedef struct OsImportLink
  * registered. *out stays NULL when nothing answers.
  */
 static WmResult os_resolve_host_import(
+    const WmModule* program,
     const char* module,
     uint32_t module_length,
     const char* name,
@@ -4931,7 +4931,7 @@ static WmResult os_resolve_host_import(
 )
 {
     OsHostImportNode* node = NULL;
-    WmResult result = os_abi_resolve(module, module_length, name, name_length, out);
+    WmResult result = os_abi_resolve(program, module, module_length, name, name_length, out);
 
     if (result != NULL || *out != NULL)
     {
@@ -4981,7 +4981,7 @@ static WmResult os_resolve_import(
     {
         return "unlinkable: programs import only functions";
     }
-    result = os_resolve_host_import(module, module_length, name, name_length, &out->as.func);
+    result = os_resolve_host_import(link->program, module, module_length, name, name_length, &out->as.func);
     if (result == NULL && out->as.func == NULL && link->missing++ == 0U)
     {
         link->module = module;
@@ -5055,6 +5055,7 @@ static OsStatus os_task_create_wasm(
 #endif
 
     memset(&link, 0, sizeof(link));
+    link.program = task->wasm_module;
     result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
     if (result != NULL)
     {
@@ -7203,10 +7204,8 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target)
             OsTaskHandle task = os_task_find_by_id(target->id);
             return task != NULL && task->state == OS_TASK_DEAD;
         }
-#if OS_HAS_GPIO
-        case OS_OBJECT_GPIO:
-            return os_gpio_ready(target->id);
-#endif
+        case OS_OBJECT_DRIVER:
+            return target->driver->ready != NULL && target->driver->ready(target->id);
 #if OS_HAS_INPUT
         case OS_OBJECT_INPUT:
             return os_input_ready(target->id);

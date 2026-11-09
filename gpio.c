@@ -3,9 +3,7 @@
  * The kernel knows no hardware; the platform's OsGpioPort drives the pins.
  */
 
-#include "os_internal.h"
-
-#if OS_HAS_GPIO
+#include "driver.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +31,8 @@ static uint32_t os_gpio_take_counter(OsGpioCounter* counter)
 #define OS_GPIO_PORT_MODE (OS_GPIO_OUTPUT | OS_GPIO_PULL_UP | OS_GPIO_PULL_DOWN | OS_GPIO_OPEN_DRAIN)
 #define OS_GPIO_GUEST_FLAGS (OS_GPIO_PORT_MODE | OS_GPIO_GUEST_ACTIVE_LOW | OS_GPIO_INIT_HIGH)
 #define OS_GPIO_GUEST_EDGES (OS_GPIO_GUEST_RISING | OS_GPIO_GUEST_FALLING)
+
+extern const OsDriver os_gpio_driver;
 
 /* Allocated when the platform registers the pin; interrupt handlers count edges in it. */
 typedef struct OsGpioPin
@@ -210,6 +210,11 @@ OsStatus os_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, 
         new_pin = 1U;
     }
     if (name_slot == OS_GPIO_MAX_NAMES || slot == OS_GPIO_MAX_PINS)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
+    /* A platform with pins gives programs the gpio interface. */
+    if (os_driver_add(&os_gpio_driver) != OS_STATUS_OK)
     {
         return OS_STATUS_LIMIT_REACHED;
     }
@@ -551,4 +556,144 @@ void os_gpio_shutdown(void)
     memset(&g_gpio, 0, sizeof(g_gpio));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The gpio interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OS_HOST_FUNCTION(os_gpio_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(name_address, name_length, &name);
+    if (handle < 0)
+    {
+        OS_HOST_RETURN(handle);
+    }
+    if (name == NULL)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    status = os_gpio_open(name, name_length, flags, &id);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_driver_handle_new(&os_gpio_driver, id);
+    if (handle < 0)
+    {
+        os_gpio_close(id);
+    }
+    OS_HOST_RETURN(handle);
+}
+
+static OS_HOST_FUNCTION(os_gpio_call_set)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, level);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_gpio_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_gpio_set(id, level)));
+}
+
+static OS_HOST_FUNCTION(os_gpio_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_gpio_driver, handle, &id);
+    uint32_t level = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    status = os_gpio_get(id, &level);
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)level : os_abi_error(status));
+}
+
+static OS_HOST_FUNCTION(os_gpio_call_set_mode)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, flags);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_gpio_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_gpio_set_mode(id, flags)));
+}
+
+static OS_HOST_FUNCTION(os_gpio_call_watch)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, edges);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_gpio_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_gpio_watch(id, edges)));
+}
+
+static OS_HOST_FUNCTION(os_gpio_call_events)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_gpio_driver, handle, &id);
+    uint32_t events = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    events = os_gpio_take_events(id);
+    OS_HOST_RETURN((int32_t)(events > 0x7FFFFFFFU ? 0x7FFFFFFFU : events));
+}
+
+static const OsDriverCall os_gpio_calls[] =
+{
+    { "open", "i(iii)", os_gpio_call_open, 1U },
+    { "set", "i(ii)", os_gpio_call_set, 1U },
+    { "get", "i(i)", os_gpio_call_get, 1U },
+    { "set-mode", "i(ii)", os_gpio_call_set_mode, 1U },
+    { "watch", "i(ii)", os_gpio_call_watch, 1U },
+    { "events", "i(i)", os_gpio_call_events, 1U },
+};
+
+const OsDriver os_gpio_driver =
+{
+    "gpio",
+    os_gpio_calls,
+    (uint32_t)(sizeof(os_gpio_calls) / sizeof(os_gpio_calls[0])),
+    os_gpio_close,
+    os_gpio_ready,
+    os_gpio_poll,
+    os_gpio_shutdown,
+};

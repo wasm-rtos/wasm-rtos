@@ -146,7 +146,6 @@ OsStatus os_dac_open(const char* name, uint32_t length, uint32_t* out_id)
         return OS_STATUS_BUSY;
     }
     channel->gpio = 0U;
-#if OS_HAS_GPIO
     /* The output is a GPIO pin: take it, so no program drives it digitally meanwhile. */
     status = os_gpio_open(name, length, 0U, &channel->gpio);
     if (status == OS_STATUS_FILE_NOT_FOUND || status == OS_STATUS_UNSUPPORTED)
@@ -159,7 +158,6 @@ OsStatus os_dac_open(const char* name, uint32_t length, uint32_t* out_id)
         channel->gpio = 0U;
         return status;
     }
-#endif
     if (g_dac.port.start != NULL)
     {
         status = g_dac.port.start(g_dac.port.context, channel->channel);
@@ -170,13 +168,11 @@ OsStatus os_dac_open(const char* name, uint32_t length, uint32_t* out_id)
     }
     if (status != OS_STATUS_OK)
     {
-#if OS_HAS_GPIO
         if (channel->gpio != 0U)
         {
             os_gpio_close(channel->gpio);
             channel->gpio = 0U;
         }
-#endif
         return status;
     }
     channel->value = 0U;
@@ -197,12 +193,10 @@ void os_dac_close(uint32_t id)
     {
         g_dac.port.stop(g_dac.port.context, channel->channel);
     }
-#if OS_HAS_GPIO
     if (channel->gpio != 0U)
     {
         os_gpio_close(channel->gpio);
     }
-#endif
     channel->gpio = 0U;
     channel->owner = 0U;
     channel->value = 0U;

@@ -11,7 +11,6 @@
  *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
- *   OS_HAS_GPIO       pins for programs through a platform GPIO port
  *   OS_HAS_DISPLAY    displays for programs through a platform display port
  *   OS_HAS_INPUT      buttons, rotary controls, touch and keyboards for programs
  *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
@@ -37,9 +36,6 @@
 #ifndef OS_FS_TAR
 #define OS_FS_TAR OS_HAS_FS
 #endif
-#ifndef OS_HAS_GPIO
-#define OS_HAS_GPIO 1
-#endif
 #ifndef OS_HAS_DISPLAY
 #define OS_HAS_DISPLAY 1
 #endif
@@ -55,22 +51,14 @@
 #ifndef OS_HAS_ADC
 #define OS_HAS_ADC 1
 #endif
-/* PWM outputs are GPIO pins: off without GPIO. */
 #ifndef OS_HAS_PWM
-#define OS_HAS_PWM OS_HAS_GPIO
-#endif
-#if OS_HAS_PWM && !OS_HAS_GPIO
-#error "OS_HAS_PWM needs OS_HAS_GPIO"
+#define OS_HAS_PWM 1
 #endif
 #ifndef OS_HAS_UART
 #define OS_HAS_UART 1
 #endif
-/* Pulse trains run on GPIO pins: off without GPIO. */
 #ifndef OS_HAS_PULSE
-#define OS_HAS_PULSE OS_HAS_GPIO
-#endif
-#if OS_HAS_PULSE && !OS_HAS_GPIO
-#error "OS_HAS_PULSE needs OS_HAS_GPIO"
+#define OS_HAS_PULSE 1
 #endif
 #ifndef OS_HAS_ONEWIRE
 #define OS_HAS_ONEWIRE 1
@@ -780,7 +768,6 @@ uint32_t os_get_next_wakeup_ms(void);
 
 OsStatus os_schedule(void);
 
-#if OS_HAS_GPIO
 /*
  * GPIO. The platform drives the pins through a port; the kernel lends them
  * to programs by name. Register every pin a program may use, under the names
@@ -849,7 +836,6 @@ void os_gpio_edge(uint32_t pin, uint32_t edges);
 
 /* The id of the task that owns a pin, 0 when it is free or unknown. */
 uint32_t os_gpio_get_owner(uint32_t pin);
-#endif
 
 #if OS_HAS_DISPLAY
 /*

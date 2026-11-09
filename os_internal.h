@@ -17,7 +17,8 @@ typedef enum OsObjectType
     OS_OBJECT_EVENT_GROUP,
     OS_OBJECT_TIMER,
     OS_OBJECT_TASK,
-    OS_OBJECT_GPIO,
+    /* An object of a driver (driver.h): the handle and the wait target name the driver. */
+    OS_OBJECT_DRIVER,
     OS_OBJECT_DISPLAY,
     OS_OBJECT_INPUT,
     OS_OBJECT_I2C,
@@ -32,10 +33,14 @@ typedef enum OsObjectType
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
+struct OsDriver;
+
 typedef struct OsWaitTarget
 {
     OsObjectType type;
     uint32_t id;
+    /* For OS_OBJECT_DRIVER. */
+    const struct OsDriver* driver;
 } OsWaitTarget;
 
 /* ---- Calls from a guest import ------------------------------------------ */
@@ -86,13 +91,19 @@ void** os_task_abi_state(OsTaskHandle task);
 
 /* ---- Implemented by abi.c ------------------------------------------------ */
 
-/* The ABI call an import names, or *out NULL when it is not one. */
-WmResult os_abi_resolve(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
-                        WmFunc** out);
+/*
+ * The ABI call an import names, or *out NULL when it is not one. With the
+ * program given, a kernel interface no driver offers answers unsupported.
+ */
+WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t module_length, const char* name,
+                        uint32_t name_length, WmFunc** out);
 /* A WASI call for what nothing else answers (arguments, exit, random, standard streams), or *out NULL. */
 WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
                              WmFunc** out);
 void os_abi_release_task(OsTaskHandle task);
+/* Every driver's poll, before a scheduling decision; every driver's shutdown, which also forgets them. */
+void os_drivers_poll(void);
+void os_drivers_shutdown(void);
 /* The ABI's negative error code for a kernel status (0 for OS_STATUS_OK). */
 int32_t os_abi_error(OsStatus status);
 
@@ -147,7 +158,6 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target);
 /* Wake tasks in wait.any whose targets became ready outside the kernel's objects. */
 void os_wait_any_recheck(void);
 
-#if OS_HAS_GPIO
 /* ---- GPIO for programs (gpio.c) -------------------------------------------- */
 
 /*
@@ -191,7 +201,6 @@ OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low,
 /* Deliver edges reported by os_gpio_edge; wakes waiting programs. */
 void os_gpio_poll(void);
 void os_gpio_shutdown(void);
-#endif
 
 #if OS_HAS_DISPLAY
 /* ---- Displays for programs (display.c) ------------------------------------ */

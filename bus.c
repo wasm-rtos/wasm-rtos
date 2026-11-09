@@ -200,12 +200,10 @@ static void os_bus_deliver(uint8_t kind, OsBus* bus)
     uint32_t task_id = bus->task_id;
 
     bus->busy = 0U;
-#if OS_HAS_GPIO
     if (bus->cs != 0U)
     {
         (void)os_gpio_set(bus->cs, 1U);
     }
-#endif
     os_bus_report(kind, bus->bus, bus->device, task_id, bus->transfer_hz, os_bus_ops(kind, bus), bus->count, status);
     os_transfer_wait_end(task_id, status, 0U);
 }
@@ -237,12 +235,10 @@ static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t
     bus->count = count;
     (void)OS_BUS_FLAG_TAKE(bus->done);
 
-#if OS_HAS_GPIO
     if (cs != 0U)
     {
         status = os_gpio_set(cs, 0U);
     }
-#endif
     if (status == OS_STATUS_OK)
     {
         status = run(bus);
@@ -258,12 +254,10 @@ static OsStatus os_bus_start(uint8_t kind, OsBus* bus, uint32_t device, uint32_t
         os_bus_finish(kind, bus);
         return bus->result;
     }
-#if OS_HAS_GPIO
     if (cs != 0U)
     {
         (void)os_gpio_set(cs, 1U);
     }
-#endif
     os_bus_report(kind, bus->bus, device, bus->task_id, frequency_hz, os_bus_ops(kind, bus), count, status);
     return status;
 }
@@ -580,7 +574,6 @@ OsStatus os_spi_open(const char* bus_name, uint32_t bus_length, const char* cs, 
     slot->cs_pin = OS_BUS_NO_CS;
     if (cs_length > 0U)
     {
-#if OS_HAS_GPIO
         status = os_gpio_open_physical(cs, cs_length, &slot->cs);
         if (status != OS_STATUS_OK)
         {
@@ -588,10 +581,6 @@ OsStatus os_spi_open(const char* bus_name, uint32_t bus_length, const char* cs, 
             return status;
         }
         slot->cs_pin = os_gpio_pin_number(slot->cs);
-#else
-        (void)cs;
-        return OS_STATUS_UNSUPPORTED;
-#endif
     }
     slot->bus = bus;
     slot->mode = mode;
@@ -609,12 +598,10 @@ void os_spi_close(uint32_t id)
     {
         return;
     }
-#if OS_HAS_GPIO
     if (device->cs != 0U)
     {
         os_gpio_close(device->cs);
     }
-#endif
     memset(device, 0, sizeof(*device));
 }
 
