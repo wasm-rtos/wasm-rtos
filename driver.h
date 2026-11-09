@@ -84,6 +84,16 @@ OsStatus os_driver_add(const OsDriver* driver);
 int32_t os_driver_handle_new(const OsDriver* driver, uint32_t id);
 /* The driver's object behind a handle of the current program: 1 and *out_id, or 0. */
 int os_driver_handle_get(const OsDriver* driver, int32_t handle, uint32_t* out_id);
+/*
+ * Open an object by the name a program passes (address, length): opener
+ * finds it; the result is a handle, or a negative ABI error (-WR_EINUSE
+ * when it is busy). The object is closed again when no handle is left.
+ */
+int32_t os_driver_open(const OsDriver* driver, uint32_t name_address, uint32_t name_length,
+                       OsStatus (*opener)(const char* name, uint32_t length, void* context, uint32_t* out_id),
+                       void* context);
+/* A property value for a program (31 bits), or the ABI error for status. */
+int32_t os_driver_property(OsStatus status, uint32_t value);
 /* An optional object name from guest memory: (0, 0) means none; 0 or a negative ABI error. */
 int32_t os_abi_read_name(uint32_t address, uint32_t length, const char** out_name);
 

@@ -299,6 +299,41 @@ int os_driver_handle_get(const OsDriver* driver, int32_t handle, uint32_t* out_i
  * Drivers
  * ------------------------------------------------------------------------ */
 
+int32_t os_driver_property(OsStatus status, uint32_t value)
+{
+    return status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status);
+}
+
+int32_t os_driver_open(const OsDriver* driver, uint32_t name_address, uint32_t name_length,
+                       OsStatus (*opener)(const char* name, uint32_t length, void* context, uint32_t* out_id),
+                       void* context)
+{
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = os_abi_read_name(name_address, name_length, &name);
+    OsStatus status = OS_STATUS_OK;
+
+    if (handle < 0)
+    {
+        return handle;
+    }
+    if (name == NULL)
+    {
+        return -WR_EINVAL;
+    }
+    status = opener(name, name_length, context, &id);
+    if (status != OS_STATUS_OK)
+    {
+        return status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status);
+    }
+    handle = os_driver_handle_new(driver, id);
+    if (handle < 0)
+    {
+        driver->close(id);
+    }
+    return handle;
+}
+
 static const OsDriver* g_drivers[OS_MAX_DRIVERS];
 static uint32_t g_driver_count;
 
@@ -1629,7 +1664,7 @@ static OS_HOST_FUNCTION(os_abi_spi_transaction)
 /* A property value for the program, or the error. */
 static int32_t os_abi_property(OsStatus status, uint32_t value)
 {
-    return status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status);
+    return os_driver_property(status, value);
 }
 
 /* Read a name, then make a handle for what opener opened, closing it again when no handle is left. */
