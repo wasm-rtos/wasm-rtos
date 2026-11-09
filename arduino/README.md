@@ -38,6 +38,7 @@ DallasTemperature (DS18B20 sensors, also on parasite power) over OneWire.
 | `SPI` (`"spi0"`) | `spi`, taking the whole bus: libraries drive chip select with `digitalWrite` |
 | `Encoder(A, B)` | `counter` quadrature encoder `"gpioA"`, every edge counted (x4) by the hardware; `read`, `write`, `readAndReset` |
 | `OneWire(N)` | `onewire` bus `"gpioN"`, taking the whole bus: each call is one transaction, `write(v, 1)` leaves the strong pull-up on until the next call or `depower()`, `search()` runs in the kernel |
+| `Adafruit_NeoPixel(n, N, type)` | `pulse` output `"gpioN"`: `show()` sends the bytes with the LED bit timings (800 or 400 kHz) and latches them with 300 us low; RGB and RGBW orders, brightness, `ColorHSV`, `gamma32`, `rainbow` |
 | `String`, `Print`, `Stream`, `F()`, `PROGMEM` | plain memory: wasm has no separate flash |
 
 ## Limits
