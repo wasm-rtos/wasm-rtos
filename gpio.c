@@ -689,11 +689,11 @@ static const OsDriverCall os_gpio_calls[] =
 
 const OsDriver os_gpio_driver =
 {
-    "gpio",
-    os_gpio_calls,
-    (uint32_t)(sizeof(os_gpio_calls) / sizeof(os_gpio_calls[0])),
-    os_gpio_close,
-    os_gpio_ready,
-    os_gpio_poll,
-    os_gpio_shutdown,
+    .interface = "gpio",
+    .calls = os_gpio_calls,
+    .call_count = (uint32_t)(sizeof(os_gpio_calls) / sizeof(os_gpio_calls[0])),
+    .close = os_gpio_close,
+    .ready = os_gpio_ready,
+    .poll = os_gpio_poll,
+    .shutdown = os_gpio_shutdown,
 };

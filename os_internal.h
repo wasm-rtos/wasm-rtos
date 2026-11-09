@@ -26,8 +26,7 @@ typedef enum OsObjectType
     OS_OBJECT_PWM,
     OS_OBJECT_UART,
     OS_OBJECT_PULSE,
-    OS_OBJECT_ONEWIRE,
-    OS_OBJECT_COUNTER
+    OS_OBJECT_ONEWIRE
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
@@ -102,6 +101,8 @@ void os_abi_release_task(OsTaskHandle task);
 /* Every driver's poll, before a scheduling decision; every driver's shutdown, which also forgets them. */
 void os_drivers_poll(void);
 void os_drivers_shutdown(void);
+/* The soonest any driver needs polling, in milliseconds (UINT32_MAX: none). */
+uint32_t os_drivers_next_deadline_ms(void);
 /* The ABI's negative error code for a kernel status (0 for OS_STATUS_OK). */
 int32_t os_abi_error(OsStatus status);
 
@@ -322,7 +323,6 @@ OsStatus os_onewire_search(const char* bus_name, uint32_t length, OsOneWireSearc
 void os_onewire_shutdown(void);
 #endif
 
-#if OS_HAS_COUNTER
 /* ---- Counters for programs (counter.c) ------------------------------------- */
 #define OS_COUNTER_PROP_KIND      1U
 #define OS_COUNTER_PROP_MAX_HZ    2U
@@ -341,7 +341,6 @@ void os_counter_poll(void);
 /* When the kernel next reads a watched counter, in ms from now (OS_WAIT_FOREVER: none). */
 uint32_t os_counter_next_deadline_ms(void);
 void os_counter_shutdown(void);
-#endif
 
 /* ---- Analog outputs for programs (dac.c) ----------------------------------- */
 #define OS_DAC_PROP_RESOLUTION 1U

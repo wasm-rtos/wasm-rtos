@@ -66,6 +66,8 @@ typedef struct OsDriver
     uint8_t (*ready)(uint32_t id);
     /* Called before every scheduling decision: deliver what happened in the background. May be NULL. */
     void (*poll)(void);
+    /* Milliseconds until poll is due even if nothing happens (UINT32_MAX: never), for a sleeping kernel. May be NULL. */
+    uint32_t (*next_deadline_ms)(void);
     /* os_shutdown: release everything. May be NULL. */
     void (*shutdown)(void);
 } OsDriver;

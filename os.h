@@ -19,7 +19,6 @@
  *   OS_HAS_UART       serial ports for programs through a platform UART port
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
- *   OS_HAS_COUNTER    pulse counters and quadrature encoders through a platform port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
  * Off unless defined to 1:
  *   OS_HAS_DYLINK     dylink.0 programs and shared libraries (vm/source/wm_dylink.c)
@@ -57,9 +56,6 @@
 #endif
 #ifndef OS_HAS_ONEWIRE
 #define OS_HAS_ONEWIRE 1
-#endif
-#ifndef OS_HAS_COUNTER
-#define OS_HAS_COUNTER 1
 #endif
 #ifndef OS_HAS_WASI
 #define OS_HAS_WASI 1
@@ -124,6 +120,7 @@ typedef WmHostFunction OsHostImportFunction;
     } while (0)
 /* Linear memory is little-endian, like every target the kernel runs on. */
 #define OS_HOST_READ32(POINTER) os_host_read32(POINTER)
+#define OS_HOST_READ64(POINTER) os_host_read64(POINTER)
 #define OS_HOST_WRITE8(POINTER, VALUE) (*(uint8_t*)(POINTER) = (uint8_t)(VALUE))
 #define OS_HOST_WRITE32(POINTER, VALUE) os_host_write32((POINTER), (uint32_t)(VALUE))
 #define OS_HOST_WRITE64(POINTER, VALUE) os_host_write64((POINTER), (uint64_t)(VALUE))
@@ -135,6 +132,12 @@ static inline uint8_t* os_host_memory_base(const WmMemory* memory)
 static inline uint32_t os_host_read32(const void* pointer)
 {
     uint32_t value;
+    memcpy(&value, pointer, sizeof(value));
+    return value;
+}
+static inline uint64_t os_host_read64(const void* pointer)
+{
+    uint64_t value;
     memcpy(&value, pointer, sizeof(value));
     return value;
 }
@@ -1327,7 +1330,6 @@ void os_uart_writable(uint32_t uart);
 uint32_t os_uart_get_owner(uint32_t uart);
 #endif
 
-#if OS_HAS_COUNTER
 /*
  * Counters, registered under the device profile's names ("enc0", "flow"):
  * a pulse counter on one pin, or a quadrature encoder on two. Hardware
@@ -1388,7 +1390,6 @@ OsStatus os_counter_add(const char* name, uint32_t unit, const OsCounterInfo* in
 void os_counter_event(uint32_t unit);
 /* The id of the task that owns a counter, 0 when it is free. */
 uint32_t os_counter_get_owner(uint32_t unit);
-#endif
 
 #if OS_HAS_PULSE
 /*

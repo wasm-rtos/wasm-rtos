@@ -300,12 +300,9 @@ static const OsDriverCall os_adc_calls[] =
 
 const OsDriver os_adc_driver =
 {
-    "adc",
-    os_adc_calls,
-    (uint32_t)(sizeof(os_adc_calls) / sizeof(os_adc_calls[0])),
-    NULL,
-    NULL,
-    NULL,
-    os_adc_shutdown,
+    .interface = "adc",
+    .calls = os_adc_calls,
+    .call_count = (uint32_t)(sizeof(os_adc_calls) / sizeof(os_adc_calls[0])),
+    .shutdown = os_adc_shutdown,
 };
 

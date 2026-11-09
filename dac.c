@@ -359,12 +359,10 @@ static const OsDriverCall os_dac_calls[] =
 
 const OsDriver os_dac_driver =
 {
-    "dac",
-    os_dac_calls,
-    (uint32_t)(sizeof(os_dac_calls) / sizeof(os_dac_calls[0])),
-    os_dac_close,
-    NULL,
-    NULL,
-    os_dac_shutdown,
+    .interface = "dac",
+    .calls = os_dac_calls,
+    .call_count = (uint32_t)(sizeof(os_dac_calls) / sizeof(os_dac_calls[0])),
+    .close = os_dac_close,
+    .shutdown = os_dac_shutdown,
 };
 
