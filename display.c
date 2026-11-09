@@ -3,9 +3,8 @@
  * time. The kernel knows no panel; the platform's OsDisplayPort draws.
  */
 
-#include "os_internal.h"
+#include "driver.h"
 
-#if OS_HAS_DISPLAY
 
 #include <string.h>
 
@@ -114,6 +113,8 @@ static OsDisplay* os_display_find_name(const char* name, uint32_t length)
     return NULL;
 }
 
+extern const OsDriver os_display_driver;
+
 OsStatus os_display_add(const char* name, uint32_t display, const OsDisplayInfo* info)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
@@ -150,6 +151,11 @@ OsStatus os_display_add(const char* name, uint32_t display, const OsDisplayInfo*
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
     slot->info = *info;
+    /* A platform with these devices gives programs the display interface. */
+    if (os_driver_add(&os_display_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -373,4 +379,159 @@ void os_display_shutdown(void)
     memset(&g_display, 0, sizeof(g_display));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The display interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OS_HOST_FUNCTION(os_display_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(name_address, name_length, &name);
+    if (handle < 0)
+    {
+        OS_HOST_RETURN(handle);
+    }
+    if (name == NULL || flags != 0U)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    status = os_display_open(name, name_length, &id);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_driver_handle_new(&os_display_driver, id);
+    if (handle < 0)
+    {
+        os_display_close(id);
+    }
+    OS_HOST_RETURN(handle);
+}
+
+static OS_HOST_FUNCTION(os_display_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_display_driver, handle, &id);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    status = os_display_get(id, property, &value);
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
+}
+
+static OS_HOST_FUNCTION(os_display_call_write)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, x);
+    OS_HOST_ARG(uint32_t, y);
+    OS_HOST_ARG(uint32_t, width);
+    OS_HOST_ARG(uint32_t, height);
+    OS_HOST_ARG(uint32_t, format);
+    OS_HOST_ARG(uint32_t, pixels_address);
+    OS_HOST_ARG(uint32_t, length);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_display_driver, handle, &id);
+    uint8_t* pixels = NULL;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (length > 0U && os_guest_memory(pixels_address, length, &pixels) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    /* The port reads the program's memory in place, during this call only. */
+    OS_HOST_RETURN(os_abi_error(os_display_write(id, x, y, width, height, format, pixels, length)));
+}
+
+static OS_HOST_FUNCTION(os_display_call_fill)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, x);
+    OS_HOST_ARG(uint32_t, y);
+    OS_HOST_ARG(uint32_t, width);
+    OS_HOST_ARG(uint32_t, height);
+    OS_HOST_ARG(uint32_t, format);
+    OS_HOST_ARG(uint32_t, color);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_display_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_display_fill(id, x, y, width, height, format, color)));
+}
+
+static OS_HOST_FUNCTION(os_display_call_flush)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_display_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_display_flush(id)));
+}
+
+static OS_HOST_FUNCTION(os_display_call_set_brightness)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, level);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_display_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_display_set_brightness(id, level)));
+}
+
+static const OsDriverCall os_display_calls[] =
+{
+    { "open", "i(iii)", os_display_call_open, 2U },
+    { "get", "i(ii)", os_display_call_get, 2U },
+    { "write", "i(iiiiiiii)", os_display_call_write, 2U },
+    { "fill", "i(iiiiiii)", os_display_call_fill, 2U },
+    { "flush", "i(i)", os_display_call_flush, 2U },
+    { "set-brightness", "i(ii)", os_display_call_set_brightness, 2U },
+};
+
+const OsDriver os_display_driver =
+{
+    .interface = "display",
+    .calls = os_display_calls,
+    .call_count = (uint32_t)(sizeof(os_display_calls) / sizeof(os_display_calls[0])),
+    .close = os_display_close,
+    .shutdown = os_display_shutdown,
+};
+

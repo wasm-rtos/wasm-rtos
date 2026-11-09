@@ -128,13 +128,6 @@ static void os_abi_drop(OsAbiHandle* handle)
         }
     }
     else
-#if OS_HAS_DISPLAY
-    if (handle->type == OS_OBJECT_DISPLAY)
-    {
-        os_display_close(handle->id);
-    }
-    else
-#endif
 #if OS_HAS_INPUT
     if (handle->type == OS_OBJECT_INPUT)
     {
@@ -1038,7 +1031,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
     {
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
-            (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL) || entry->type == OS_OBJECT_DISPLAY ||
+            (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)  ||
             entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI  ||
             entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE )
         {
@@ -1262,140 +1255,6 @@ static OS_HOST_FUNCTION(os_abi_proc_parent)
     OS_HOST_RETURN(0);
 #endif
 }
-
-/* ---------------------------------------------------------------------------
- * display
- * ------------------------------------------------------------------------ */
-
-#if OS_HAS_DISPLAY
-static OS_HOST_FUNCTION(os_abi_display_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, flags);
-    const char* name = NULL;
-    uint32_t id = 0U;
-    int32_t handle = 0;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    handle = os_abi_read_name(name_address, name_length, &name);
-    if (handle < 0)
-    {
-        OS_HOST_RETURN(handle);
-    }
-    if (name == NULL || flags != 0U)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    status = os_display_open(name, name_length, &id);
-    if (status != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
-    }
-    handle = os_abi_handle_new(OS_OBJECT_DISPLAY, id);
-    if (handle < 0)
-    {
-        os_display_close(id);
-    }
-    OS_HOST_RETURN(handle);
-}
-
-static OS_HOST_FUNCTION(os_abi_display_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, property);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
-    uint32_t value = 0U;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    status = os_display_get(entry->id, property, &value);
-    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
-}
-
-static OS_HOST_FUNCTION(os_abi_display_write)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, x);
-    OS_HOST_ARG(uint32_t, y);
-    OS_HOST_ARG(uint32_t, width);
-    OS_HOST_ARG(uint32_t, height);
-    OS_HOST_ARG(uint32_t, format);
-    OS_HOST_ARG(uint32_t, pixels_address);
-    OS_HOST_ARG(uint32_t, length);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
-    uint8_t* pixels = NULL;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (length > 0U && os_guest_memory(pixels_address, length, &pixels) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    /* The port reads the program's memory in place, during this call only. */
-    OS_HOST_RETURN(os_abi_error(os_display_write(entry->id, x, y, width, height, format, pixels, length)));
-}
-
-static OS_HOST_FUNCTION(os_abi_display_fill)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, x);
-    OS_HOST_ARG(uint32_t, y);
-    OS_HOST_ARG(uint32_t, width);
-    OS_HOST_ARG(uint32_t, height);
-    OS_HOST_ARG(uint32_t, format);
-    OS_HOST_ARG(uint32_t, color);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_display_fill(entry->id, x, y, width, height, format, color)));
-}
-
-static OS_HOST_FUNCTION(os_abi_display_flush)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_display_flush(entry->id)));
-}
-
-static OS_HOST_FUNCTION(os_abi_display_set_brightness)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, level);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DISPLAY);
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    OS_HOST_RETURN(os_abi_error(os_display_set_brightness(entry->id, level)));
-}
-#endif
 
 /* ---------------------------------------------------------------------------
  * input
@@ -2105,7 +1964,7 @@ static OS_HOST_FUNCTION(os_abi_onewire_search)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_INPUT || !OS_HAS_I2C || \
     !OS_HAS_SPI || !OS_HAS_PWM || !OS_HAS_PULSE || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
@@ -2601,21 +2460,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("proc"), "self", "i()", os_abi_proc_self, 0U },
     { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
 
-#if OS_HAS_DISPLAY
-    { WR_MODULE("display"), "open", "i(iii)", os_abi_display_open, 2U },
-    { WR_MODULE("display"), "get", "i(ii)", os_abi_display_get, 2U },
-    { WR_MODULE("display"), "write", "i(iiiiiiii)", os_abi_display_write, 2U },
-    { WR_MODULE("display"), "fill", "i(iiiiiii)", os_abi_display_fill, 2U },
-    { WR_MODULE("display"), "flush", "i(i)", os_abi_display_flush, 2U },
-    { WR_MODULE("display"), "set-brightness", "i(ii)", os_abi_display_set_brightness, 2U },
-#else
-    { WR_MODULE("display"), "open", "i(iii)", os_abi_unsupported, 2U },
-    { WR_MODULE("display"), "get", "i(ii)", os_abi_unsupported, 2U },
-    { WR_MODULE("display"), "write", "i(iiiiiiii)", os_abi_unsupported, 2U },
-    { WR_MODULE("display"), "fill", "i(iiiiiii)", os_abi_unsupported, 2U },
-    { WR_MODULE("display"), "flush", "i(i)", os_abi_unsupported, 2U },
-    { WR_MODULE("display"), "set-brightness", "i(ii)", os_abi_unsupported, 2U },
-#endif
 
 #if OS_HAS_INPUT
     { WR_MODULE("input"), "open", "i(iii)", os_abi_input_open, 2U },

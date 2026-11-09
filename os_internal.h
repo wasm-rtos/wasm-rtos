@@ -19,7 +19,6 @@ typedef enum OsObjectType
     OS_OBJECT_TASK,
     /* An object of a driver (driver.h): the handle and the wait target name the driver. */
     OS_OBJECT_DRIVER,
-    OS_OBJECT_DISPLAY,
     OS_OBJECT_INPUT,
     OS_OBJECT_I2C,
     OS_OBJECT_SPI,
@@ -204,7 +203,6 @@ OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low,
 void os_gpio_poll(void);
 void os_gpio_shutdown(void);
 
-#if OS_HAS_DISPLAY
 /* ---- Displays for programs (display.c) ------------------------------------ */
 
 /* What display-get reports; unknown properties are OS_STATUS_UNSUPPORTED. */
@@ -233,7 +231,6 @@ OsStatus os_display_fill(uint32_t id, uint32_t x, uint32_t y, uint32_t width, ui
 OsStatus os_display_flush(uint32_t id);
 OsStatus os_display_set_brightness(uint32_t id, uint32_t level);
 void os_display_shutdown(void);
-#endif
 
 #if OS_HAS_INPUT
 /* ---- Input devices for programs (input.c) --------------------------------- */

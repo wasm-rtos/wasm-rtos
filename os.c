@@ -814,9 +814,6 @@ void os_shutdown(void)
     os_fs_shutdown();
 #endif
     os_drivers_shutdown();
-#if OS_HAS_DISPLAY
-    os_display_shutdown();
-#endif
 #if OS_HAS_INPUT
     os_input_shutdown();
 #endif
