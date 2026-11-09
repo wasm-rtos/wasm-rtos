@@ -5,9 +5,7 @@
  * points, or by the kernel reading the count every OS_COUNTER_POLL_MS.
  */
 
-#include "os_internal.h"
-
-#if OS_HAS_COUNTER
+#include "driver.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -86,6 +84,8 @@ OsStatus os_counter_port_set(const OsCounterPort* port)
     return OS_STATUS_OK;
 }
 
+extern const OsDriver os_counter_driver;
+
 OsStatus os_counter_add(const char* name, uint32_t unit, const OsCounterInfo* info)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
@@ -125,6 +125,11 @@ OsStatus os_counter_add(const char* name, uint32_t unit, const OsCounterInfo* in
     slot->name_length = (uint8_t)length;
     slot->info = *info;
     g_counter.counters[free_index] = slot;
+    /* A platform with these devices gives programs the counter interface. */
+    if (os_driver_add(&os_counter_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -417,4 +422,134 @@ void os_counter_shutdown(void)
     memset(&g_counter, 0, sizeof(g_counter));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The counter interface for programs
+ * ------------------------------------------------------------------------ */
+
+typedef struct OsAbiCounterOpen
+{
+    uint32_t mode;
+    uint32_t filter_ns;
+} OsAbiCounterOpen;
+
+static OsStatus os_counter_call_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    const OsAbiCounterOpen* open = (const OsAbiCounterOpen*)context;
+    return os_counter_open(name, length, open->mode, open->filter_ns, out_id);
+}
+
+static OS_HOST_FUNCTION(os_counter_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, mode);
+    OS_HOST_ARG(uint32_t, filter_ns);
+    OsAbiCounterOpen open = { mode, filter_ns };
+    OS_ABI_UNUSED();
+
+    OS_HOST_RETURN(os_driver_open(&os_counter_driver, name_address, name_length, os_counter_call_opener, &open));
+}
+
+/* The count is signed, so it goes to memory: 4 bytes, little-endian. */
+static OS_HOST_FUNCTION(os_counter_call_read)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, out_address);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_counter_driver, handle, &id);
+    uint8_t* out = NULL;
+    int32_t count = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (os_guest_memory(out_address, 4U, &out) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    status = os_counter_read(id, &count);
+    if (status == OS_STATUS_OK)
+    {
+        OS_HOST_WRITE32(out, (uint32_t)count);
+    }
+    OS_HOST_RETURN(os_abi_error(status));
+}
+
+static OS_HOST_FUNCTION(os_counter_call_set)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(int32_t, count);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_counter_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_counter_write(id, count)));
+}
+
+static OS_HOST_FUNCTION(os_counter_call_watch)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(int32_t, low);
+    OS_HOST_ARG(int32_t, high);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_counter_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_counter_watch(id, low, high)));
+}
+
+static OS_HOST_FUNCTION(os_counter_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_counter_driver, handle, &id);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    status = os_counter_get(id, property, &value);
+    OS_HOST_RETURN(os_driver_property(status, value));
+}
+
+static const OsDriverCall os_counter_calls[] =
+{
+    { "open", "i(iiii)", os_counter_call_open, 7U },
+    { "read", "i(ii)", os_counter_call_read, 7U },
+    { "set", "i(ii)", os_counter_call_set, 7U },
+    { "watch", "i(iii)", os_counter_call_watch, 7U },
+    { "get", "i(ii)", os_counter_call_get, 7U },
+};
+
+const OsDriver os_counter_driver =
+{
+    .interface = "counter",
+    .calls = os_counter_calls,
+    .call_count = (uint32_t)(sizeof(os_counter_calls) / sizeof(os_counter_calls[0])),
+    .close = os_counter_close,
+    .ready = os_counter_ready,
+    .poll = os_counter_poll,
+    .next_deadline_ms = os_counter_next_deadline_ms,
+    .shutdown = os_counter_shutdown,
+};
+

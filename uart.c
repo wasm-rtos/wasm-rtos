@@ -4,9 +4,7 @@
  * signals room to send; the scheduler wakes the programs waiting for either.
  */
 
-#include "os_internal.h"
-
-#if OS_HAS_UART
+#include "driver.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +108,8 @@ OsStatus os_uart_port_set(const OsUartPort* port)
     return OS_STATUS_OK;
 }
 
+extern const OsDriver os_uart_driver;
+
 OsStatus os_uart_add(const char* name, uint32_t number, uint32_t max_baud)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
@@ -148,6 +148,11 @@ OsStatus os_uart_add(const char* name, uint32_t number, uint32_t max_baud)
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
     slot->max_baud = max_baud;
+    /* A platform with these devices gives programs the uart interface. */
+    if (os_driver_add(&os_uart_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -221,7 +226,7 @@ void os_uart_poll(void)
         if (OS_UART_TAKE(uart->writable) != 0U && uart->send_blocked)
         {
             uart->send_blocked = 0U;
-            os_signal_wake(OS_SIGNAL_KEY(OS_OBJECT_UART, index + 1U));
+            os_signal_wake(os_driver_signal_key(&os_uart_driver, index + 1U));
         }
     }
     if (received)
@@ -379,7 +384,7 @@ OsStatus os_uart_wait_writable(uint32_t id, uint32_t timeout_ms)
     {
         return OS_STATUS_QUEUE_FULL;
     }
-    status = os_signal_wait(OS_SIGNAL_KEY(OS_OBJECT_UART, id), timeout_ms);
+    status = os_signal_wait(os_driver_signal_key(&os_uart_driver, id), timeout_ms);
     return status == OS_STATUS_OK ? OS_STATUS_PENDING : status;
 }
 
@@ -422,4 +427,143 @@ void os_uart_shutdown(void)
     memset(&g_uart, 0, sizeof(g_uart));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The uart interface for programs
+ * ------------------------------------------------------------------------ */
+
+typedef struct OsAbiUartOpen
+{
+    uint32_t baud;
+    uint32_t format;
+} OsAbiUartOpen;
+
+static OsStatus os_uart_call_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    const OsAbiUartOpen* open = (const OsAbiUartOpen*)context;
+    return os_uart_open(name, length, open->baud, open->format, out_id);
+}
+
+static OS_HOST_FUNCTION(os_uart_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, baud);
+    OS_HOST_ARG(uint32_t, format);
+    OsAbiUartOpen open = { baud, format };
+    OS_ABI_UNUSED();
+
+    OS_HOST_RETURN(os_driver_open(&os_uart_driver, name_address, name_length, os_uart_call_opener, &open));
+}
+
+static OS_HOST_FUNCTION(os_uart_call_read)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, buffer_address);
+    OS_HOST_ARG(uint32_t, max);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_uart_driver, handle, &id);
+    uint8_t* buffer = NULL;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (max > 0x7FFFFFFFU || (max > 0U && os_guest_memory(buffer_address, max, &buffer) != OS_STATUS_OK))
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    OS_HOST_RETURN((int32_t)os_uart_read(id, buffer, max));
+}
+
+static OS_HOST_FUNCTION(os_uart_call_write)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, data_address);
+    OS_HOST_ARG(uint32_t, length);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_uart_driver, handle, &id);
+    uint8_t* data = NULL;
+    uint32_t written = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    status = os_uart_write(id, data, length, &written);
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)written : os_abi_error(status));
+}
+
+static OS_HOST_FUNCTION(os_uart_call_wait_writable)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, timeout_ms);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_uart_driver, handle, &id);
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    status = os_uart_wait_writable(id, timeout_ms);
+    *raw_return = os_abi_error(status);
+    return os_guest_end();
+}
+
+static OS_HOST_FUNCTION(os_uart_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_uart_driver, handle, &id);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_uart_get(id, property, &value);
+        OS_HOST_RETURN(os_driver_property(status, value));
+    }
+}
+
+static const OsDriverCall os_uart_calls[] =
+{
+    { "open", "i(iiii)", os_uart_call_open, 4U },
+    { "read", "i(iii)", os_uart_call_read, 4U },
+    { "write", "i(iii)", os_uart_call_write, 4U },
+    { "wait-writable", "i(ii)", os_uart_call_wait_writable, 4U },
+    { "get", "i(ii)", os_uart_call_get, 4U },
+};
+
+const OsDriver os_uart_driver =
+{
+    .interface = "uart",
+    .calls = os_uart_calls,
+    .call_count = (uint32_t)(sizeof(os_uart_calls) / sizeof(os_uart_calls[0])),
+    .close = os_uart_close,
+    .ready = os_uart_ready,
+    .poll = os_uart_poll,
+    .shutdown = os_uart_shutdown,
+};
+

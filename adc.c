@@ -3,9 +3,7 @@
  * nothing, so any number of programs may read a channel.
  */
 
-#include "os_internal.h"
-
-#if OS_HAS_ADC
+#include "driver.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +51,8 @@ OsStatus os_adc_port_set(const OsAdcPort* port)
     return OS_STATUS_OK;
 }
 
+extern const OsDriver os_adc_driver;
+
 OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo* info)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
@@ -92,6 +92,11 @@ OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo*
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
     slot->info = *info;
+    /* A platform with these devices gives programs the adc interface. */
+    if (os_driver_add(&os_adc_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -198,4 +203,105 @@ void os_adc_shutdown(void)
     memset(&g_adc, 0, sizeof(g_adc));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The adc interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OsStatus os_adc_call_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    (void)context;
+    return os_adc_open(name, length, out_id);
+}
+
+static OS_HOST_FUNCTION(os_adc_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
+    OS_ABI_UNUSED();
+
+    if (flags != 0U)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    OS_HOST_RETURN(os_driver_open(&os_adc_driver, name_address, name_length, os_adc_call_opener, NULL));
+}
+
+static OS_HOST_FUNCTION(os_adc_call_read)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_adc_driver, handle, &id);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_adc_read(id, &value);
+        OS_HOST_RETURN(os_driver_property(status, value));
+    }
+}
+
+static OS_HOST_FUNCTION(os_adc_call_read_mv)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_adc_driver, handle, &id);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_adc_read_mv(id, &value);
+        OS_HOST_RETURN(os_driver_property(status, value));
+    }
+}
+
+static OS_HOST_FUNCTION(os_adc_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_adc_driver, handle, &id);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_adc_get(id, property, &value);
+        OS_HOST_RETURN(os_driver_property(status, value));
+    }
+}
+
+static const OsDriverCall os_adc_calls[] =
+{
+    { "open", "i(iii)", os_adc_call_open, 4U },
+    { "read", "i(i)", os_adc_call_read, 4U },
+    { "read-mv", "i(i)", os_adc_call_read_mv, 4U },
+    { "get", "i(ii)", os_adc_call_get, 4U },
+};
+
+const OsDriver os_adc_driver =
+{
+    .interface = "adc",
+    .calls = os_adc_calls,
+    .call_count = (uint32_t)(sizeof(os_adc_calls) / sizeof(os_adc_calls[0])),
+    .shutdown = os_adc_shutdown,
+};
+

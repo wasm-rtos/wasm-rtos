@@ -17,25 +17,19 @@ typedef enum OsObjectType
     OS_OBJECT_EVENT_GROUP,
     OS_OBJECT_TIMER,
     OS_OBJECT_TASK,
-    OS_OBJECT_GPIO,
-    OS_OBJECT_DISPLAY,
-    OS_OBJECT_INPUT,
-    OS_OBJECT_I2C,
-    OS_OBJECT_SPI,
-    OS_OBJECT_ADC,
-    OS_OBJECT_PWM,
-    OS_OBJECT_UART,
-    OS_OBJECT_PULSE,
-    OS_OBJECT_ONEWIRE,
-    OS_OBJECT_COUNTER,
-    OS_OBJECT_DAC
+    /* An object of a driver (driver.h): the handle and the wait target name the driver. */
+    OS_OBJECT_DRIVER
 } OsObjectType;
 
 /* One object a task can wait for together with others. */
+struct OsDriver;
+
 typedef struct OsWaitTarget
 {
     OsObjectType type;
     uint32_t id;
+    /* For OS_OBJECT_DRIVER. */
+    const struct OsDriver* driver;
 } OsWaitTarget;
 
 /* ---- Calls from a guest import ------------------------------------------ */
@@ -86,13 +80,25 @@ void** os_task_abi_state(OsTaskHandle task);
 
 /* ---- Implemented by abi.c ------------------------------------------------ */
 
-/* The ABI call an import names, or *out NULL when it is not one. */
-WmResult os_abi_resolve(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
-                        WmFunc** out);
+/*
+ * The ABI call an import names, or *out NULL when it is not one. With the
+ * program given, a kernel interface no driver offers answers unsupported.
+ */
+WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t module_length, const char* name,
+                        uint32_t name_length, WmFunc** out);
 /* A WASI call for what nothing else answers (arguments, exit, random, standard streams), or *out NULL. */
 WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
                              WmFunc** out);
 void os_abi_release_task(OsTaskHandle task);
+/* Every driver's poll, before a scheduling decision; every driver's shutdown, which also forgets them. */
+void os_drivers_poll(void);
+void os_drivers_shutdown(void);
+/* The soonest any driver needs polling, in milliseconds (UINT32_MAX: none). */
+uint32_t os_drivers_next_deadline_ms(void);
+/* The kernel clock moved: every driver's time. */
+void os_drivers_time(void);
+/* Every driver ends the task's background work now. */
+void os_drivers_finish_task(uint32_t task_id);
 /* The ABI's negative error code for a kernel status (0 for OS_STATUS_OK). */
 int32_t os_abi_error(OsStatus status);
 
@@ -147,7 +153,6 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target);
 /* Wake tasks in wait.any whose targets became ready outside the kernel's objects. */
 void os_wait_any_recheck(void);
 
-#if OS_HAS_GPIO
 /* ---- GPIO for programs (gpio.c) -------------------------------------------- */
 
 /*
@@ -191,9 +196,7 @@ OsStatus os_gpio_open_pwm(const char* name, uint32_t length, uint8_t active_low,
 /* Deliver edges reported by os_gpio_edge; wakes waiting programs. */
 void os_gpio_poll(void);
 void os_gpio_shutdown(void);
-#endif
 
-#if OS_HAS_DISPLAY
 /* ---- Displays for programs (display.c) ------------------------------------ */
 
 /* What display-get reports; unknown properties are OS_STATUS_UNSUPPORTED. */
@@ -222,9 +225,7 @@ OsStatus os_display_fill(uint32_t id, uint32_t x, uint32_t y, uint32_t width, ui
 OsStatus os_display_flush(uint32_t id);
 OsStatus os_display_set_brightness(uint32_t id, uint32_t level);
 void os_display_shutdown(void);
-#endif
 
-#if OS_HAS_INPUT
 /* ---- Input devices for programs (input.c) --------------------------------- */
 
 #define OS_INPUT_PROP_KIND           1U
@@ -256,9 +257,7 @@ uint8_t os_input_ready(uint32_t id);
 void os_input_update_time(void);
 uint32_t os_input_next_deadline_ms(void);
 void os_input_shutdown(void);
-#endif
 
-#if OS_HAS_I2C
 /* ---- I2C for programs (bus.c) ---------------------------------------------- */
 
 /*
@@ -270,9 +269,7 @@ OsStatus os_i2c_open(const char* bus_name, uint32_t length, uint32_t address, ui
 void os_i2c_close(uint32_t id);
 OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count);
 void os_i2c_shutdown(void);
-#endif
 
-#if OS_HAS_SPI
 /* ---- SPI for programs (bus.c) ---------------------------------------------- */
 
 /*
@@ -285,9 +282,7 @@ OsStatus os_spi_open(const char* bus_name, uint32_t bus_length, const char* cs, 
 void os_spi_close(uint32_t id);
 OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count);
 void os_spi_shutdown(void);
-#endif
 
-#if OS_HAS_ONEWIRE
 /* ---- 1-Wire for programs (bus.c) ------------------------------------------- */
 
 /*
@@ -313,9 +308,7 @@ typedef struct OsOneWireSearch
 OsStatus os_onewire_search(const char* bus_name, uint32_t length, OsOneWireSearch* state, uint32_t flags,
                            uint8_t* out_found);
 void os_onewire_shutdown(void);
-#endif
 
-#if OS_HAS_COUNTER
 /* ---- Counters for programs (counter.c) ------------------------------------- */
 #define OS_COUNTER_PROP_KIND      1U
 #define OS_COUNTER_PROP_MAX_HZ    2U
@@ -334,9 +327,7 @@ void os_counter_poll(void);
 /* When the kernel next reads a watched counter, in ms from now (OS_WAIT_FOREVER: none). */
 uint32_t os_counter_next_deadline_ms(void);
 void os_counter_shutdown(void);
-#endif
 
-#if OS_HAS_DAC
 /* ---- Analog outputs for programs (dac.c) ----------------------------------- */
 #define OS_DAC_PROP_RESOLUTION 1U
 #define OS_DAC_PROP_MAX        2U
@@ -350,9 +341,7 @@ OsStatus os_dac_write(uint32_t id, uint32_t raw);
 OsStatus os_dac_write_mv(uint32_t id, uint32_t mv);
 OsStatus os_dac_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_dac_shutdown(void);
-#endif
 
-#if OS_HAS_ADC
 /* ---- Analog inputs for programs (adc.c) ------------------------------------ */
 #define OS_ADC_PROP_RESOLUTION 1U
 #define OS_ADC_PROP_MAX        2U
@@ -362,9 +351,7 @@ OsStatus os_adc_read(uint32_t id, uint32_t* out_raw);
 OsStatus os_adc_read_mv(uint32_t id, uint32_t* out_mv);
 OsStatus os_adc_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_adc_shutdown(void);
-#endif
 
-#if OS_HAS_PWM
 /* ---- PWM outputs for programs (pwm.c) -------------------------------------- */
 #define OS_PWM_PROP_FREQUENCY 1U
 #define OS_PWM_PROP_DUTY      2U
@@ -376,9 +363,7 @@ OsStatus os_pwm_set_frequency(uint32_t id, uint32_t frequency_hz);
 OsStatus os_pwm_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_pwm_close(uint32_t id);
 void os_pwm_shutdown(void);
-#endif
 
-#if OS_HAS_UART
 /* ---- Serial ports for programs (uart.c) ------------------------------------ */
 #define OS_UART_PROP_BAUD      1U
 #define OS_UART_PROP_AVAILABLE 2U
@@ -394,20 +379,7 @@ uint8_t os_uart_ready(uint32_t id);
 /* Deliver what ports reported from interrupt handlers. */
 void os_uart_poll(void);
 void os_uart_shutdown(void);
-#endif
 
-/* Ports that work on a program's memory in the background: buses and pulse trains. */
-#define OS_HAS_TRANSFERS (OS_HAS_BUSES || OS_HAS_PULSE)
-
-#if OS_HAS_BUSES
-void os_bus_shutdown(void);
-/* Deliver background transfers that have ended. */
-void os_bus_poll(void);
-/* End the background transfer task_id waits for, at once (the port's finish). */
-void os_bus_finish_task(uint32_t task_id);
-#endif
-
-#if OS_HAS_PULSE
 /* ---- Pulse trains for programs (pulse.c) ----------------------------------- */
 #define OS_PULSE_PROP_RESOLUTION 1U
 OsStatus os_pulse_open(const char* name, uint32_t length, uint32_t flags, uint32_t* out_id);
@@ -421,15 +393,12 @@ OsStatus os_pulse_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_pulse_poll(void);
 void os_pulse_finish_task(uint32_t task_id);
 void os_pulse_shutdown(void);
-#endif
 
-#if OS_HAS_TRANSFERS
 /* The current task waits for its background transfer (os.c). */
 OsStatus os_transfer_wait_begin(void);
 /* The transfer of task_id ended with status and value; wakes it (os.c). */
 void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value);
 /* End every background transfer of task_id now, through the ports' finish. */
 void os_transfer_finish_task(uint32_t task_id);
-#endif
 
 #endif

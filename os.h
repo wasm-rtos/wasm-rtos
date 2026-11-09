@@ -11,18 +11,6 @@
  *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
- *   OS_HAS_GPIO       pins for programs through a platform GPIO port
- *   OS_HAS_DISPLAY    displays for programs through a platform display port
- *   OS_HAS_INPUT      buttons, rotary controls, touch and keyboards for programs
- *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
- *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
- *   OS_HAS_ADC        analog inputs for programs through a platform ADC port
- *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
- *   OS_HAS_UART       serial ports for programs through a platform UART port
- *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
- *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
- *   OS_HAS_COUNTER    pulse counters and quadrature encoders through a platform port
- *   OS_HAS_DAC        analog outputs for programs through a platform DAC port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
  * Off unless defined to 1:
  *   OS_HAS_DYLINK     dylink.0 programs and shared libraries (vm/source/wm_dylink.c)
@@ -37,50 +25,6 @@
 #ifndef OS_FS_TAR
 #define OS_FS_TAR OS_HAS_FS
 #endif
-#ifndef OS_HAS_GPIO
-#define OS_HAS_GPIO 1
-#endif
-#ifndef OS_HAS_DISPLAY
-#define OS_HAS_DISPLAY 1
-#endif
-#ifndef OS_HAS_INPUT
-#define OS_HAS_INPUT 1
-#endif
-#ifndef OS_HAS_I2C
-#define OS_HAS_I2C 1
-#endif
-#ifndef OS_HAS_SPI
-#define OS_HAS_SPI 1
-#endif
-#ifndef OS_HAS_ADC
-#define OS_HAS_ADC 1
-#endif
-/* PWM outputs are GPIO pins: off without GPIO. */
-#ifndef OS_HAS_PWM
-#define OS_HAS_PWM OS_HAS_GPIO
-#endif
-#if OS_HAS_PWM && !OS_HAS_GPIO
-#error "OS_HAS_PWM needs OS_HAS_GPIO"
-#endif
-#ifndef OS_HAS_UART
-#define OS_HAS_UART 1
-#endif
-/* Pulse trains run on GPIO pins: off without GPIO. */
-#ifndef OS_HAS_PULSE
-#define OS_HAS_PULSE OS_HAS_GPIO
-#endif
-#if OS_HAS_PULSE && !OS_HAS_GPIO
-#error "OS_HAS_PULSE needs OS_HAS_GPIO"
-#endif
-#ifndef OS_HAS_ONEWIRE
-#define OS_HAS_ONEWIRE 1
-#endif
-#ifndef OS_HAS_COUNTER
-#define OS_HAS_COUNTER 1
-#endif
-#ifndef OS_HAS_DAC
-#define OS_HAS_DAC 1
-#endif
 #ifndef OS_HAS_WASI
 #define OS_HAS_WASI 1
 #endif
@@ -93,8 +37,6 @@
 #if OS_HAS_DYLINK
 #include "vm/source/wm_dylink.h"
 #endif
-/* Buses of any kind: the shared machinery of bus.c. */
-#define OS_HAS_BUSES (OS_HAS_I2C || OS_HAS_SPI || OS_HAS_ONEWIRE)
 
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
@@ -144,6 +86,7 @@ typedef WmHostFunction OsHostImportFunction;
     } while (0)
 /* Linear memory is little-endian, like every target the kernel runs on. */
 #define OS_HOST_READ32(POINTER) os_host_read32(POINTER)
+#define OS_HOST_READ64(POINTER) os_host_read64(POINTER)
 #define OS_HOST_WRITE8(POINTER, VALUE) (*(uint8_t*)(POINTER) = (uint8_t)(VALUE))
 #define OS_HOST_WRITE32(POINTER, VALUE) os_host_write32((POINTER), (uint32_t)(VALUE))
 #define OS_HOST_WRITE64(POINTER, VALUE) os_host_write64((POINTER), (uint64_t)(VALUE))
@@ -155,6 +98,12 @@ static inline uint8_t* os_host_memory_base(const WmMemory* memory)
 static inline uint32_t os_host_read32(const void* pointer)
 {
     uint32_t value;
+    memcpy(&value, pointer, sizeof(value));
+    return value;
+}
+static inline uint64_t os_host_read64(const void* pointer)
+{
+    uint64_t value;
     memcpy(&value, pointer, sizeof(value));
     return value;
 }
@@ -780,7 +729,6 @@ uint32_t os_get_next_wakeup_ms(void);
 
 OsStatus os_schedule(void);
 
-#if OS_HAS_GPIO
 /*
  * GPIO. The platform drives the pins through a port; the kernel lends them
  * to programs by name. Register every pin a program may use, under the names
@@ -849,9 +797,7 @@ void os_gpio_edge(uint32_t pin, uint32_t edges);
 
 /* The id of the task that owns a pin, 0 when it is free or unknown. */
 uint32_t os_gpio_get_owner(uint32_t pin);
-#endif
 
-#if OS_HAS_DISPLAY
 /*
  * Displays. The platform registers each display a program may draw on under
  * the device profile's name ("main" for the primary one) and draws through a
@@ -922,9 +868,7 @@ OsStatus os_display_port_set(const OsDisplayPort* port);
 OsStatus os_display_add(const char* name, uint32_t display, const OsDisplayInfo* info);
 /* The id of the task that owns a display, 0 when it is free or unknown. */
 uint32_t os_display_get_owner(uint32_t display);
-#endif
 
-#if OS_HAS_INPUT
 /*
  * Input devices: a group of buttons, a rotary control such as a bezel or a
  * knob, a touch surface, a keyboard. The platform registers each under the
@@ -982,9 +926,7 @@ OsStatus os_input_touch(uint32_t device, uint32_t contact, uint32_t phase, uint3
 OsStatus os_input_text(uint32_t device, uint32_t code_point);
 /* The id of the task that owns a device, 0 when it is free or unknown. */
 uint32_t os_input_get_owner(uint32_t device);
-#endif
 
-#if OS_HAS_BUSES
 /*
  * Buses. The platform registers each bus under the device profile's name
  * ("i2c0", "spi0", "ow0") and moves the bytes through a port; the kernel lends
@@ -1046,9 +988,7 @@ typedef struct OsOneWireOp
     uint8_t* data;     /* written from, or read into; bits least significant first */
     uint32_t length;   /* bytes, bits for the _BITS kinds, milliseconds for POWER */
 } OsOneWireOp;
-#endif
 
-#if OS_HAS_I2C
 /*
  * I2C: ops in order, a repeated start where a read follows a write or a
  * write follows a read, a stop at the end. Adjacent ops of the same kind
@@ -1079,9 +1019,7 @@ OsStatus os_i2c_port_set(const OsI2cPort* port);
 OsStatus os_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz);
 /* The id of the task that has address open on bus, 0 when none. */
 uint32_t os_i2c_get_owner(uint32_t bus, uint32_t address);
-#endif
 
-#if OS_HAS_SPI
 /*
  * SPI: chip select (when the kernel drives it) goes low before the first op
  * and high after the last, also after an error. A read sends zeros; a
@@ -1113,9 +1051,7 @@ OsStatus os_spi_port_set(const OsSpiPort* port);
 OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz);
 /* The id of the task that holds bus exclusively or has a device on it with chip select pin cs_pin; 0 when none. */
 uint32_t os_spi_get_owner(uint32_t bus, uint32_t cs_pin);
-#endif
 
-#if OS_HAS_ONEWIRE
 /*
  * 1-Wire: one data line with a pull-up, devices told apart by a 64-bit ROM
  * code (family code in the low byte, CRC in the high one). Ops in order:
@@ -1169,9 +1105,7 @@ OsStatus os_onewire_add_bus(const char* name, uint32_t bus);
 uint32_t os_onewire_get_owner(uint32_t bus, uint64_t rom);
 /* The 1-Wire CRC-8 (polynomial x^8 + x^5 + x^4 + 1) of length bytes. */
 uint8_t os_onewire_crc8(const uint8_t* data, uint32_t length);
-#endif
 
-#if OS_HAS_BUSES
 /*
  * Every finished transaction, for bus analyzers and logs: which program,
  * which bus and device, the ops with the bytes written and read (valid
@@ -1210,9 +1144,7 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context);
 void os_bus_complete(uint32_t kind, uint32_t bus, OsStatus status);
 /* Whether a background transfer is in progress on a bus. */
 uint8_t os_bus_is_busy(uint32_t kind, uint32_t bus);
-#endif
 
-#if OS_HAS_ADC
 /*
  * Analog inputs, registered under the device profile's names ("a0",
  * "battery"). Reading changes nothing, so programs share a channel. read
@@ -1241,9 +1173,7 @@ typedef struct OsAdcPort
 OsStatus os_adc_port_set(const OsAdcPort* port);
 /* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_ADC_MAX. */
 OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo* info);
-#endif
 
-#if OS_HAS_DAC
 /*
  * Analog outputs, registered under the device profile's names. One program
  * owns an output at a time. A channel named like a GPIO pin ("gpio25") is
@@ -1280,9 +1210,7 @@ OsStatus os_dac_port_set(const OsDacPort* port);
 OsStatus os_dac_add_channel(const char* name, uint32_t channel, const OsDacInfo* info);
 /* The id of the task that owns a channel, 0 when it is free. */
 uint32_t os_dac_get_owner(uint32_t channel);
-#endif
 
-#if OS_HAS_PWM
 /*
  * Pulse-width outputs on GPIO pins that have OS_GPIO_CAN_PWM. A program owns
  * the pin as it would through gpio; closing gives it back as an input.
@@ -1303,9 +1231,7 @@ typedef struct OsPwmPort
 } OsPwmPort;
 
 OsStatus os_pwm_port_set(const OsPwmPort* port);
-#endif
 
-#if OS_HAS_UART
 /*
  * Serial ports, registered under the device profile's names ("uart1",
  * "gps"), one owner each. Received bytes go into a kernel buffer the port
@@ -1351,9 +1277,7 @@ void os_uart_error(uint32_t uart);
 void os_uart_writable(uint32_t uart);
 /* The id of the task that owns a port, 0 when it is free. */
 uint32_t os_uart_get_owner(uint32_t uart);
-#endif
 
-#if OS_HAS_COUNTER
 /*
  * Counters, registered under the device profile's names ("enc0", "flow"):
  * a pulse counter on one pin, or a quadrature encoder on two. Hardware
@@ -1414,9 +1338,7 @@ OsStatus os_counter_add(const char* name, uint32_t unit, const OsCounterInfo* in
 void os_counter_event(uint32_t unit);
 /* The id of the task that owns a counter, 0 when it is free. */
 uint32_t os_counter_get_owner(uint32_t unit);
-#endif
 
-#if OS_HAS_PULSE
 /*
  * Timed pulse trains on GPIO pins that have OS_GPIO_CAN_PULSE, for what needs
  * timing finer than a program can keep: addressable LEDs, infrared remotes,
@@ -1472,7 +1394,6 @@ OsStatus os_pulse_port_set(const OsPulsePort* port);
  * for receive, how many items it wrote. Safe in an interrupt handler.
  */
 void os_pulse_complete(uint32_t pin, OsStatus status, uint32_t count);
-#endif
 
 uint32_t os_get_task_count(void);
 uint32_t os_get_ready_task_count(void);

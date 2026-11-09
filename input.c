@@ -5,9 +5,7 @@
  * timings the platform gave, so every program feels the same.
  */
 
-#include "os_internal.h"
-
-#if OS_HAS_INPUT
+#include "driver.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -111,6 +109,8 @@ static void os_input_push(OsInputDevice* device, uint8_t type, uint32_t code, in
     os_wait_any_recheck();
 }
 
+extern const OsDriver os_input_driver;
+
 OsStatus os_input_add(const char* name, uint32_t device, const OsInputInfo* info)
 {
     size_t length = name != NULL ? strlen(name) : 0U;
@@ -151,6 +151,11 @@ OsStatus os_input_add(const char* name, uint32_t device, const OsInputInfo* info
     memcpy(slot->name, name, length);
     slot->name_length = (uint8_t)length;
     slot->info = *info;
+    /* A platform with these devices gives programs the input interface. */
+    if (os_driver_add(&os_input_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -490,4 +495,102 @@ void os_input_shutdown(void)
     memset(&g_input, 0, sizeof(g_input));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The input interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OS_HOST_FUNCTION(os_input_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
+    const char* name = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(name_address, name_length, &name);
+    if (handle < 0)
+    {
+        OS_HOST_RETURN(handle);
+    }
+    if (name == NULL || flags != 0U)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    status = os_input_open(name, name_length, &id);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_driver_handle_new(&os_input_driver, id);
+    if (handle < 0)
+    {
+        os_input_close(id);
+    }
+    OS_HOST_RETURN(handle);
+}
+
+static OS_HOST_FUNCTION(os_input_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_input_driver, handle, &id);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    status = os_input_get(id, property, &value);
+    OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status));
+}
+
+static OS_HOST_FUNCTION(os_input_call_read)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, events_address);
+    OS_HOST_ARG(uint32_t, max_events);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_input_driver, handle, &id);
+    uint8_t* events = NULL;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (max_events > UINT32_MAX / OS_INPUT_EVENT_SIZE ||
+        os_guest_memory(events_address, max_events * OS_INPUT_EVENT_SIZE, &events) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    OS_HOST_RETURN((int32_t)os_input_read(id, events, max_events));
+}
+
+static const OsDriverCall os_input_calls[] =
+{
+    { "open", "i(iii)", os_input_call_open, 2U },
+    { "get", "i(ii)", os_input_call_get, 2U },
+    { "read", "i(iii)", os_input_call_read, 2U },
+};
+
+const OsDriver os_input_driver =
+{
+    .interface = "input",
+    .calls = os_input_calls,
+    .call_count = (uint32_t)(sizeof(os_input_calls) / sizeof(os_input_calls[0])),
+    .close = os_input_close,
+    .ready = os_input_ready,
+    .next_deadline_ms = os_input_next_deadline_ms,
+    .time = os_input_update_time,
+    .shutdown = os_input_shutdown,
+};
+

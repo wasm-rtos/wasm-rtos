@@ -5,9 +5,7 @@
  * the same way as for background bus transfers.
  */
 
-#include "os_internal.h"
-
-#if OS_HAS_PULSE
+#include "driver.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +55,8 @@ static OsPulseChannel* os_pulse_slot(uint32_t id)
     return id >= 1U && id <= OS_PULSE_MAX ? g_pulse.channels[id - 1U] : NULL;
 }
 
+extern const OsDriver os_pulse_driver;
+
 OsStatus os_pulse_port_set(const OsPulsePort* port)
 {
     if (port == NULL)
@@ -71,6 +71,11 @@ OsStatus os_pulse_port_set(const OsPulsePort* port)
     }
     g_pulse.port = *port;
     g_pulse.has_port = 1U;
+    /* A platform with a pulse port gives programs the pulse interface. */
+    if (os_driver_add(&os_pulse_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -350,4 +355,176 @@ void os_pulse_shutdown(void)
     memset(&g_pulse, 0, sizeof(g_pulse));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The pulse interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OsStatus os_pulse_call_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    return os_pulse_open(name, length, *(const uint32_t*)context, out_id);
+}
+
+static OS_HOST_FUNCTION(os_pulse_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, flags);
+    OS_ABI_UNUSED();
+
+    OS_HOST_RETURN(os_driver_open(&os_pulse_driver, name_address, name_length, os_pulse_call_opener, &flags));
+}
+
+/* Items are 32-bit words the port reads in place: they must be aligned. */
+static int32_t os_pulse_guest_items(uint32_t address, uint32_t count, uint32_t** out_items)
+{
+    uint8_t* memory = NULL;
+
+    if (count > 0x3FFFFFFFU || (address & 3U) != 0U)
+    {
+        return count > 0x3FFFFFFFU ? -WR_EFAULT : -WR_EINVAL;
+    }
+    if (count > 0U && os_guest_memory(address, count * 4U, &memory) != OS_STATUS_OK)
+    {
+        return -WR_EFAULT;
+    }
+    *out_items = (uint32_t*)(void*)memory;
+    return 0;
+}
+
+static OS_HOST_FUNCTION(os_pulse_call_send)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, items_address);
+    OS_HOST_ARG(uint32_t, count);
+    OS_HOST_ARG(uint32_t, carrier_hz);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_pulse_driver, handle, &id);
+    uint32_t* items = NULL;
+    int32_t result = 0;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    result = os_pulse_guest_items(items_address, count, &items);
+    if (result < 0)
+    {
+        OS_HOST_RETURN(result);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_pulse_send(id, items, count, carrier_hz));
+    return os_guest_end();
+}
+
+static OS_HOST_FUNCTION(os_pulse_call_send_bits)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, data_address);
+    OS_HOST_ARG(uint32_t, length);
+    OS_HOST_ARG(uint32_t, zero_high_ns);
+    OS_HOST_ARG(uint32_t, zero_low_ns);
+    OS_HOST_ARG(uint32_t, one_high_ns);
+    OS_HOST_ARG(uint32_t, one_low_ns);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_pulse_driver, handle, &id);
+    uint32_t timing[4] = { zero_high_ns, zero_low_ns, one_high_ns, one_low_ns };
+    uint8_t* data = NULL;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_pulse_send_bits(id, data, length, timing));
+    return os_guest_end();
+}
+
+static OS_HOST_FUNCTION(os_pulse_call_receive)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, items_address);
+    OS_HOST_ARG(uint32_t, max);
+    OS_HOST_ARG(uint32_t, idle_ns);
+    OS_HOST_ARG(uint32_t, timeout_ms);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_pulse_driver, handle, &id);
+    uint32_t* items = NULL;
+    uint32_t count = 0U;
+    int32_t result = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    result = os_pulse_guest_items(items_address, max, &items);
+    if (result < 0)
+    {
+        OS_HOST_RETURN(result);
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    /* Done at once: the count now; in the background, the wakeup writes it. */
+    status = os_pulse_receive(id, items, max, idle_ns, timeout_ms, &count);
+    *raw_return = status == OS_STATUS_OK ? (int32_t)count : os_abi_error(status);
+    return os_guest_end();
+}
+
+static OS_HOST_FUNCTION(os_pulse_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_pulse_driver, handle, &id);
+    uint32_t value = 0U;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    status = os_pulse_get(id, property, &value);
+    OS_HOST_RETURN(os_driver_property(status, value));
+}
+
+static const OsDriverCall os_pulse_calls[] =
+{
+    { "open", "i(iii)", os_pulse_call_open, 5U },
+    { "send", "i(iiii)", os_pulse_call_send, 5U },
+    { "send-bits", "i(iiiiiii)", os_pulse_call_send_bits, 5U },
+    { "receive", "i(iiiii)", os_pulse_call_receive, 5U },
+    { "get", "i(ii)", os_pulse_call_get, 5U },
+};
+
+const OsDriver os_pulse_driver =
+{
+    .interface = "pulse",
+    .calls = os_pulse_calls,
+    .call_count = (uint32_t)(sizeof(os_pulse_calls) / sizeof(os_pulse_calls[0])),
+    .close = os_pulse_close,
+    .poll = os_pulse_poll,
+    .finish_task = os_pulse_finish_task,
+    .shutdown = os_pulse_shutdown,
+};
+

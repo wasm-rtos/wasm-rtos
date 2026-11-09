@@ -1,6 +1,6 @@
 #include "os.h"
 #include "fs.h"
-#include "os_internal.h"
+#include "driver.h"
 
 
 #include <stddef.h>
@@ -629,6 +629,7 @@ static int os_host_import_exists(const char* module_name, const char* import_nam
 static void os_wasm_library_free_all(void);
 static WmResult os_dylink_find(void* context, const char* name, WmModule** out);
 static WmResult os_resolve_host_import(
+    const WmModule* program,
     const char* module,
     uint32_t module_length,
     const char* name,
@@ -800,39 +801,10 @@ void os_shutdown(void)
     os_timer_free_all();
     os_host_import_free_list();
     os_host_functions_free();
-#if OS_HAS_BUSES
-    os_bus_shutdown();
-#endif
-#if OS_HAS_PULSE
-    os_pulse_shutdown();
-#endif
-#if OS_HAS_COUNTER
-    os_counter_shutdown();
-#endif
-#if OS_HAS_DAC
-    os_dac_shutdown();
-#endif
-#if OS_HAS_ADC
-    os_adc_shutdown();
-#endif
-#if OS_HAS_PWM
-    os_pwm_shutdown();
-#endif
-#if OS_HAS_UART
-    os_uart_shutdown();
-#endif
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
-#if OS_HAS_GPIO
-    os_gpio_shutdown();
-#endif
-#if OS_HAS_DISPLAY
-    os_display_shutdown();
-#endif
-#if OS_HAS_INPUT
-    os_input_shutdown();
-#endif
+    os_drivers_shutdown();
 
     memset(&g_os, 0, sizeof(g_os));
 }
@@ -1966,7 +1938,7 @@ static WmResult os_dylink_host_import(
     (void)context;
     out->kind = kind;
     out->as.func = NULL;
-    return os_resolve_host_import(module, module_length, name, name_length, &out->as.func);
+    return os_resolve_host_import(NULL, module, module_length, name, name_length, &out->as.func);
 }
 #endif
 
@@ -2356,7 +2328,6 @@ OsStatus os_task_abort_wait(OsTaskHandle task)
         return OS_STATUS_NOT_WAITING;
     }
 
-#if OS_HAS_TRANSFERS
     /* Bytes on the wire cannot be called back: the transfer ends and the program gets its result. */
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
@@ -2364,7 +2335,6 @@ OsStatus os_task_abort_wait(OsTaskHandle task)
         os_recalculate_task_counters();
         return OS_STATUS_OK;
     }
-#endif
     os_cancel_task_wait(task, OS_STATUS_ABORTED);
     os_recalculate_task_counters();
     os_preempt_for_higher_priority_ready_task();
@@ -2430,13 +2400,11 @@ OsStatus os_task_suspend(OsTaskHandle task)
         os_request_task_stop(task);
     }
 
-#if OS_HAS_TRANSFERS
     /* A transfer in progress ends first; its result reaches the program when it resumes. */
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
         os_transfer_finish_task(task->id);
     }
-#endif
     if (task->state == OS_TASK_WAITING)
     {
         os_cancel_task_wait(task, OS_STATUS_BUSY);
@@ -3923,26 +3891,14 @@ uint32_t os_get_next_wakeup_ms(void)
         }
     }
 
-#if OS_HAS_INPUT
     {
-        /* A held key's long press or next repeat. */
-        uint32_t input_ms = os_input_next_deadline_ms();
-        if (input_ms < next_wakeup_ms)
+        /* What drivers poll for, such as counters whose hardware cannot watch. */
+        uint32_t driver_ms = os_drivers_next_deadline_ms();
+        if (driver_ms < next_wakeup_ms)
         {
-            next_wakeup_ms = input_ms;
+            next_wakeup_ms = driver_ms;
         }
     }
-#endif
-#if OS_HAS_COUNTER
-    {
-        /* The next read of a watched counter whose hardware cannot watch. */
-        uint32_t counter_ms = os_counter_next_deadline_ms();
-        if (counter_ms < next_wakeup_ms)
-        {
-            next_wakeup_ms = counter_ms;
-        }
-    }
-#endif
 
     return next_wakeup_ms;
 }
@@ -3958,26 +3914,8 @@ OsStatus os_schedule(void)
         return OS_STATUS_NO_READY_TASKS;
     }
 
-#if OS_HAS_GPIO
-    /* Edges reported since the last call, also from interrupt handlers. */
-    os_gpio_poll();
-#endif
-#if OS_HAS_BUSES
-    /* Background bus transfers that have ended. */
-    os_bus_poll();
-#endif
-#if OS_HAS_PULSE
-    /* Pulse trains sent or captured in the background. */
-    os_pulse_poll();
-#endif
-#if OS_HAS_UART
-    /* Bytes received and room to send, reported from interrupt handlers. */
-    os_uart_poll();
-#endif
-#if OS_HAS_COUNTER
-    /* Counts that left their window, by watch point or read by the kernel. */
-    os_counter_poll();
-#endif
+    /* What drivers saw in the background, such as edges from interrupt handlers. */
+    os_drivers_poll();
 
     if (g_os.clock_port.now_ms != NULL)
     {
@@ -4910,6 +4848,8 @@ static int os_host_import_exists(const char* module_name, const char* import_nam
 /* Imports no host function answers, counted while a program is linked; the first is named in the error. */
 typedef struct OsImportLink
 {
+    /* The program being linked. */
+    const WmModule* program;
     uint32_t missing;
     const char* module;
     uint32_t module_length;
@@ -4923,6 +4863,7 @@ typedef struct OsImportLink
  * registered. *out stays NULL when nothing answers.
  */
 static WmResult os_resolve_host_import(
+    const WmModule* program,
     const char* module,
     uint32_t module_length,
     const char* name,
@@ -4931,7 +4872,7 @@ static WmResult os_resolve_host_import(
 )
 {
     OsHostImportNode* node = NULL;
-    WmResult result = os_abi_resolve(module, module_length, name, name_length, out);
+    WmResult result = os_abi_resolve(program, module, module_length, name, name_length, out);
 
     if (result != NULL || *out != NULL)
     {
@@ -4981,7 +4922,7 @@ static WmResult os_resolve_import(
     {
         return "unlinkable: programs import only functions";
     }
-    result = os_resolve_host_import(module, module_length, name, name_length, &out->as.func);
+    result = os_resolve_host_import(link->program, module, module_length, name, name_length, &out->as.func);
     if (result == NULL && out->as.func == NULL && link->missing++ == 0U)
     {
         link->module = module;
@@ -5055,6 +4996,7 @@ static OsStatus os_task_create_wasm(
 #endif
 
     memset(&link, 0, sizeof(link));
+    link.program = task->wasm_module;
     result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
     if (result != NULL)
     {
@@ -6170,9 +6112,7 @@ static void os_update_time_events(void)
 {
     g_os.processing_time_events = 1U;
     os_process_timers();
-#if OS_HAS_INPUT
-    os_input_update_time();
-#endif
+    os_drivers_time();
     os_update_waiting_tasks();
     g_os.processing_time_events = 0U;
     os_clock_rearm();
@@ -6792,12 +6732,10 @@ static void os_set_task_dead(OsTaskHandle task)
         g_os.current_task = NULL;
     }
 
-#if OS_HAS_TRANSFERS
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
         os_transfer_finish_task(task->id);
     }
-#endif
     os_cancel_task_wait(task, OS_STATUS_TASK_DEAD);
     os_release_task_mutexes(task);
     os_timer_delete_for_task(task);
@@ -6876,13 +6814,11 @@ static void os_destroy_task(OsTaskHandle task)
         g_os.last_scheduled_task = task->previous;
     }
 
-#if OS_HAS_TRANSFERS
     /* The port must be done with the task's memory before it is freed. */
     if (task->wait_type == OS_TASK_WAIT_TRANSFER)
     {
         os_transfer_finish_task(task->id);
     }
-#endif
     os_cancel_task_wait(task, OS_STATUS_TASK_DEAD);
     os_release_task_mutexes(task);
     os_timer_delete_for_task(task);
@@ -7203,22 +7139,8 @@ uint8_t os_wait_target_ready(const OsWaitTarget* target)
             OsTaskHandle task = os_task_find_by_id(target->id);
             return task != NULL && task->state == OS_TASK_DEAD;
         }
-#if OS_HAS_GPIO
-        case OS_OBJECT_GPIO:
-            return os_gpio_ready(target->id);
-#endif
-#if OS_HAS_INPUT
-        case OS_OBJECT_INPUT:
-            return os_input_ready(target->id);
-#endif
-#if OS_HAS_UART
-        case OS_OBJECT_UART:
-            return os_uart_ready(target->id);
-#endif
-#if OS_HAS_COUNTER
-        case OS_OBJECT_COUNTER:
-            return os_counter_ready(target->id);
-#endif
+        case OS_OBJECT_DRIVER:
+            return target->driver->ready != NULL && target->driver->ready(target->id);
         default:
             return 0U;
     }
@@ -7379,7 +7301,6 @@ uint32_t os_current_parent_id(void)
 }
 #endif
 
-#if OS_HAS_TRANSFERS
 OsStatus os_transfer_wait_begin(void)
 {
     return os_begin_task_wait(g_os.current_task, OS_TASK_WAIT_TRANSFER, OS_WAIT_FOREVER);
@@ -7399,14 +7320,8 @@ void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value)
 
 void os_transfer_finish_task(uint32_t task_id)
 {
-#if OS_HAS_BUSES
-    os_bus_finish_task(task_id);
-#endif
-#if OS_HAS_PULSE
-    os_pulse_finish_task(task_id);
-#endif
+    os_drivers_finish_task(task_id);
 }
-#endif
 
 OsStatus os_signal_wait(uint32_t key, uint32_t timeout_ms)
 {

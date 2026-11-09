@@ -4,9 +4,7 @@
  * (fully on), so a program means the same on every chip.
  */
 
-#include "os_internal.h"
-
-#if OS_HAS_PWM
+#include "driver.h"
 
 #include <string.h>
 
@@ -42,6 +40,8 @@ static uint32_t os_pwm_physical(const OsPwmOutput* output, uint32_t duty)
     return output->inverted ? OS_PWM_DUTY_MAX - duty : duty;
 }
 
+extern const OsDriver os_pwm_driver;
+
 OsStatus os_pwm_port_set(const OsPwmPort* port)
 {
     if (port == NULL)
@@ -56,6 +56,11 @@ OsStatus os_pwm_port_set(const OsPwmPort* port)
     }
     g_pwm.port = *port;
     g_pwm.has_port = 1U;
+    /* A platform with a PWM port gives programs the pwm interface. */
+    if (os_driver_add(&os_pwm_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
+    }
     return OS_STATUS_OK;
 }
 
@@ -184,4 +189,102 @@ void os_pwm_shutdown(void)
     memset(&g_pwm, 0, sizeof(g_pwm));
 }
 
-#endif
+/* ---------------------------------------------------------------------------
+ * The pwm interface for programs
+ * ------------------------------------------------------------------------ */
+
+typedef struct OsAbiPwmOpen
+{
+    uint32_t frequency_hz;
+    uint32_t flags;
+} OsAbiPwmOpen;
+
+static OsStatus os_pwm_call_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
+{
+    const OsAbiPwmOpen* open = (const OsAbiPwmOpen*)context;
+    return os_pwm_open(name, length, open->frequency_hz, open->flags, out_id);
+}
+
+static OS_HOST_FUNCTION(os_pwm_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, name_address);
+    OS_HOST_ARG(uint32_t, name_length);
+    OS_HOST_ARG(uint32_t, frequency_hz);
+    OS_HOST_ARG(uint32_t, flags);
+    OsAbiPwmOpen open = { frequency_hz, flags };
+    OS_ABI_UNUSED();
+
+    OS_HOST_RETURN(os_driver_open(&os_pwm_driver, name_address, name_length, os_pwm_call_opener, &open));
+}
+
+static OS_HOST_FUNCTION(os_pwm_call_set_duty)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, duty);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_pwm_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_pwm_set_duty(id, duty)));
+}
+
+static OS_HOST_FUNCTION(os_pwm_call_set_frequency)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, frequency_hz);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_pwm_driver, handle, &id);
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    OS_HOST_RETURN(os_abi_error(os_pwm_set_frequency(id, frequency_hz)));
+}
+
+static OS_HOST_FUNCTION(os_pwm_call_get)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, property);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_pwm_driver, handle, &id);
+    uint32_t value = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    {
+        /* The call fills value: it must happen before value is read. */
+        OsStatus status = os_pwm_get(id, property, &value);
+        OS_HOST_RETURN(os_driver_property(status, value));
+    }
+}
+
+static const OsDriverCall os_pwm_calls[] =
+{
+    { "open", "i(iiii)", os_pwm_call_open, 4U },
+    { "set-duty", "i(ii)", os_pwm_call_set_duty, 4U },
+    { "set-frequency", "i(ii)", os_pwm_call_set_frequency, 4U },
+    { "get", "i(ii)", os_pwm_call_get, 4U },
+};
+
+const OsDriver os_pwm_driver =
+{
+    .interface = "pwm",
+    .calls = os_pwm_calls,
+    .call_count = (uint32_t)(sizeof(os_pwm_calls) / sizeof(os_pwm_calls[0])),
+    .close = os_pwm_close,
+    .shutdown = os_pwm_shutdown,
+};
+
