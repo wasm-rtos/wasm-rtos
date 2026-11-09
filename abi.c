@@ -127,13 +127,6 @@ static void os_abi_drop(OsAbiHandle* handle)
         }
     }
     else
-#if OS_HAS_SPI
-    if (handle->type == OS_OBJECT_SPI)
-    {
-        os_spi_close(handle->id);
-    }
-    else
-#endif
 #if OS_HAS_ONEWIRE
     if (handle->type == OS_OBJECT_ONEWIRE)
     {
@@ -1001,7 +994,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
     {
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
-            (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)   || entry->type == OS_OBJECT_SPI    || entry->type == OS_OBJECT_ONEWIRE )
+            (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)    || entry->type == OS_OBJECT_ONEWIRE )
         {
             OS_HOST_RETURN(-WR_EBADH);
         }
@@ -1241,117 +1234,6 @@ static int32_t os_abi_bus_data(uint32_t address, uint32_t length, uint8_t** out_
 }
 #endif
 
-#if OS_HAS_SPI
-static OS_HOST_FUNCTION(os_abi_spi_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, bus_address);
-    OS_HOST_ARG(uint32_t, bus_length);
-    OS_HOST_ARG(uint32_t, cs_address);
-    OS_HOST_ARG(uint32_t, cs_length);
-    OS_HOST_ARG(uint32_t, mode);
-    OS_HOST_ARG(uint32_t, frequency_hz);
-    const char* bus = NULL;
-    const char* cs = NULL;
-    uint32_t id = 0U;
-    int32_t handle = 0;
-    OsStatus status = OS_STATUS_OK;
-    OS_ABI_UNUSED();
-
-    handle = os_abi_read_name(bus_address, bus_length, &bus);
-    if (handle >= 0)
-    {
-        handle = os_abi_read_name(cs_address, cs_length, &cs);
-    }
-    if (handle < 0)
-    {
-        OS_HOST_RETURN(handle);
-    }
-    if (bus == NULL)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    status = os_spi_open(bus, bus_length, cs, cs_length, mode, frequency_hz, &id);
-    if (status != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
-    }
-    handle = os_abi_handle_new(OS_OBJECT_SPI, id);
-    if (handle < 0)
-    {
-        os_spi_close(id);
-    }
-    OS_HOST_RETURN(handle);
-}
-
-/* ops: count records of 16 bytes, u32 kind, u32 write, u32 read, u32 length. */
-static OS_HOST_FUNCTION(os_abi_spi_transaction)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, ops_address);
-    OS_HOST_ARG(uint32_t, count);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_SPI);
-    OsSpiOp ops[OS_BUS_MAX_OPS];
-    uint8_t* records = NULL;
-    uint32_t index = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    if (count > OS_BUS_MAX_OPS)
-    {
-        OS_HOST_RETURN(-WR_ELIMIT);
-    }
-    if (count == 0U)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    if (os_guest_memory(ops_address, count * 16U, &records) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    for (index = 0U; index < count; ++index)
-    {
-        const uint8_t* record = records + index * 16U;
-        uint32_t kind = os_abi_read_le32(record);
-        uint32_t length = os_abi_read_le32(record + 12U);
-        uint8_t* write = NULL;
-        uint8_t* read = NULL;
-        int32_t result = 0;
-
-        if (kind < OS_SPI_WRITE || kind > OS_SPI_DELAY_US)
-        {
-            OS_HOST_RETURN(-WR_EINVAL);
-        }
-        if (kind == OS_SPI_WRITE || kind == OS_SPI_TRANSFER)
-        {
-            result = os_abi_bus_data(os_abi_read_le32(record + 4U), length, &write);
-        }
-        if (result == 0 && (kind == OS_SPI_READ || kind == OS_SPI_TRANSFER))
-        {
-            result = os_abi_bus_data(os_abi_read_le32(record + 8U), length, &read);
-        }
-        if (result < 0)
-        {
-            OS_HOST_RETURN(result);
-        }
-        ops[index].kind = (uint8_t)kind;
-        ops[index].write = write;
-        ops[index].read = read;
-        ops[index].length = length;
-    }
-    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
-    *raw_return = os_abi_error(os_spi_transaction(entry->id, ops, count));
-    return os_guest_end();
-}
-#endif
-
 /* ---------------------------------------------------------------------------
  * onewire
  * ------------------------------------------------------------------------ */
@@ -1493,8 +1375,7 @@ static OS_HOST_FUNCTION(os_abi_onewire_search)
 }
 #endif
 
-#if !OS_HAS_PROCESSES || !OS_HAS_FS || \
-    !OS_HAS_SPI || !OS_HAS_ONEWIRE
+#if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_ONEWIRE
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
 {
@@ -1988,14 +1869,6 @@ static const OsAbiImport g_abi_imports[] =
 #endif
     { WR_MODULE("proc"), "self", "i()", os_abi_proc_self, 0U },
     { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
-
-#if OS_HAS_SPI
-    { WR_MODULE("spi"), "open", "i(iiiiii)", os_abi_spi_open, 3U },
-    { WR_MODULE("spi"), "transaction", "i(iii)", os_abi_spi_transaction, 3U },
-#else
-    { WR_MODULE("spi"), "open", "i(iiiiii)", os_abi_unsupported, 3U },
-    { WR_MODULE("spi"), "transaction", "i(iii)", os_abi_unsupported, 3U },
-#endif
 
 #if OS_HAS_ONEWIRE
     { WR_MODULE("onewire"), "open", "i(iiIi)", os_abi_onewire_open, 6U },

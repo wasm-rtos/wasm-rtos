@@ -19,7 +19,6 @@ typedef enum OsObjectType
     OS_OBJECT_TASK,
     /* An object of a driver (driver.h): the handle and the wait target name the driver. */
     OS_OBJECT_DRIVER,
-    OS_OBJECT_SPI,
     OS_OBJECT_ONEWIRE
 } OsObjectType;
 
@@ -272,7 +271,6 @@ void os_i2c_close(uint32_t id);
 OsStatus os_i2c_transaction(uint32_t id, const OsI2cOp* ops, uint32_t count);
 void os_i2c_shutdown(void);
 
-#if OS_HAS_SPI
 /* ---- SPI for programs (bus.c) ---------------------------------------------- */
 
 /*
@@ -285,7 +283,6 @@ OsStatus os_spi_open(const char* bus_name, uint32_t bus_length, const char* cs, 
 void os_spi_close(uint32_t id);
 OsStatus os_spi_transaction(uint32_t id, const OsSpiOp* ops, uint32_t count);
 void os_spi_shutdown(void);
-#endif
 
 #if OS_HAS_ONEWIRE
 /* ---- 1-Wire for programs (bus.c) ------------------------------------------- */

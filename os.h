@@ -11,7 +11,6 @@
  *   OS_HAS_PROCESSES  os_task_spawn() and the guest proc interface
  *   OS_HAS_FS         virtual file system behind the WASI file calls (fs.h)
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
- *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
  *   OS_HAS_ONEWIRE    1-Wire buses for programs through a platform 1-Wire port
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
  * Off unless defined to 1:
@@ -26,9 +25,6 @@
 #endif
 #ifndef OS_FS_TAR
 #define OS_FS_TAR OS_HAS_FS
-#endif
-#ifndef OS_HAS_SPI
-#define OS_HAS_SPI 1
 #endif
 #ifndef OS_HAS_ONEWIRE
 #define OS_HAS_ONEWIRE 1
@@ -1032,7 +1028,6 @@ OsStatus os_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz);
 /* The id of the task that has address open on bus, 0 when none. */
 uint32_t os_i2c_get_owner(uint32_t bus, uint32_t address);
 
-#if OS_HAS_SPI
 /*
  * SPI: chip select (when the kernel drives it) goes low before the first op
  * and high after the last, also after an error. A read sends zeros; a
@@ -1064,7 +1059,6 @@ OsStatus os_spi_port_set(const OsSpiPort* port);
 OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz);
 /* The id of the task that holds bus exclusively or has a device on it with chip select pin cs_pin; 0 when none. */
 uint32_t os_spi_get_owner(uint32_t bus, uint32_t cs_pin);
-#endif
 
 #if OS_HAS_ONEWIRE
 /*

@@ -501,7 +501,6 @@ void os_i2c_shutdown(void)
  * SPI
  * ------------------------------------------------------------------------ */
 
-#if OS_HAS_SPI
 typedef struct OsSpiDevice
 {
     OsBus* bus;
@@ -544,6 +543,8 @@ OsStatus os_spi_port_set(const OsSpiPort* port)
     return OS_STATUS_OK;
 }
 
+extern const OsDriver os_spi_driver;
+
 OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz)
 {
     OsStatus status = OS_STATUS_OK;
@@ -556,6 +557,11 @@ OsStatus os_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz)
     if (status != OS_STATUS_OK)
     {
         return status;
+    }
+    /* A platform with these devices gives programs the spi interface. */
+    if (os_driver_add(&os_spi_driver) != OS_STATUS_OK)
+    {
+        return OS_STATUS_LIMIT_REACHED;
     }
     return OS_STATUS_OK;
 }
@@ -698,7 +704,6 @@ void os_spi_shutdown(void)
     os_bus_free_all(g_spi.buses, OS_SPI_MAX_BUSES);
     memset(&g_spi, 0, sizeof(g_spi));
 }
-#endif
 
 /* ---------------------------------------------------------------------------
  * 1-Wire
@@ -1114,13 +1119,11 @@ static OsBus* os_bus_by_number(uint8_t kind, uint32_t number)
         buses = g_i2c.buses;
         max = OS_I2C_MAX_BUSES;
     }
-#if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
         buses = g_spi.buses;
         max = OS_SPI_MAX_BUSES;
     }
-#endif
 #if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
@@ -1144,12 +1147,10 @@ static void (*os_bus_port_finish(uint8_t kind))(void*, uint32_t)
     {
         return g_i2c.port.finish;
     }
-#if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
         return g_spi.port.finish;
     }
-#endif
 #if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
@@ -1165,12 +1166,10 @@ static void* os_bus_port_context(uint8_t kind)
     {
         return g_i2c.port.context;
     }
-#if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
         return g_spi.port.context;
     }
-#endif
 #if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
@@ -1192,13 +1191,11 @@ static void os_bus_each(uint8_t kind, void (*visit)(uint8_t kind, OsBus* bus, ui
         buses = g_i2c.buses;
         max = OS_I2C_MAX_BUSES;
     }
-#if OS_HAS_SPI
     if (kind == OS_BUS_SPI)
     {
         buses = g_spi.buses;
         max = OS_SPI_MAX_BUSES;
     }
-#endif
 #if OS_HAS_ONEWIRE
     if (kind == OS_BUS_ONEWIRE)
     {
@@ -1256,9 +1253,7 @@ static void os_bus_finish_all(uint8_t kind)
 void os_bus_poll(void)
 {
     os_i2c_poll();
-#if OS_HAS_SPI
     os_spi_poll();
-#endif
 #if OS_HAS_ONEWIRE
     os_onewire_poll();
 #endif
@@ -1267,9 +1262,7 @@ void os_bus_poll(void)
 void os_bus_finish_task(uint32_t task_id)
 {
     os_i2c_finish_task(task_id);
-#if OS_HAS_SPI
     os_spi_finish_task(task_id);
-#endif
 #if OS_HAS_ONEWIRE
     os_onewire_finish_task(task_id);
 #endif
@@ -1278,9 +1271,7 @@ void os_bus_finish_task(uint32_t task_id)
 void os_bus_shutdown(void)
 {
     os_i2c_shutdown();
-#if OS_HAS_SPI
     os_spi_shutdown();
-#endif
 #if OS_HAS_ONEWIRE
     os_onewire_shutdown();
 #endif
@@ -1392,6 +1383,137 @@ const OsDriver os_i2c_driver =
     .poll = os_i2c_poll,
     .finish_task = os_i2c_finish_task,
     .shutdown = os_i2c_shutdown,
+};
+
+/* ---------------------------------------------------------------------------
+ * The spi interface for programs
+ * ------------------------------------------------------------------------ */
+
+static OS_HOST_FUNCTION(os_spi_call_open)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(uint32_t, bus_address);
+    OS_HOST_ARG(uint32_t, bus_length);
+    OS_HOST_ARG(uint32_t, cs_address);
+    OS_HOST_ARG(uint32_t, cs_length);
+    OS_HOST_ARG(uint32_t, mode);
+    OS_HOST_ARG(uint32_t, frequency_hz);
+    const char* bus = NULL;
+    const char* cs = NULL;
+    uint32_t id = 0U;
+    int32_t handle = 0;
+    OsStatus status = OS_STATUS_OK;
+    OS_ABI_UNUSED();
+
+    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    if (handle >= 0)
+    {
+        handle = os_abi_read_name(cs_address, cs_length, &cs);
+    }
+    if (handle < 0)
+    {
+        OS_HOST_RETURN(handle);
+    }
+    if (bus == NULL)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    status = os_spi_open(bus, bus_length, cs, cs_length, mode, frequency_hz, &id);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status));
+    }
+    handle = os_driver_handle_new(&os_spi_driver, id);
+    if (handle < 0)
+    {
+        os_spi_close(id);
+    }
+    OS_HOST_RETURN(handle);
+}
+
+/* ops: count records of 16 bytes, u32 kind, u32 write, u32 read, u32 length. */
+static OS_HOST_FUNCTION(os_spi_call_transaction)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_HOST_ARG(int32_t, handle);
+    OS_HOST_ARG(uint32_t, ops_address);
+    OS_HOST_ARG(uint32_t, count);
+    uint32_t id = 0U;
+    int found = os_driver_handle_get(&os_spi_driver, handle, &id);
+    OsSpiOp ops[OS_BUS_MAX_OPS];
+    uint8_t* records = NULL;
+    uint32_t index = 0U;
+    OS_ABI_UNUSED();
+
+    if (!found)
+    {
+        OS_HOST_RETURN(-WR_EBADH);
+    }
+    if (count > OS_BUS_MAX_OPS)
+    {
+        OS_HOST_RETURN(-WR_ELIMIT);
+    }
+    if (count == 0U)
+    {
+        OS_HOST_RETURN(-WR_EINVAL);
+    }
+    if (os_guest_memory(ops_address, count * 16U, &records) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        const uint8_t* record = records + index * 16U;
+        uint32_t kind = OS_HOST_READ32(record);
+        uint32_t length = OS_HOST_READ32(record + 12U);
+        uint8_t* write = NULL;
+        uint8_t* read = NULL;
+        int32_t result = 0;
+
+        if (kind < OS_SPI_WRITE || kind > OS_SPI_DELAY_US)
+        {
+            OS_HOST_RETURN(-WR_EINVAL);
+        }
+        if (kind == OS_SPI_WRITE || kind == OS_SPI_TRANSFER)
+        {
+            result = os_bus_guest_data(OS_HOST_READ32(record + 4U), length, &write);
+        }
+        if (result == 0 && (kind == OS_SPI_READ || kind == OS_SPI_TRANSFER))
+        {
+            result = os_bus_guest_data(OS_HOST_READ32(record + 8U), length, &read);
+        }
+        if (result < 0)
+        {
+            OS_HOST_RETURN(result);
+        }
+        ops[index].kind = (uint8_t)kind;
+        ops[index].write = write;
+        ops[index].read = read;
+        ops[index].length = length;
+    }
+    if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(-WR_EFAULT);
+    }
+    *raw_return = os_abi_error(os_spi_transaction(id, ops, count));
+    return os_guest_end();
+}
+
+static const OsDriverCall os_spi_calls[] =
+{
+    { "open", "i(iiiiii)", os_spi_call_open, 3U },
+    { "transaction", "i(iii)", os_spi_call_transaction, 3U },
+};
+
+const OsDriver os_spi_driver =
+{
+    .interface = "spi",
+    .calls = os_spi_calls,
+    .call_count = (uint32_t)(sizeof(os_spi_calls) / sizeof(os_spi_calls[0])),
+    .close = os_spi_close,
+    .poll = os_spi_poll,
+    .finish_task = os_spi_finish_task,
+    .shutdown = os_spi_shutdown,
 };
 
 #endif
