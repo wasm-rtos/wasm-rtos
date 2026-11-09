@@ -60,7 +60,7 @@ typedef struct OsDriver
     const char* interface;
     const OsDriverCall* calls;
     uint32_t call_count;
-    /* A program's handle to one of the driver's objects is gone (closed, or the program ended). */
+    /* A program's handle to one of the driver's objects is gone (closed, or the program ended); may be NULL. */
     void (*close)(uint32_t id);
     /* Whether the object is ready for wait.any; NULL when its objects cannot be waited for. */
     uint8_t (*ready)(uint32_t id);

@@ -23,7 +23,6 @@ typedef enum OsObjectType
     OS_OBJECT_INPUT,
     OS_OBJECT_I2C,
     OS_OBJECT_SPI,
-    OS_OBJECT_ADC,
     OS_OBJECT_PWM,
     OS_OBJECT_UART,
     OS_OBJECT_PULSE,
@@ -358,7 +357,6 @@ OsStatus os_dac_write_mv(uint32_t id, uint32_t mv);
 OsStatus os_dac_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_dac_shutdown(void);
 
-#if OS_HAS_ADC
 /* ---- Analog inputs for programs (adc.c) ------------------------------------ */
 #define OS_ADC_PROP_RESOLUTION 1U
 #define OS_ADC_PROP_MAX        2U
@@ -368,7 +366,6 @@ OsStatus os_adc_read(uint32_t id, uint32_t* out_raw);
 OsStatus os_adc_read_mv(uint32_t id, uint32_t* out_mv);
 OsStatus os_adc_get(uint32_t id, uint32_t property, uint32_t* out_value);
 void os_adc_shutdown(void);
-#endif
 
 #if OS_HAS_PWM
 /* ---- PWM outputs for programs (pwm.c) -------------------------------------- */

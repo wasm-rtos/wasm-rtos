@@ -15,7 +15,6 @@
  *   OS_HAS_INPUT      buttons, rotary controls, touch and keyboards for programs
  *   OS_HAS_I2C        I2C buses for programs through a platform I2C port
  *   OS_HAS_SPI        SPI buses for programs through a platform SPI port
- *   OS_HAS_ADC        analog inputs for programs through a platform ADC port
  *   OS_HAS_PWM        pulse-width outputs on GPIO pins through a platform PWM port
  *   OS_HAS_UART       serial ports for programs through a platform UART port
  *   OS_HAS_PULSE      timed pulse trains on GPIO pins through a platform port
@@ -46,9 +45,6 @@
 #endif
 #ifndef OS_HAS_SPI
 #define OS_HAS_SPI 1
-#endif
-#ifndef OS_HAS_ADC
-#define OS_HAS_ADC 1
 #endif
 #ifndef OS_HAS_PWM
 #define OS_HAS_PWM 1
@@ -1194,7 +1190,6 @@ void os_bus_complete(uint32_t kind, uint32_t bus, OsStatus status);
 uint8_t os_bus_is_busy(uint32_t kind, uint32_t bus);
 #endif
 
-#if OS_HAS_ADC
 /*
  * Analog inputs, registered under the device profile's names ("a0",
  * "battery"). Reading changes nothing, so programs share a channel. read
@@ -1223,7 +1218,6 @@ typedef struct OsAdcPort
 OsStatus os_adc_port_set(const OsAdcPort* port);
 /* OS_STATUS_BUSY when the name or number is taken, OS_STATUS_LIMIT_REACHED past OS_ADC_MAX. */
 OsStatus os_adc_add_channel(const char* name, uint32_t channel, const OsAdcInfo* info);
-#endif
 
 /*
  * Analog outputs, registered under the device profile's names. One program

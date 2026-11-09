@@ -122,7 +122,10 @@ static void os_abi_drop(OsAbiHandle* handle)
 {
     if (handle->type == OS_OBJECT_DRIVER)
     {
-        handle->driver->close(handle->id);
+        if (handle->driver->close != NULL)
+        {
+            handle->driver->close(handle->id);
+        }
     }
     else
 #if OS_HAS_DISPLAY
@@ -320,7 +323,7 @@ int32_t os_driver_open(const OsDriver* driver, uint32_t name_address, uint32_t n
         return status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status);
     }
     handle = os_driver_handle_new(driver, id);
-    if (handle < 0)
+    if (handle < 0 && driver->close != NULL)
     {
         driver->close(id);
     }
@@ -334,7 +337,7 @@ OsStatus os_driver_add(const OsDriver* driver)
 {
     uint32_t index = 0U;
 
-    if (driver == NULL || driver->interface == NULL || driver->close == NULL)
+    if (driver == NULL || driver->interface == NULL)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
@@ -995,7 +998,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
         OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
             (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL) || entry->type == OS_OBJECT_DISPLAY ||
-            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI || entry->type == OS_OBJECT_ADC ||
+            entry->type == OS_OBJECT_I2C || entry->type == OS_OBJECT_SPI  ||
             entry->type == OS_OBJECT_PWM || entry->type == OS_OBJECT_PULSE || entry->type == OS_OBJECT_ONEWIRE )
         {
             OS_HOST_RETURN(-WR_EBADH);
@@ -1689,86 +1692,6 @@ static int32_t os_abi_open_device(uint32_t name_address, uint32_t name_length, O
     return handle;
 }
 
-#if OS_HAS_ADC
-static OsStatus os_abi_adc_opener(const char* name, uint32_t length, void* context, uint32_t* out_id)
-{
-    (void)context;
-    return os_adc_open(name, length, out_id);
-}
-
-static OS_HOST_FUNCTION(os_abi_adc_open)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(uint32_t, name_address);
-    OS_HOST_ARG(uint32_t, name_length);
-    OS_HOST_ARG(uint32_t, flags);
-    OS_ABI_UNUSED();
-
-    if (flags != 0U)
-    {
-        OS_HOST_RETURN(-WR_EINVAL);
-    }
-    OS_HOST_RETURN(os_abi_open_device(name_address, name_length, OS_OBJECT_ADC, os_abi_adc_opener, NULL, NULL));
-}
-
-static OS_HOST_FUNCTION(os_abi_adc_read)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
-    uint32_t value = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    {
-        /* The call fills value: it must happen before value is read. */
-        OsStatus status = os_adc_read(entry->id, &value);
-        OS_HOST_RETURN(os_abi_property(status, value));
-    }
-}
-
-static OS_HOST_FUNCTION(os_abi_adc_read_mv)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
-    uint32_t value = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    {
-        /* The call fills value: it must happen before value is read. */
-        OsStatus status = os_adc_read_mv(entry->id, &value);
-        OS_HOST_RETURN(os_abi_property(status, value));
-    }
-}
-
-static OS_HOST_FUNCTION(os_abi_adc_get)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_HOST_ARG(int32_t, handle);
-    OS_HOST_ARG(uint32_t, property);
-    OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_ADC);
-    uint32_t value = 0U;
-    OS_ABI_UNUSED();
-
-    if (entry == NULL)
-    {
-        OS_HOST_RETURN(-WR_EBADH);
-    }
-    {
-        /* The call fills value: it must happen before value is read. */
-        OsStatus status = os_adc_get(entry->id, property, &value);
-        OS_HOST_RETURN(os_abi_property(status, value));
-    }
-}
-#endif
 
 #if OS_HAS_PWM
 typedef struct OsAbiPwmOpen
@@ -2365,7 +2288,7 @@ static OS_HOST_FUNCTION(os_abi_counter_get)
 #endif
 
 #if !OS_HAS_PROCESSES || !OS_HAS_FS || !OS_HAS_DISPLAY || !OS_HAS_INPUT || !OS_HAS_I2C || \
-    !OS_HAS_SPI || !OS_HAS_ADC || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE || !OS_HAS_COUNTER
+    !OS_HAS_SPI || !OS_HAS_PWM || !OS_HAS_UART || !OS_HAS_PULSE || !OS_HAS_ONEWIRE || !OS_HAS_COUNTER
 /* Calls this build leaves out; the result slot is first whatever the parameters. */
 static OS_HOST_FUNCTION(os_abi_unsupported)
 {
@@ -2902,17 +2825,6 @@ static const OsAbiImport g_abi_imports[] =
     { WR_MODULE("spi"), "transaction", "i(iii)", os_abi_unsupported, 3U },
 #endif
 
-#if OS_HAS_ADC
-    { WR_MODULE("adc"), "open", "i(iii)", os_abi_adc_open, 4U },
-    { WR_MODULE("adc"), "read", "i(i)", os_abi_adc_read, 4U },
-    { WR_MODULE("adc"), "read-mv", "i(i)", os_abi_adc_read_mv, 4U },
-    { WR_MODULE("adc"), "get", "i(ii)", os_abi_adc_get, 4U },
-#else
-    { WR_MODULE("adc"), "open", "i(iii)", os_abi_unsupported, 4U },
-    { WR_MODULE("adc"), "read", "i(i)", os_abi_unsupported, 4U },
-    { WR_MODULE("adc"), "read-mv", "i(i)", os_abi_unsupported, 4U },
-    { WR_MODULE("adc"), "get", "i(ii)", os_abi_unsupported, 4U },
-#endif
 
 #if OS_HAS_PWM
     { WR_MODULE("pwm"), "open", "i(iiii)", os_abi_pwm_open, 4U },
