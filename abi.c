@@ -431,34 +431,6 @@ int32_t os_abi_read_name(uint32_t address, uint32_t length, const char** out_nam
     return 0;
 }
 
-static uint32_t os_abi_read_le32(const uint8_t* bytes)
-{
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) |
-           ((uint32_t)bytes[2] << 16U) | ((uint32_t)bytes[3] << 24U);
-}
-
-static void os_abi_write_le32(uint8_t* out, uint32_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8U);
-    out[2] = (uint8_t)(value >> 16U);
-    out[3] = (uint8_t)(value >> 24U);
-}
-
-static void os_abi_write_le64(uint8_t* out, uint64_t value)
-{
-    uint32_t index = 0U;
-    for (index = 0U; index < 8U; ++index)
-    {
-        out[index] = (uint8_t)(value >> (8U * index));
-    }
-}
-
-static uint64_t os_abi_read_le64(const uint8_t* bytes)
-{
-    return (uint64_t)os_abi_read_le32(bytes) | ((uint64_t)os_abi_read_le32(bytes + 4U) << 32U);
-}
-
 /* ---------------------------------------------------------------------------
  * handle
  * ------------------------------------------------------------------------ */
@@ -985,7 +957,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
     }
     for (index = 0U; index < count; ++index)
     {
-        OsAbiHandle* entry = os_abi_handle_get((int32_t)os_abi_read_le32(handles + index * 4U), OS_OBJECT_NONE);
+        OsAbiHandle* entry = os_abi_handle_get((int32_t)OS_HOST_READ32(handles + index * 4U), OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
             (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)     )
         {
@@ -1037,8 +1009,8 @@ static int32_t os_abi_read_args(uint32_t address, uint32_t argc, char** out_stor
     }
     for (index = 0U; index < argc; ++index)
     {
-        uint32_t text_address = os_abi_read_le32(pairs + index * 8U);
-        uint32_t length = os_abi_read_le32(pairs + index * 8U + 4U);
+        uint32_t text_address = OS_HOST_READ32(pairs + index * 8U);
+        uint32_t length = OS_HOST_READ32(pairs + index * 8U + 4U);
         uint8_t* text = NULL;
 
         if (length > OS_ABI_ARG_MAX)
@@ -1242,7 +1214,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_clock_res_get)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
-    os_abi_write_le64(out, 1000000U);
+    OS_HOST_WRITE64(out, 1000000U);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1265,7 +1237,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_clock_time_get)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
-    os_abi_write_le64(out, os_time_ms64() * 1000000U);
+    OS_HOST_WRITE64(out, os_time_ms64() * 1000000U);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1319,8 +1291,8 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
     for (index = 0U; index < iovs_count; ++index)
     {
         uint8_t* data = NULL;
-        uint32_t length = os_abi_read_le32(iovs + index * 8U + 4U);
-        if (os_guest_memory(os_abi_read_le32(iovs + index * 8U), length, &data) != OS_STATUS_OK ||
+        uint32_t length = OS_HOST_READ32(iovs + index * 8U + 4U);
+        if (os_guest_memory(OS_HOST_READ32(iovs + index * 8U), length, &data) != OS_STATUS_OK ||
             length > UINT32_MAX - total)
         {
             OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
@@ -1330,12 +1302,12 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
     for (index = 0U; index < iovs_count; ++index)
     {
         uint8_t* data = NULL;
-        uint32_t length = os_abi_read_le32(iovs + index * 8U + 4U);
-        (void)os_guest_memory(os_abi_read_le32(iovs + index * 8U), length, &data);
+        uint32_t length = OS_HOST_READ32(iovs + index * 8U + 4U);
+        (void)os_guest_memory(OS_HOST_READ32(iovs + index * 8U), length, &data);
         os_output_write(fd, data, length);
     }
 
-    os_abi_write_le32(written, total);
+    OS_HOST_WRITE32(written, total);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1379,7 +1351,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
 
         if (tag == OS_WASI_EVENTTYPE_CLOCK)
         {
-            uint64_t timeout = os_abi_read_le64(subscription + 24U);
+            uint64_t timeout = OS_HOST_READ64(subscription + 24U);
             uint16_t flags = (uint16_t)(subscription[40] | (subscription[41] << 8U));
             uint64_t due = (flags & OS_WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME) != 0U
                 ? timeout : now_ns + timeout;
