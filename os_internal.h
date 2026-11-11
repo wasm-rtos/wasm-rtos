@@ -62,11 +62,14 @@ OsStatus os_guest_write(uint32_t address, const void* data, uint32_t length);
  * left alone stays). A buffer is open while the port works and is closed
  * or dropped once. data is NULL for length 0.
  *
+ * A pointer into a paged memory keeps its frame in RAM (pinned) until the
+ * buffer is closed, so a page store never takes it away under the port.
+ *
  * A port working in the background (the program waits meanwhile and keeps
  * its memory) needs the buffers past the call: os_guest_buffer_keep moves
- * a copy into a list, and os_guest_kept_close writes the list back when
- * the transfer ends; after the task has ended it only lets the copies go.
- * A pointer into the memory needs no keeping.
+ * a copy, or a pinned frame, into a list, and os_guest_kept_close writes
+ * the copies back and lets the frames go when the transfer ends; after the
+ * task has ended it only lets the copies go.
  */
 #define OS_GUEST_IN 1U  /* the port reads it */
 #define OS_GUEST_OUT 2U /* the port writes it */
@@ -78,6 +81,7 @@ typedef struct OsGuestBuffer
     uint32_t task_id;
     uint8_t access;
     uint8_t copied;
+    uint8_t pinned;
 } OsGuestBuffer;
 typedef struct OsGuestKept OsGuestKept;
 OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t length, uint8_t access);
@@ -140,6 +144,8 @@ void os_abi_release_task(OsTaskHandle task);
 /* Every driver's poll, before a scheduling decision; every driver's shutdown, which also forgets them. */
 void os_drivers_poll(void);
 void os_drivers_shutdown(void);
+/* Paging ends with the tasks: the page store is forgotten. */
+void os_page_shutdown(void);
 /* The soonest any driver needs polling, in milliseconds (UINT32_MAX: none). */
 uint32_t os_drivers_next_deadline_ms(void);
 /* The kernel clock moved: every driver's time. */

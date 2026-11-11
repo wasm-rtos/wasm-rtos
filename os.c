@@ -792,6 +792,7 @@ void os_shutdown(void)
     os_fs_shutdown();
 #endif
     os_drivers_shutdown();
+    os_page_shutdown();
 
     memset(&g_os, 0, sizeof(g_os));
 }
@@ -3581,6 +3582,8 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
         out_usage->stack_bytes += 2U * (uint32_t)sizeof(uint32_t);
         out_usage->linear_memory_bytes = os_task_linear_memory_size(task);
         out_usage->resident_memory_bytes = os_task_resident_memory_size(task);
+        out_usage->stored_memory_bytes = task->wasm_instance != NULL && wm_instance_memory(task->wasm_instance) != NULL
+            ? wm_memory_stored(wm_instance_memory(task->wasm_instance)) : 0U;
         out_usage->code_bytes = wm_module_code_bytes(task->wasm_module);
     }
     out_usage->stack_peak_bytes = os_task_stack_peak(task);
@@ -6955,16 +6958,32 @@ OsStatus os_guest_write(uint32_t address, const void* data, uint32_t length)
     return os_task_write_memory(g_os.current_task, address, (const uint8_t*)data, length);
 }
 
-/* A copy of a buffer's bytes, with what writing it back takes; a kept one is in a list. */
+/*
+ * A copy of a buffer's bytes, with what writing it back takes; a kept one is
+ * in a list. A kept pinned buffer has no bytes, only its range to unpin.
+ */
 struct OsGuestKept
 {
     struct OsGuestKept* next;
     uint32_t address;
     uint32_t length;
     uint32_t task_id;
-    uint32_t access;
+    uint16_t access;
+    uint16_t pinned;
     uint8_t data[];
 };
+
+/* A task's frames of a range go back to the page store's choosing, if the task is still there. */
+static void os_guest_unpin(uint32_t task_id, uint32_t address, uint32_t length)
+{
+    OsTaskHandle task = os_task_find_by_id(task_id);
+    WmMemory* memory = NULL;
+
+    if (task != NULL && os_task_memory(task, &memory) == OS_STATUS_OK && memory != NULL)
+    {
+        (void)wm_memory_pin(memory, address, length, -1);
+    }
+}
 
 static OsGuestKept* os_guest_copy_of(const OsGuestBuffer* buffer)
 {
@@ -6974,8 +6993,12 @@ static OsGuestKept* os_guest_copy_of(const OsGuestBuffer* buffer)
 /* Write a copy back into its task's memory, if the task is still there. */
 static OsStatus os_guest_copy_write_back(const OsGuestKept* copy)
 {
-    OsTaskHandle task = (copy->access & OS_GUEST_OUT) != 0U ? os_task_find_by_id(copy->task_id) : NULL;
+    OsTaskHandle task = (copy->access & OS_GUEST_OUT) != 0U && !copy->pinned ? os_task_find_by_id(copy->task_id) : NULL;
 
+    if (copy->pinned)
+    {
+        os_guest_unpin(copy->task_id, copy->address, copy->length);
+    }
     return task != NULL ? os_task_write_memory(task, copy->address, copy->data, copy->length) : OS_STATUS_OK;
 }
 
@@ -7003,9 +7026,26 @@ OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t 
         return OS_STATUS_OK;
     }
     status = os_memory_status(wm_memory_pointer(memory, address, length, &buffer->data));
-    if (status != OS_STATUS_OK || buffer->data != NULL)
+    if (status != OS_STATUS_OK)
     {
         return status;
+    }
+    if (buffer->data != NULL)
+    {
+        /*
+         * A paged memory's frame stays in RAM while the port has a pointer
+         * into it. It is in RAM now, so pinning makes no frame and takes none.
+         */
+        if (wm_memory_data(memory, NULL) == NULL)
+        {
+            if (wm_memory_pin(memory, address, length, 1) != NULL)
+            {
+                buffer->data = NULL;
+                return OS_STATUS_OUT_OF_MEMORY;
+            }
+            buffer->pinned = 1U;
+        }
+        return OS_STATUS_OK;
     }
     /* Split across pages: the port works on a copy. */
     copy = (OsGuestKept*)malloc(offsetof(OsGuestKept, data) + length);
@@ -7018,6 +7058,7 @@ OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t 
     copy->length = length;
     copy->task_id = buffer->task_id;
     copy->access = access;
+    copy->pinned = 0U;
     status = os_memory_status(wm_memory_read(memory, address, copy->data, length));
     if (status != OS_STATUS_OK)
     {
@@ -7043,21 +7084,41 @@ void os_guest_buffer_drop(OsGuestBuffer* buffer)
     {
         free(os_guest_copy_of(buffer));
     }
+    if (buffer->pinned)
+    {
+        os_guest_unpin(buffer->task_id, buffer->address, buffer->length);
+    }
     buffer->data = NULL;
     buffer->copied = 0U;
+    buffer->pinned = 0U;
     buffer->length = 0U;
 }
 
 void os_guest_buffer_keep(OsGuestBuffer* buffer, OsGuestKept** list)
 {
-    if (buffer->copied)
+    OsGuestKept* kept = buffer->copied ? os_guest_copy_of(buffer) : NULL;
+
+    if (buffer->pinned)
     {
-        OsGuestKept* copy = os_guest_copy_of(buffer);
-        copy->next = *list;
-        *list = copy;
+        /* Only the range, to unpin when the transfer ends; without memory for it the frames stay pinned. */
+        kept = (OsGuestKept*)malloc(offsetof(OsGuestKept, data));
+        if (kept != NULL)
+        {
+            kept->address = buffer->address;
+            kept->length = buffer->length;
+            kept->task_id = buffer->task_id;
+            kept->access = 0U;
+            kept->pinned = 1U;
+        }
+    }
+    if (kept != NULL)
+    {
+        kept->next = *list;
+        *list = kept;
     }
     buffer->data = NULL;
     buffer->copied = 0U;
+    buffer->pinned = 0U;
     buffer->length = 0U;
 }
 
