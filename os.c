@@ -399,8 +399,6 @@ typedef struct OsState
     uint32_t timer_count;
     /* Result slot of the import running now, between its begin and end. */
     uint32_t* import_return_slot;
-    OsSwapPort swap_port;
-    uint8_t has_swap_port;
     OsOutputPort output_port;
     uint8_t initialized;
     uint8_t time_update_initialized;
@@ -507,15 +505,13 @@ struct OsTask
     /* Swapped out: the interpreter state is in swap storage, not RAM. */
     uint8_t swapped;
     /* 0 when it was swapped out before it started: it starts afresh. */
-    uint8_t swap_has_image;
-    uint32_t swap_bytes;
+    /* Swapped out: its state in the page store, its memory kept apart (paged out). */
+    OsPageImage swap_image;
+    WmMemory* swapped_memory;
     /* What a wait delivered while swapped out, applied when it comes back. */
     uint8_t swap_return_pending;
     uint32_t swap_return_offset;
     uint32_t swap_return_value;
-    uint8_t* swap_item;
-    uint32_t swap_item_address;
-    uint32_t swap_item_size;
 
 #if OS_HAS_DYLINK
     /* The program and its libraries, for a dylink.0 program. */
@@ -2723,62 +2719,17 @@ OsStatus os_task_load_snapshot(OsTaskHandle task, const uint8_t* buffer, uint32_
 
 /* ---- Swapping ------------------------------------------------------------ */
 
-/* Where the next piece of a task's swap image goes or comes from. */
-typedef struct OsSwapCursor
-{
-    uint32_t task_id;
-    uint32_t offset;
-} OsSwapCursor;
-
-static OsStatus os_swap_write(void* context, const void* data, uint32_t size)
-{
-    OsSwapCursor* cursor = (OsSwapCursor*)context;
-    OsStatus status = g_os.swap_port.write(g_os.swap_port.context, cursor->task_id, cursor->offset, data, size);
-    cursor->offset += size;
-    return status;
-}
-
-static OsStatus os_swap_read(void* context, void* data, uint32_t size)
-{
-    OsSwapCursor* cursor = (OsSwapCursor*)context;
-    OsStatus status = g_os.swap_port.read(g_os.swap_port.context, cursor->task_id, cursor->offset, data, size);
-    cursor->offset += size;
-    return status;
-}
-
+/* What a swapped-out task keeps outside RAM goes: its state image and its memory. */
 static void os_swap_discard(OsTaskHandle task)
 {
-    if (task->swap_has_image && g_os.has_swap_port && g_os.swap_port.discard != NULL)
-    {
-        g_os.swap_port.discard(g_os.swap_port.context, task->id);
-    }
-    task->swap_has_image = 0U;
-    task->swap_bytes = 0U;
+    os_page_image_drop(&task->swap_image);
+    wm_memory_free(task->swapped_memory);
+    task->swapped_memory = NULL;
 }
 
 static void os_swap_forget_deliveries(OsTaskHandle task)
 {
-    free(task->swap_item);
-    task->swap_item = NULL;
-    task->swap_item_size = 0U;
     task->swap_return_pending = 0U;
-}
-
-OsStatus os_swap_port_set(const OsSwapPort* port)
-{
-    if (port == NULL)
-    {
-        g_os.has_swap_port = 0U;
-        memset(&g_os.swap_port, 0, sizeof(g_os.swap_port));
-        return OS_STATUS_OK;
-    }
-    if (port->write == NULL || port->read == NULL)
-    {
-        return OS_STATUS_INVALID_ARGUMENT;
-    }
-    g_os.swap_port = *port;
-    g_os.has_swap_port = 1U;
-    return OS_STATUS_OK;
 }
 
 OsStatus os_output_port_set(const OsOutputPort* port)
@@ -2822,8 +2773,6 @@ uint8_t os_task_is_swapped(OsTaskHandle task)
 
 OsStatus os_task_swap_out(OsTaskHandle task)
 {
-    OsSwapCursor cursor;
-    OsSnapshotStream stream = { os_swap_write, NULL, &cursor, OS_STATUS_OK };
     WmResult result = NULL;
     OsStatus status = OS_STATUS_OK;
 
@@ -2843,7 +2792,7 @@ OsStatus os_task_swap_out(OsTaskHandle task)
     {
         return OS_STATUS_OK;
     }
-    if (!g_os.has_swap_port)
+    if (!os_page_store_on())
     {
         return OS_STATUS_UNSUPPORTED;
     }
@@ -2867,20 +2816,33 @@ OsStatus os_task_swap_out(OsTaskHandle task)
         return OS_STATUS_BUSY;
     }
 
+    /*
+     * A started task leaves its state (stack, calls, globals, tables) in
+     * the page store and its memory paged out, kept apart from the rest,
+     * which is freed: it comes back from that state with the same memory.
+     * One that has not started has nothing to keep and starts afresh.
+     */
     if (task->wasm_started)
     {
-        cursor.task_id = task->id;
-        cursor.offset = 0U;
-        task->swap_has_image = 1U;
-        result = wm_snapshot_write(task->wasm_runtime, task->wasm_instance, os_snapshot_stream_write, &stream);
-        status = os_snapshot_stream_status(&stream, result);
+        WmMemory* memory = wm_instance_memory(task->wasm_instance);
+        status = os_page_image_save(&task->swap_image, task->wasm_runtime, task->wasm_instance, &result);
         if (status != OS_STATUS_OK)
         {
-            os_swap_discard(task);
             os_set_last_error(task, "swap_out", result, status);
             return status;
         }
-        task->swap_bytes = cursor.offset;
+        if (memory != NULL)
+        {
+            uint32_t index = 0U;
+            for (index = 0U; index < wm_memory_frames(memory); ++index)
+            {
+                if (wm_memory_frame_look(memory, index) >= 0)
+                {
+                    (void)wm_memory_frame_take(memory, index);
+                }
+            }
+            task->swapped_memory = wm_instance_detach_memory(task->wasm_instance);
+        }
     }
 
     os_task_cleanup_wasm(task);
@@ -2891,10 +2853,9 @@ OsStatus os_task_swap_out(OsTaskHandle task)
 
 OsStatus os_task_swap_in(OsTaskHandle task)
 {
-    OsSwapCursor cursor;
-    OsSnapshotStream stream = { NULL, os_swap_read, &cursor, OS_STATUS_OK };
     WmResult result = NULL;
     OsStatus status = OS_STATUS_OK;
+    uint8_t has_state = 0U;
 
     if (task == NULL)
     {
@@ -2908,33 +2869,34 @@ OsStatus os_task_swap_in(OsTaskHandle task)
     {
         return OS_STATUS_OK;
     }
-    if (task->swap_has_image && !g_os.has_swap_port)
-    {
-        return OS_STATUS_UNSUPPORTED;
-    }
+    has_state = task->swap_image.count > 0U;
 
     {
+        WmMemory* kept = task->swapped_memory;
         OS_HEAP_ENTER(task);
+        /* With a kept memory the new instance takes it (os_task_create_wasm). */
         status = os_task_create_wasm(task, task->wasm_bytes, task->wasm_size, task->entry_function_name,
                                      task->stack_size);
-        if (status == OS_STATUS_OK && task->swap_has_image)
+        if (status == OS_STATUS_OK && has_state)
         {
-            cursor.task_id = task->id;
-            cursor.offset = 0U;
-            result = wm_snapshot_read(task->wasm_runtime, task->wasm_instance, os_snapshot_stream_read, &stream);
-            status = os_snapshot_stream_status(&stream, result);
+            status = os_page_image_load(&task->swap_image, task->wasm_runtime, task->wasm_instance, &result);
         }
         OS_HEAP_LEAVE();
+        if (status != OS_STATUS_OK && kept != NULL && task->swapped_memory == NULL && task->wasm_instance != NULL)
+        {
+            /* The memory goes back apart, so the task can be brought back later. */
+            task->swapped_memory = wm_instance_detach_memory(task->wasm_instance);
+        }
     }
     if (status != OS_STATUS_OK)
     {
-        /* The image stays; the task can be brought back later. */
+        /* The state stays; the task can be brought back later. */
         os_task_cleanup_wasm(task);
         os_set_last_error(task, "swap_in", result != NULL ? result : "cannot recreate the runtime", status);
         return status;
     }
 
-    if (task->swap_has_image)
+    if (has_state)
     {
         os_task_continue_from_snapshot(task);
     }
@@ -2943,10 +2905,6 @@ OsStatus os_task_swap_in(OsTaskHandle task)
     if (task->swap_return_pending && task->swap_return_offset <= os_task_stack_bytes(task) - sizeof(uint32_t))
     {
         memcpy(task->wasm_stack_base + task->swap_return_offset, &task->swap_return_value, sizeof(uint32_t));
-    }
-    if (task->swap_item != NULL)
-    {
-        (void)os_task_write_memory(task, task->swap_item_address, task->swap_item, task->swap_item_size);
     }
     os_swap_forget_deliveries(task);
     os_swap_discard(task);
@@ -3604,7 +3562,13 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
     }
 #endif
 #endif
-    out_usage->swap_bytes = task->swapped ? task->swap_bytes : 0U;
+    out_usage->swap_bytes = task->swapped ? task->swap_image.bytes : 0U;
+    if (task->swapped_memory != NULL)
+    {
+        (void)wm_memory_data(task->swapped_memory, &out_usage->linear_memory_bytes);
+        out_usage->resident_memory_bytes = wm_memory_resident(task->swapped_memory);
+        out_usage->stored_memory_bytes = wm_memory_stored(task->swapped_memory);
+    }
     out_usage->kernel_bytes = (uint32_t)sizeof(struct OsTask);
     out_usage->total_bytes = out_usage->image_bytes + out_usage->kernel_bytes +
         (out_usage->interpreter_bytes != 0U
@@ -4991,6 +4955,7 @@ static OsStatus os_task_create_wasm(
 {
     WmResult result = NULL;
     OsImportLink link;
+    WmMemory* kept = NULL;
     uint8_t* stack = NULL;
     uint32_t stack_bytes = 0U;
 
@@ -5043,7 +5008,20 @@ static OsStatus os_task_create_wasm(
 
     memset(&link, 0, sizeof(link));
     link.program = task->wasm_module;
-    result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
+    /* Back from swap: the instance takes the memory kept apart, and the program goes on from its state. */
+    kept = task->swapped_memory;
+    if (kept != NULL)
+    {
+        result = wm_instantiate_with_memory(&task->wasm_instance, task->wasm_module, kept, os_resolve_import, &link);
+        if (task->wasm_instance != NULL && wm_instance_memory(task->wasm_instance) == kept)
+        {
+            task->swapped_memory = NULL;
+        }
+    }
+    else
+    {
+        result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
+    }
     if (result != NULL)
     {
         OsStatus status = os_wasm_result_to_status(result);
@@ -5060,7 +5038,7 @@ static OsStatus os_task_create_wasm(
         }
     }
 
-    result = wm_instance_start(task->wasm_instance, task->wasm_runtime);
+    result = kept != NULL ? NULL : wm_instance_start(task->wasm_instance, task->wasm_runtime);
     if (result != NULL)
     {
         OsStatus status = os_wasm_result_to_status(result);
@@ -5304,9 +5282,11 @@ static OsStatus os_task_memory(OsTaskHandle task, WmMemory** out_memory)
         return OS_STATUS_TASK_NOT_FOUND;
     }
 
+    /* A swapped-out task keeps its memory, paged: reaching it brings its frames back. */
     if (task->swapped)
     {
-        return OS_STATUS_BUSY;
+        *out_memory = task->swapped_memory;
+        return task->swapped_memory != NULL ? OS_STATUS_OK : OS_STATUS_BUSY;
     }
 
     if (task->wasm_runtime == NULL)
@@ -5645,28 +5625,13 @@ static OsStatus os_queue_deliver_to_waiting_receiver(
         return OS_STATUS_INVALID_ARGUMENT;
     }
 
-    if (task->swapped)
-    {
-        /* Kept until the task comes back and has its memory again. */
-        free(task->swap_item);
-        task->swap_item = (uint8_t*)malloc(queue->item_size);
-        status = task->swap_item != NULL ? OS_STATUS_OK : OS_STATUS_OUT_OF_MEMORY;
-        if (status == OS_STATUS_OK)
-        {
-            memcpy(task->swap_item, item, queue->item_size);
-            task->swap_item_address = task->wait_queue_wasm_output_address;
-            task->swap_item_size = queue->item_size;
-        }
-    }
-    else
-    {
-        status = os_task_write_memory(
-            task,
-            task->wait_queue_wasm_output_address,
-            (const uint8_t*)item,
-            queue->item_size
-        );
-    }
+    /* Also into a swapped-out task's memory: it is kept, paged, and its frame comes back. */
+    status = os_task_write_memory(
+        task,
+        task->wait_queue_wasm_output_address,
+        (const uint8_t*)item,
+        queue->item_size
+    );
     os_complete_task_wait(task, status, 0U);
     return status;
 }
