@@ -567,12 +567,13 @@ static OS_HOST_FUNCTION(os_gpio_call_open)
     OS_HOST_ARG(uint32_t, name_length);
     OS_HOST_ARG(uint32_t, flags);
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     uint32_t id = 0U;
     int32_t handle = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
-    handle = os_abi_read_name(name_address, name_length, &name);
+    handle = os_abi_read_name(name_address, name_length, name_storage, &name);
     if (handle < 0)
     {
         OS_HOST_RETURN(handle);

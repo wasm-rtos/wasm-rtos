@@ -23,8 +23,6 @@
 #ifndef OS_ABI_MAX_HANDLES
 #define OS_ABI_MAX_HANDLES 32U
 #endif
-/* Longest object name, in bytes. */
-#define OS_ABI_NAME_MAX 32U
 /* Longest path and argument a program may pass to spawn. */
 #define OS_ABI_PATH_MAX 256U
 #define OS_ABI_ARG_MAX 256U
@@ -241,8 +239,9 @@ int32_t os_driver_open(const OsDriver* driver, uint32_t name_address, uint32_t n
                        void* context)
 {
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     uint32_t id = 0U;
-    int32_t handle = os_abi_read_name(name_address, name_length, &name);
+    int32_t handle = os_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
 
     if (handle < 0)
@@ -406,10 +405,8 @@ static uint8_t os_abi_utf8_valid(const uint8_t* text, uint32_t length)
 }
 
 /* An optional object name: (0, 0) means none. */
-int32_t os_abi_read_name(uint32_t address, uint32_t length, const char** out_name)
+int32_t os_abi_read_name(uint32_t address, uint32_t length, char* storage, const char** out_name)
 {
-    uint8_t* memory = NULL;
-
     *out_name = NULL;
     if (length == 0U)
     {
@@ -419,15 +416,15 @@ int32_t os_abi_read_name(uint32_t address, uint32_t length, const char** out_nam
     {
         return -WR_ETOOLONG;
     }
-    if (os_guest_memory(address, length, &memory) != OS_STATUS_OK)
+    if (os_guest_read(address, storage, length) != OS_STATUS_OK)
     {
         return -WR_EFAULT;
     }
-    if (!os_abi_utf8_valid(memory, length))
+    if (!os_abi_utf8_valid((const uint8_t*)storage, length))
     {
         return -WR_EINVAL;
     }
-    *out_name = (const char*)memory;
+    *out_name = storage;
     return 0;
 }
 
@@ -483,9 +480,10 @@ static OS_HOST_FUNCTION(os_abi_mutex_create)
     OS_HOST_ARG(uint32_t, name_address);
     OS_HOST_ARG(uint32_t, name_length);
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     OsMutexHandle mutex = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, &name);
+    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -554,9 +552,10 @@ static OS_HOST_FUNCTION(os_abi_semaphore_create)
     OS_HOST_ARG(uint32_t, max_count);
     OS_HOST_ARG(uint32_t, initial_count);
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     OsSemaphoreHandle semaphore = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, &name);
+    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -632,9 +631,10 @@ static OS_HOST_FUNCTION(os_abi_event_create)
     OS_HOST_ARG(uint32_t, name_address);
     OS_HOST_ARG(uint32_t, name_length);
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     OsEventGroupHandle event_group = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, &name);
+    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -755,9 +755,10 @@ static OS_HOST_FUNCTION(os_abi_queue_create)
     OS_HOST_ARG(uint32_t, item_size);
     OS_HOST_ARG(uint32_t, capacity);
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     OsQueueHandle queue = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, &name);
+    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -799,23 +800,41 @@ static int32_t os_abi_queue_transfer(int32_t handle, uint32_t item_address, uint
 {
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_QUEUE);
     OsQueueHandle queue = entry != NULL ? os_queue_find_by_id(entry->id) : NULL;
-    uint8_t* item = NULL;
+    OsGuestBuffer item;
     OsStatus status = OS_STATUS_OK;
 
     if (queue == NULL)
     {
         return -WR_EBADH;
     }
-    if (os_guest_memory(item_address, os_queue_get_item_size(queue), &item) != OS_STATUS_OK)
+    /* A sent item is read now; a received one is written where it arrives. */
+    if (receive)
     {
-        return -WR_EFAULT;
+        status = os_guest_check(item_address, os_queue_get_item_size(queue));
+        memset(&item, 0, sizeof(item));
+    }
+    else
+    {
+        status = os_guest_buffer_open(&item, item_address, os_queue_get_item_size(queue), OS_GUEST_IN);
+    }
+    if (status != OS_STATUS_OK)
+    {
+        return OS_GUEST_BUFFER_ERROR(status);
     }
     if (os_guest_begin(raw_return) != OS_STATUS_OK)
     {
+        os_guest_buffer_drop(&item);
         return -WR_EFAULT;
     }
-    status = receive ? os_queue_receive_wait(queue, item, timeout_ms)
-                     : os_queue_send_wait(queue, item, timeout_ms);
+    if (receive)
+    {
+        status = os_queue_receive_wait_guest(queue, item_address, timeout_ms);
+    }
+    else
+    {
+        status = os_queue_send_wait(queue, item.data, timeout_ms);
+        os_guest_buffer_drop(&item);
+    }
     /* Without a timeout the caller only tries: say why it could not. */
     if (timeout_ms == 0U && status == OS_STATUS_TIMEOUT)
     {
@@ -941,7 +960,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
     OS_HOST_ARG(uint32_t, count);
     OS_HOST_ARG(uint32_t, timeout_ms);
     OsWaitTarget targets[OS_ABI_MAX_HANDLES];
-    uint8_t* handles = NULL;
+    uint32_t handles[OS_ABI_MAX_HANDLES];
     uint32_t index = 0U;
     uint32_t ready = 0U;
     OsStatus status = OS_STATUS_OK;
@@ -951,13 +970,13 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
     {
         OS_HOST_RETURN(-WR_EINVAL);
     }
-    if (os_guest_memory(handles_address, count * 4U, &handles) != OS_STATUS_OK)
+    if (os_guest_read(handles_address, handles, count * 4U) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
-        OsAbiHandle* entry = os_abi_handle_get((int32_t)OS_HOST_READ32(handles + index * 4U), OS_OBJECT_NONE);
+        OsAbiHandle* entry = os_abi_handle_get((int32_t)handles[index], OS_OBJECT_NONE);
         if (entry == NULL || entry->type == OS_OBJECT_MUTEX ||
             (entry->type == OS_OBJECT_DRIVER && entry->driver->ready == NULL)     )
         {
@@ -984,7 +1003,6 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
 /* Copy argc (pointer, length) string pairs out of guest memory. */
 static int32_t os_abi_read_args(uint32_t address, uint32_t argc, char** out_storage, const char** out_args)
 {
-    uint8_t* pairs = NULL;
     char* storage = NULL;
     uint32_t index = 0U;
     size_t used = 0U;
@@ -998,7 +1016,7 @@ static int32_t os_abi_read_args(uint32_t address, uint32_t argc, char** out_stor
     {
         return -WR_ELIMIT;
     }
-    if (os_guest_memory(address, argc * 8U, &pairs) != OS_STATUS_OK)
+    if (os_guest_check(address, argc * 8U) != OS_STATUS_OK)
     {
         return -WR_EFAULT;
     }
@@ -1009,21 +1027,23 @@ static int32_t os_abi_read_args(uint32_t address, uint32_t argc, char** out_stor
     }
     for (index = 0U; index < argc; ++index)
     {
-        uint32_t text_address = OS_HOST_READ32(pairs + index * 8U);
-        uint32_t length = OS_HOST_READ32(pairs + index * 8U + 4U);
-        uint8_t* text = NULL;
+        uint8_t pair[8];
+        uint32_t text_address = 0U;
+        uint32_t length = 0U;
 
+        (void)os_guest_read(address + index * 8U, pair, sizeof(pair));
+        text_address = OS_HOST_READ32(pair);
+        length = OS_HOST_READ32(pair + 4U);
         if (length > OS_ABI_ARG_MAX)
         {
             free(storage);
             return -WR_ETOOLONG;
         }
-        if (os_guest_memory(text_address, length, &text) != OS_STATUS_OK)
+        if (os_guest_read(text_address, storage + used, length) != OS_STATUS_OK)
         {
             free(storage);
             return -WR_EFAULT;
         }
-        memcpy(storage + used, text, length);
         storage[used + length] = '\0';
         out_args[index] = storage + used;
         used += (size_t)length + 1U;
@@ -1059,7 +1079,7 @@ static OS_HOST_FUNCTION(os_abi_proc_spawn)
     OS_HOST_ARG(uint32_t, stack_size);
     const char* args[OS_ABI_ARGS_MAX];
     char* storage = NULL;
-    uint8_t* bytes = NULL;
+    OsGuestBuffer bytes;
     OsTaskHandle child = NULL;
     int32_t result = 0;
     OsStatus status = OS_STATUS_OK;
@@ -1069,16 +1089,22 @@ static OS_HOST_FUNCTION(os_abi_proc_spawn)
     {
         OS_HOST_RETURN(-WR_EINVAL);
     }
-    if (os_guest_memory(bytes_address, bytes_length, &bytes) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(-WR_EFAULT);
-    }
     result = os_abi_read_args(args_address, argc, &storage, args);
     if (result < 0)
     {
         OS_HOST_RETURN(result);
     }
-    status = os_task_spawn(&child, bytes, bytes_length, argc > 0U ? args : NULL, argc, priority, stack_size);
+    /* The kernel copies the image during the spawn. */
+    status = os_guest_buffer_open(&bytes, bytes_address, bytes_length, OS_GUEST_IN);
+    if (status == OS_STATUS_OK)
+    {
+        status = os_task_spawn(&child, bytes.data, bytes_length, argc > 0U ? args : NULL, argc, priority, stack_size);
+        os_guest_buffer_drop(&bytes);
+    }
+    else if (status != OS_STATUS_OUT_OF_MEMORY)
+    {
+        status = OS_STATUS_OUT_OF_BOUNDS;
+    }
     free(storage);
     OS_HOST_RETURN(os_abi_child_handle(status, child));
 }
@@ -1096,7 +1122,6 @@ static OS_HOST_FUNCTION(os_abi_proc_spawn_path)
     const char* args[OS_ABI_ARGS_MAX];
     char path[OS_ABI_PATH_MAX + 1U];
     char* storage = NULL;
-    uint8_t* text = NULL;
     OsTaskHandle child = NULL;
     int32_t result = 0;
     OsStatus status = OS_STATUS_OK;
@@ -1106,11 +1131,10 @@ static OS_HOST_FUNCTION(os_abi_proc_spawn_path)
     {
         OS_HOST_RETURN(path_length == 0U ? -WR_EINVAL : -WR_ETOOLONG);
     }
-    if (os_guest_memory(path_address, path_length, &text) != OS_STATUS_OK)
+    if (os_guest_read(path_address, path, path_length) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    memcpy(path, text, path_length);
     path[path_length] = '\0';
     result = os_abi_read_args(args_address, argc, &storage, args);
     if (result < 0)
@@ -1203,18 +1227,17 @@ static OS_HOST_FUNCTION(os_abi_wasi_clock_res_get)
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(uint32_t, clock_id);
     OS_HOST_ARG(uint32_t, resolution_address);
-    uint8_t* out = NULL;
+    uint64_t resolution = 1000000U;
     OS_ABI_UNUSED();
 
     if (clock_id > OS_WASI_CLOCKID_THREAD_CPUTIME_ID)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
-    if (os_guest_memory(resolution_address, 8U, &out) != OS_STATUS_OK)
+    if (os_guest_write(resolution_address, &resolution, sizeof(resolution)) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
-    OS_HOST_WRITE64(out, 1000000U);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1224,7 +1247,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_clock_time_get)
     OS_HOST_ARG(uint32_t, clock_id);
     OS_HOST_ARG(uint64_t, precision);
     OS_HOST_ARG(uint32_t, time_address);
-    uint8_t* out = NULL;
+    uint64_t time_ns = os_time_ms64() * 1000000U;
     (void)precision;
     OS_ABI_UNUSED();
 
@@ -1233,11 +1256,10 @@ static OS_HOST_FUNCTION(os_abi_wasi_clock_time_get)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
-    if (os_guest_memory(time_address, 8U, &out) != OS_STATUS_OK)
+    if (os_guest_write(time_address, &time_ns, sizeof(time_ns)) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
-    OS_HOST_WRITE64(out, os_time_ms64() * 1000000U);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1266,15 +1288,13 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
     OS_HOST_ARG(uint32_t, iovs_address);
     OS_HOST_ARG(uint32_t, iovs_count);
     OS_HOST_ARG(uint32_t, written_address);
-    uint8_t* iovs = NULL;
-    uint8_t* written = NULL;
     uint32_t total = 0U;
     uint32_t index = 0U;
     OS_ABI_UNUSED();
 
     if (iovs_count > UINT32_MAX / 8U ||
-        os_guest_memory(iovs_address, iovs_count * 8U, &iovs) != OS_STATUS_OK ||
-        os_guest_memory(written_address, 4U, &written) != OS_STATUS_OK)
+        os_guest_check(iovs_address, iovs_count * 8U) != OS_STATUS_OK ||
+        os_guest_check(written_address, 4U) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
@@ -1290,10 +1310,11 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
     /* Check every buffer first, so a bad one writes nothing. */
     for (index = 0U; index < iovs_count; ++index)
     {
-        uint8_t* data = NULL;
-        uint32_t length = OS_HOST_READ32(iovs + index * 8U + 4U);
-        if (os_guest_memory(OS_HOST_READ32(iovs + index * 8U), length, &data) != OS_STATUS_OK ||
-            length > UINT32_MAX - total)
+        uint8_t iov[8];
+        uint32_t length = 0U;
+        (void)os_guest_read(iovs_address + index * 8U, iov, sizeof(iov));
+        length = OS_HOST_READ32(iov + 4U);
+        if (os_guest_check(OS_HOST_READ32(iov), length) != OS_STATUS_OK || length > UINT32_MAX - total)
         {
             OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
         }
@@ -1301,13 +1322,17 @@ static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
     }
     for (index = 0U; index < iovs_count; ++index)
     {
-        uint8_t* data = NULL;
-        uint32_t length = OS_HOST_READ32(iovs + index * 8U + 4U);
-        (void)os_guest_memory(OS_HOST_READ32(iovs + index * 8U), length, &data);
-        os_output_write(fd, data, length);
+        uint8_t iov[8];
+        OsGuestBuffer data;
+        (void)os_guest_read(iovs_address + index * 8U, iov, sizeof(iov));
+        if (os_guest_buffer_open(&data, OS_HOST_READ32(iov), OS_HOST_READ32(iov + 4U), OS_GUEST_IN) == OS_STATUS_OK)
+        {
+            os_output_write(fd, data.data, data.length);
+            os_guest_buffer_drop(&data);
+        }
     }
 
-    OS_HOST_WRITE32(written, total);
+    (void)os_guest_write(written_address, &total, sizeof(total));
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1322,9 +1347,8 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
     OS_HOST_ARG(uint32_t, out_address);
     OS_HOST_ARG(uint32_t, count);
     OS_HOST_ARG(uint32_t, events_address);
-    uint8_t* in = NULL;
-    uint8_t* out = NULL;
-    uint8_t* events = NULL;
+    uint8_t subscription[48];
+    uint8_t event[32];
     uint64_t now_ns = os_time_ms64() * 1000000U;
     uint64_t soonest_ns = UINT64_MAX;
     uint32_t soonest = 0U;
@@ -1337,18 +1361,19 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
         OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
     if (count > 0xFFFFFFFFU / 48U ||
-        os_guest_memory(in_address, count * 48U, &in) != OS_STATUS_OK ||
-        os_guest_memory(out_address, count * 32U, &out) != OS_STATUS_OK ||
-        os_guest_memory(events_address, 4U, &events) != OS_STATUS_OK)
+        os_guest_check(in_address, count * 48U) != OS_STATUS_OK ||
+        os_guest_check(out_address, count * 32U) != OS_STATUS_OK ||
+        os_guest_check(events_address, 4U) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
     }
 
     for (index = 0U; index < count; ++index)
     {
-        const uint8_t* subscription = in + index * 48U;
-        uint8_t tag = subscription[8];
+        uint8_t tag = 0U;
 
+        (void)os_guest_read(in_address + index * 48U, subscription, sizeof(subscription));
+        tag = subscription[8];
         if (tag == OS_WASI_EVENTTYPE_CLOCK)
         {
             uint64_t timeout = OS_HOST_READ64(subscription + 24U);
@@ -1363,26 +1388,26 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
         }
         else
         {
-            uint8_t* event = out + written * 32U;
-            memset(event, 0, 32U);
+            memset(event, 0, sizeof(event));
             memcpy(event, subscription, 8U);
             event[10] = tag;
+            (void)os_guest_write(out_address + written * 32U, event, sizeof(event));
             ++written;
         }
     }
 
     if (written == 0U)
     {
-        uint8_t* event = out;
         uint64_t wait_ns = soonest_ns > now_ns ? soonest_ns - now_ns : 0U;
         uint64_t wait_ms = (wait_ns + 999999U) / 1000000U;
 
-        memset(event, 0, 32U);
-        memcpy(event, in + soonest * 48U, 8U);
+        (void)os_guest_read(in_address + soonest * 48U, subscription, sizeof(subscription));
+        memset(event, 0, sizeof(event));
+        memcpy(event, subscription, 8U);
         event[10] = OS_WASI_EVENTTYPE_CLOCK;
+        (void)os_guest_write(out_address, event, sizeof(event));
         written = 1U;
-        events[0] = 1U;
-        events[1] = events[2] = events[3] = 0U;
+        (void)os_guest_write(events_address, &written, sizeof(written));
         *raw_return = OS_WASI_ERRNO_SUCCESS;
         if (wait_ms > 0U && os_task_delay_ms(wait_ms > 0x7FFFFFFFU ? 0x7FFFFFFFU : (uint32_t)wait_ms) == OS_STATUS_OK)
         {
@@ -1391,10 +1416,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
         return NULL;
     }
 
-    events[0] = (uint8_t)written;
-    events[1] = (uint8_t)(written >> 8U);
-    events[2] = (uint8_t)(written >> 16U);
-    events[3] = (uint8_t)(written >> 24U);
+    (void)os_guest_write(events_address, &written, sizeof(written));
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 #endif
@@ -1408,30 +1430,30 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
 static OS_HOST_FUNCTION(os_wasi_args_sizes_get)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG_MEM(uint8_t*, count);
-    OS_HOST_ARG_MEM(uint8_t*, size);
+    OS_HOST_ARG(uint32_t, count_address);
+    OS_HOST_ARG(uint32_t, size_address);
     const char* const* argv = NULL;
     uint32_t argc = os_guest_args(&argv);
     uint32_t bytes = 0U;
     uint32_t index = 0U;
     OS_ABI_UNUSED();
 
-    OS_HOST_CHECK_MEM(count, 4U);
-    OS_HOST_CHECK_MEM(size, 4U);
+    OS_HOST_CHECK_ADDR(count_address, 4U);
+    OS_HOST_CHECK_ADDR(size_address, 4U);
     for (index = 0U; index < argc; ++index)
     {
         bytes += (uint32_t)strlen(argv[index]) + 1U;
     }
-    OS_HOST_WRITE32(count, argc);
-    OS_HOST_WRITE32(size, bytes);
+    OS_HOST_STORE32(count_address, argc);
+    OS_HOST_STORE32(size_address, bytes);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
 static OS_HOST_FUNCTION(os_wasi_args_get)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG_MEM(uint8_t*, pointers);
-    OS_HOST_ARG_MEM(uint8_t*, buffer);
+    OS_HOST_ARG(uint32_t, pointers_address);
+    OS_HOST_ARG(uint32_t, buffer_address);
     const char* const* argv = NULL;
     uint32_t argc = os_guest_args(&argv);
     uint32_t index = 0U;
@@ -1440,11 +1462,11 @@ static OS_HOST_FUNCTION(os_wasi_args_get)
     for (index = 0U; index < argc; ++index)
     {
         uint32_t length = (uint32_t)strlen(argv[index]) + 1U;
-        OS_HOST_CHECK_MEM(pointers + index * 4U, 4U);
-        OS_HOST_CHECK_MEM(buffer, length);
-        OS_HOST_WRITE32(pointers + index * 4U, OS_HOST_OFFSET(buffer));
-        memcpy(buffer, argv[index], length);
-        buffer += length;
+        OS_HOST_CHECK_ADDR(pointers_address + index * 4U, 4U);
+        OS_HOST_CHECK_ADDR(buffer_address, length);
+        OS_HOST_STORE32(pointers_address + index * 4U, buffer_address);
+        OS_HOST_COPY_TO(buffer_address, argv[index], length);
+        buffer_address += length;
     }
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
@@ -1453,14 +1475,14 @@ static OS_HOST_FUNCTION(os_wasi_args_get)
 static OS_HOST_FUNCTION(os_wasi_environ_sizes_get)
 {
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG_MEM(uint8_t*, count);
-    OS_HOST_ARG_MEM(uint8_t*, size);
+    OS_HOST_ARG(uint32_t, count_address);
+    OS_HOST_ARG(uint32_t, size_address);
     OS_ABI_UNUSED();
 
-    OS_HOST_CHECK_MEM(count, 4U);
-    OS_HOST_CHECK_MEM(size, 4U);
-    OS_HOST_WRITE32(count, 0U);
-    OS_HOST_WRITE32(size, 0U);
+    OS_HOST_CHECK_ADDR(count_address, 4U);
+    OS_HOST_CHECK_ADDR(size_address, 4U);
+    OS_HOST_STORE32(count_address, 0U);
+    OS_HOST_STORE32(size_address, 0U);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1483,18 +1505,26 @@ static OS_HOST_FUNCTION(os_wasi_random_get)
 {
     static uint32_t state = 0x2545F491U;
     OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG_MEM(uint8_t*, buffer);
+    OS_HOST_ARG(uint32_t, buffer_address);
     OS_HOST_ARG(uint32_t, length);
-    uint32_t index = 0U;
+    uint8_t chunk[32];
     OS_ABI_UNUSED();
 
-    OS_HOST_CHECK_MEM(buffer, length);
-    for (index = 0U; index < length; ++index)
+    OS_HOST_CHECK_ADDR(buffer_address, length);
+    while (length > 0U)
     {
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-        buffer[index] = (uint8_t)state;
+        uint32_t n = length < sizeof(chunk) ? length : (uint32_t)sizeof(chunk);
+        uint32_t index = 0U;
+        for (index = 0U; index < n; ++index)
+        {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            chunk[index] = (uint8_t)state;
+        }
+        OS_HOST_COPY_TO(buffer_address, chunk, n);
+        buffer_address += n;
+        length -= n;
     }
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
@@ -1504,17 +1534,19 @@ static OS_HOST_FUNCTION(os_wasi_fd_fdstat_get)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(uint32_t, fd);
-    OS_HOST_ARG_MEM(uint8_t*, stat);
+    OS_HOST_ARG(uint32_t, stat_address);
+    uint8_t stat[24];
     OS_ABI_UNUSED();
 
     if (fd > 2U)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
-    OS_HOST_CHECK_MEM(stat, 24U);
-    memset(stat, 0, 24U);
+    OS_HOST_CHECK_ADDR(stat_address, sizeof(stat));
+    memset(stat, 0, sizeof(stat));
     stat[0] = OS_WASI_FILETYPE_CHARACTER_DEVICE;
     memset(stat + 8, 0xFF, 16U);
+    OS_HOST_COPY_TO(stat_address, stat, sizeof(stat));
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1549,7 +1581,7 @@ static OS_HOST_FUNCTION(os_wasi_fd_read)
     OS_HOST_ARG(uint32_t, fd);
     OS_HOST_ARG(uint32_t, iovs);
     OS_HOST_ARG(uint32_t, count);
-    OS_HOST_ARG_MEM(uint8_t*, nread);
+    OS_HOST_ARG(uint32_t, nread_address);
     OS_ABI_UNUSED();
     (void)iovs;
     (void)count;
@@ -1558,8 +1590,8 @@ static OS_HOST_FUNCTION(os_wasi_fd_read)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
-    OS_HOST_CHECK_MEM(nread, 4U);
-    OS_HOST_WRITE32(nread, 0U);
+    OS_HOST_CHECK_ADDR(nread_address, 4U);
+    OS_HOST_STORE32(nread_address, 0U);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 

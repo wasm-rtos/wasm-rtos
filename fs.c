@@ -792,17 +792,17 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_prestat_get)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(uint8_t*, buf);
+    OS_HOST_ARG(uint32_t, buf);
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(buf, 8);
+    OS_HOST_CHECK_ADDR(buf, 8);
     if (fd != OS_FS_ROOT_FD)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
-    OS_HOST_WRITE32(buf, OS_WASI_PREOPENTYPE_DIR);
-    OS_HOST_WRITE32(buf + 4, 1);
+    OS_HOST_STORE32(buf, OS_WASI_PREOPENTYPE_DIR);
+    OS_HOST_STORE32(buf + 4, 1);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -810,7 +810,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_prestat_dir_name)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(char*, path);
+    OS_HOST_ARG(uint32_t, path);
     OS_HOST_ARG(os_wasi_size_t, path_len);
     (void)runtime;
     (void)os_host_user;
@@ -823,9 +823,25 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_prestat_dir_name)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
     }
-    OS_HOST_CHECK_MEM(path, 1);
-    path[0] = '/';
+    OS_HOST_CHECK_ADDR(path, 1);
+    OS_HOST_STORE8(path, '/');
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
+}
+
+/* A path a program passes, copied out; longer than the kernel keeps is OS_WASI_ERRNO_NAMETOOLONG. */
+static os_wasi_errno_t os_fs_read_path(WmMemory* os_host_memory, uint32_t address, uint32_t length, char* out)
+{
+    if (!os_host_memory_in_bounds(os_host_memory, address, length))
+    {
+        return OS_WASI_ERRNO_FAULT;
+    }
+    if (length >= OS_FS_PATH_MAX)
+    {
+        return OS_WASI_ERRNO_NAMETOOLONG;
+    }
+    OS_HOST_COPY_FROM(address, out, length);
+    out[length] = '\0';
+    return OS_WASI_ERRNO_SUCCESS;
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_path_open)
@@ -833,14 +849,15 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, dirfd);
     OS_HOST_ARG(os_wasi_lookupflags_t, dirflags);
-    OS_HOST_ARG_MEM(const char*, path);
+    OS_HOST_ARG(uint32_t, path_address);
     OS_HOST_ARG(os_wasi_size_t, path_len);
     OS_HOST_ARG(os_wasi_oflags_t, oflags);
     OS_HOST_ARG(os_wasi_rights_t, rights_base);
     OS_HOST_ARG(os_wasi_rights_t, rights_inheriting);
     OS_HOST_ARG(os_wasi_fdflags_t, fdflags);
-    OS_HOST_ARG_MEM(os_wasi_fd_t*, out_fd);
+    OS_HOST_ARG(uint32_t, out_fd);
     const char* directory = os_fs_directory_for_fd(dirfd);
+    char path[OS_FS_PATH_MAX];
     char normalized[OS_FS_PATH_MAX];
     OsFsProcess* process = NULL;
     OsFsOpenFile* file = NULL;
@@ -848,14 +865,19 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
     OsFsMount* mount = NULL;
     OsFsStat stat;
     OsStatus status = OS_STATUS_OK;
+    os_wasi_errno_t error = 0;
     uint32_t index = 0U;
     (void)runtime;
     (void)os_host_user;
     (void)dirflags;
     (void)rights_inheriting;
 
-    OS_HOST_CHECK_MEM(path, path_len);
-    OS_HOST_CHECK_MEM(out_fd, sizeof(os_wasi_fd_t));
+    OS_HOST_CHECK_ADDR(out_fd, sizeof(os_wasi_fd_t));
+    error = os_fs_read_path(os_host_memory, path_address, path_len, path);
+    if (error != OS_WASI_ERRNO_SUCCESS)
+    {
+        OS_HOST_RETURN(error);
+    }
 
     if (directory == NULL)
     {
@@ -928,30 +950,62 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
 
     file->used = 1U;
     file->position = 0U;
-    OS_HOST_WRITE32(out_fd, OS_FS_FIRST_FILE_FD + index);
+    OS_HOST_STORE32(out_fd, OS_FS_FIRST_FILE_FD + index);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
+}
+
+/*
+ * Read into the program's buffer of one iovec: the driver fills it in
+ * place, or a copy when the buffer is split across pages.
+ */
+static OsStatus os_fs_read_iov(OsFsOpenFile* file, uint64_t offset, uint32_t address, uint32_t length, uint32_t* out_read)
+{
+    OsGuestBuffer buffer;
+    OsStatus status = os_guest_buffer_open(&buffer, address, length, OS_GUEST_OUT);
+
+    *out_read = 0U;
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    status = os_fs_read_into(file, offset, buffer.data, length, out_read);
+    if (status == OS_STATUS_OK)
+    {
+        status = os_guest_buffer_close(&buffer);
+    }
+    else
+    {
+        os_guest_buffer_drop(&buffer);
+    }
+    return status;
+}
+
+/* The errno for a read into the program's memory. */
+static os_wasi_errno_t os_fs_read_errno(OsStatus status)
+{
+    return status == OS_STATUS_OUT_OF_BOUNDS ? OS_WASI_ERRNO_FAULT : os_fs_errno(status);
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_read)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(OsFsIovec*, iovs);
+    OS_HOST_ARG(uint32_t, iovs);
     OS_HOST_ARG(os_wasi_size_t, iovs_len);
-    OS_HOST_ARG_MEM(os_wasi_size_t*, nread);
+    OS_HOST_ARG(uint32_t, nread);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     uint32_t total = 0U;
     uint32_t index = 0U;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(iovs, iovs_len * sizeof(OsFsIovec));
-    OS_HOST_CHECK_MEM(nread, sizeof(os_wasi_size_t));
+    OS_HOST_CHECK_ADDR(iovs, (uint64_t)iovs_len * sizeof(OsFsIovec));
+    OS_HOST_CHECK_ADDR(nread, sizeof(os_wasi_size_t));
 
     if (fd == 0U)
     {
         /* No console input yet: stdin reads as end of file. */
-        OS_HOST_WRITE32(nread, 0);
+        OS_HOST_STORE32(nread, 0);
         OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (file == NULL)
@@ -965,8 +1019,8 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_read)
 
     for (index = 0U; index < iovs_len; ++index)
     {
-        void* address = OS_HOST_PTR(OS_HOST_READ32(&iovs[index].buf));
-        uint32_t length = OS_HOST_READ32(&iovs[index].buf_len);
+        uint32_t address = OS_HOST_LOAD32(iovs + index * sizeof(OsFsIovec));
+        uint32_t length = OS_HOST_LOAD32(iovs + index * sizeof(OsFsIovec) + 4U);
         uint32_t got = 0U;
         OsStatus status = OS_STATUS_OK;
 
@@ -974,11 +1028,10 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_read)
         {
             continue;
         }
-        OS_HOST_CHECK_MEM(address, length);
-        status = os_fs_read_into(file, file->position, address, length, &got);
+        status = os_fs_read_iov(file, file->position, address, length, &got);
         if (status != OS_STATUS_OK)
         {
-            OS_HOST_RETURN(os_fs_errno(status));
+            OS_HOST_RETURN(os_fs_read_errno(status));
         }
         file->position += got;
         total += got;
@@ -988,7 +1041,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_read)
         }
     }
 
-    OS_HOST_WRITE32(nread, total);
+    OS_HOST_STORE32(nread, total);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -996,18 +1049,18 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_pread)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(OsFsIovec*, iovs);
+    OS_HOST_ARG(uint32_t, iovs);
     OS_HOST_ARG(os_wasi_size_t, iovs_len);
     OS_HOST_ARG(os_wasi_filesize_t, offset);
-    OS_HOST_ARG_MEM(os_wasi_size_t*, nread);
+    OS_HOST_ARG(uint32_t, nread);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     uint32_t total = 0U;
     uint32_t index = 0U;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(iovs, iovs_len * sizeof(OsFsIovec));
-    OS_HOST_CHECK_MEM(nread, sizeof(os_wasi_size_t));
+    OS_HOST_CHECK_ADDR(iovs, (uint64_t)iovs_len * sizeof(OsFsIovec));
+    OS_HOST_CHECK_ADDR(nread, sizeof(os_wasi_size_t));
 
     if (file == NULL)
     {
@@ -1020,8 +1073,8 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_pread)
 
     for (index = 0U; index < iovs_len; ++index)
     {
-        void* address = OS_HOST_PTR(OS_HOST_READ32(&iovs[index].buf));
-        uint32_t length = OS_HOST_READ32(&iovs[index].buf_len);
+        uint32_t address = OS_HOST_LOAD32(iovs + index * sizeof(OsFsIovec));
+        uint32_t length = OS_HOST_LOAD32(iovs + index * sizeof(OsFsIovec) + 4U);
         uint32_t got = 0U;
         OsStatus status = OS_STATUS_OK;
 
@@ -1029,11 +1082,10 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_pread)
         {
             continue;
         }
-        OS_HOST_CHECK_MEM(address, length);
-        status = os_fs_read_into(file, offset + total, address, length, &got);
+        status = os_fs_read_iov(file, offset + total, address, length, &got);
         if (status != OS_STATUS_OK)
         {
-            OS_HOST_RETURN(os_fs_errno(status));
+            OS_HOST_RETURN(os_fs_read_errno(status));
         }
         total += got;
         if (got < length)
@@ -1042,7 +1094,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_pread)
         }
     }
 
-    OS_HOST_WRITE32(nread, total);
+    OS_HOST_STORE32(nread, total);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1097,17 +1149,17 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_seek)
     OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG(os_wasi_filedelta_t, offset);
     OS_HOST_ARG(uint32_t, whence);
-    OS_HOST_ARG_MEM(os_wasi_filesize_t*, result);
+    OS_HOST_ARG(uint32_t, result);
     uint64_t position = 0U;
     os_wasi_errno_t error = 0;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(result, sizeof(os_wasi_filesize_t));
+    OS_HOST_CHECK_ADDR(result, sizeof(os_wasi_filesize_t));
     error = os_fs_seek(fd, offset, whence, &position);
     if (error == OS_WASI_ERRNO_SUCCESS)
     {
-        OS_HOST_WRITE64(result, position);
+        OS_HOST_STORE64(result, position);
     }
     OS_HOST_RETURN(error);
 }
@@ -1119,14 +1171,14 @@ static OS_HOST_FUNCTION(os_fs_wasi_unstable_fd_seek)
     OS_HOST_ARG(os_wasi_fd_t, fd);
     OS_HOST_ARG(os_wasi_filedelta_t, offset);
     OS_HOST_ARG(uint32_t, whence);
-    OS_HOST_ARG_MEM(os_wasi_filesize_t*, result);
+    OS_HOST_ARG(uint32_t, result);
     static const uint32_t whence_map[3] = { OS_WASI_WHENCE_CUR, OS_WASI_WHENCE_END, OS_WASI_WHENCE_SET };
     uint64_t position = 0U;
     os_wasi_errno_t error = 0;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(result, sizeof(os_wasi_filesize_t));
+    OS_HOST_CHECK_ADDR(result, sizeof(os_wasi_filesize_t));
     if (whence > 2U)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
@@ -1134,7 +1186,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_unstable_fd_seek)
     error = os_fs_seek(fd, offset, whence_map[whence], &position);
     if (error == OS_WASI_ERRNO_SUCCESS)
     {
-        OS_HOST_WRITE64(result, position);
+        OS_HOST_STORE64(result, position);
     }
     OS_HOST_RETURN(error);
 }
@@ -1143,17 +1195,17 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_tell)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(os_wasi_filesize_t*, result);
+    OS_HOST_ARG(uint32_t, result);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(result, sizeof(os_wasi_filesize_t));
+    OS_HOST_CHECK_ADDR(result, sizeof(os_wasi_filesize_t));
     if (file == NULL)
     {
         OS_HOST_RETURN(fd < OS_FS_FIRST_FILE_FD ? OS_WASI_ERRNO_SPIPE : OS_WASI_ERRNO_BADF);
     }
-    OS_HOST_WRITE64(result, file->position);
+    OS_HOST_STORE64(result, file->position);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1162,7 +1214,6 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_close)
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
-    (void)runtime;
     (void)runtime;
     (void)os_host_user;
     (void)os_host_memory;
@@ -1183,15 +1234,16 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_fdstat_get)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(uint8_t*, buf);
+    OS_HOST_ARG(uint32_t, buf);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
+    uint8_t stat[24];
     uint8_t filetype = 0U;
     uint64_t rights = 0U;
     uint64_t inheriting = 0U;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(buf, 24);
+    OS_HOST_CHECK_ADDR(buf, sizeof(stat));
     if (fd <= 2U)
     {
         filetype = OS_WASI_FILETYPE_CHARACTER_DEVICE;
@@ -1213,46 +1265,53 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_fdstat_get)
         OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
     }
 
-    memset(buf, 0, 24);
-    OS_HOST_WRITE8(buf, filetype);
-    OS_HOST_WRITE64(buf + 8, rights);
-    OS_HOST_WRITE64(buf + 16, inheriting);
+    memset(stat, 0, sizeof(stat));
+    OS_HOST_WRITE8(stat, filetype);
+    OS_HOST_WRITE64(stat + 8, rights);
+    OS_HOST_WRITE64(stat + 16, inheriting);
+    OS_HOST_COPY_TO(buf, stat, sizeof(stat));
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
-static void os_fs_write_filestat(uint8_t* buf, const char* path, const OsFsStat* stat)
+/* A WASI filestat, 64 bytes, into the program's memory at buf. */
+static void os_fs_write_filestat(WmMemory* os_host_memory, uint32_t buf, const char* path, const OsFsStat* stat)
 {
-    memset(buf, 0, 64);
-    OS_HOST_WRITE64(buf + 8, os_fs_inode(path));
-    OS_HOST_WRITE8(buf + 16, stat->type == OS_FS_TYPE_DIRECTORY
+    uint8_t filestat[64];
+
+    memset(filestat, 0, sizeof(filestat));
+    OS_HOST_WRITE64(filestat + 8, os_fs_inode(path));
+    OS_HOST_WRITE8(filestat + 16, stat->type == OS_FS_TYPE_DIRECTORY
         ? OS_WASI_FILETYPE_DIRECTORY
         : OS_WASI_FILETYPE_REGULAR_FILE);
-    OS_HOST_WRITE64(buf + 24, 1U);
-    OS_HOST_WRITE64(buf + 32, stat->size);
+    OS_HOST_WRITE64(filestat + 24, 1U);
+    OS_HOST_WRITE64(filestat + 32, stat->size);
+    OS_HOST_COPY_TO(buf, filestat, sizeof(filestat));
 }
 
 static OS_HOST_FUNCTION(os_fs_wasi_fd_filestat_get)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(uint8_t*, buf);
+    OS_HOST_ARG(uint32_t, buf);
     OsFsOpenFile* file = os_fs_file_for_fd(fd);
     OsFsStat stat;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(buf, 64);
+    OS_HOST_CHECK_ADDR(buf, 64);
     if (fd <= 2U)
     {
-        memset(buf, 0, 64);
-        OS_HOST_WRITE8(buf + 16, OS_WASI_FILETYPE_CHARACTER_DEVICE);
+        uint8_t filestat[64];
+        memset(filestat, 0, sizeof(filestat));
+        OS_HOST_WRITE8(filestat + 16, OS_WASI_FILETYPE_CHARACTER_DEVICE);
+        OS_HOST_COPY_TO(buf, filestat, sizeof(filestat));
         OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (fd == OS_FS_ROOT_FD)
     {
         stat.type = OS_FS_TYPE_DIRECTORY;
         stat.size = 0U;
-        os_fs_write_filestat(buf, "/", &stat);
+        os_fs_write_filestat(os_host_memory, buf, "/", &stat);
         OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (file == NULL)
@@ -1261,7 +1320,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_filestat_get)
     }
     stat.type = file->is_directory ? OS_FS_TYPE_DIRECTORY : OS_FS_TYPE_FILE;
     stat.size = file->size;
-    os_fs_write_filestat(buf, file->path != NULL ? file->path : "", &stat);
+    os_fs_write_filestat(os_host_memory, buf, file->path != NULL ? file->path : "", &stat);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1270,19 +1329,25 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_filestat_get)
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, dirfd);
     OS_HOST_ARG(os_wasi_lookupflags_t, flags);
-    OS_HOST_ARG_MEM(const char*, path);
+    OS_HOST_ARG(uint32_t, path_address);
     OS_HOST_ARG(os_wasi_size_t, path_len);
-    OS_HOST_ARG_MEM(uint8_t*, buf);
+    OS_HOST_ARG(uint32_t, buf);
     const char* directory = os_fs_directory_for_fd(dirfd);
+    char path[OS_FS_PATH_MAX];
     char normalized[OS_FS_PATH_MAX];
     OsFsStat stat;
     OsStatus status = OS_STATUS_OK;
+    os_wasi_errno_t error = 0;
     (void)runtime;
     (void)os_host_user;
     (void)flags;
 
-    OS_HOST_CHECK_MEM(path, path_len);
-    OS_HOST_CHECK_MEM(buf, 64);
+    OS_HOST_CHECK_ADDR(buf, 64);
+    error = os_fs_read_path(os_host_memory, path_address, path_len, path);
+    if (error != OS_WASI_ERRNO_SUCCESS)
+    {
+        OS_HOST_RETURN(error);
+    }
     if (directory == NULL)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
@@ -1297,7 +1362,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_filestat_get)
     {
         OS_HOST_RETURN(os_fs_errno(status));
     }
-    os_fs_write_filestat(buf, normalized, &stat);
+    os_fs_write_filestat(os_host_memory, buf, normalized, &stat);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1306,18 +1371,18 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_readdir)
 {
     OS_HOST_RETURNS(uint32_t);
     OS_HOST_ARG(os_wasi_fd_t, fd);
-    OS_HOST_ARG_MEM(uint8_t*, buf);
+    OS_HOST_ARG(uint32_t, buf);
     OS_HOST_ARG(os_wasi_size_t, buf_len);
     OS_HOST_ARG(os_wasi_dircookie_t, cookie);
-    OS_HOST_ARG_MEM(os_wasi_size_t*, bufused);
+    OS_HOST_ARG(uint32_t, bufused);
     const char* directory = os_fs_directory_for_fd(fd);
     uint32_t used = 0U;
     uint64_t index = cookie;
     (void)runtime;
     (void)os_host_user;
 
-    OS_HOST_CHECK_MEM(buf, buf_len);
-    OS_HOST_CHECK_MEM(bufused, sizeof(os_wasi_size_t));
+    OS_HOST_CHECK_ADDR(buf, buf_len);
+    OS_HOST_CHECK_ADDR(bufused, sizeof(os_wasi_size_t));
     if (directory == NULL)
     {
         OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
@@ -1355,15 +1420,15 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_readdir)
             : OS_WASI_FILETYPE_REGULAR_FILE);
 
         chunk = buf_len - used < sizeof(header) ? buf_len - used : (uint32_t)sizeof(header);
-        memcpy(buf + used, header, chunk);
+        OS_HOST_COPY_TO(buf + used, header, chunk);
         used += chunk;
         chunk = buf_len - used < name_length ? buf_len - used : name_length;
-        memcpy(buf + used, entry.name, chunk);
+        OS_HOST_COPY_TO(buf + used, entry.name, chunk);
         used += chunk;
         ++index;
     }
 
-    OS_HOST_WRITE32(bufused, used);
+    OS_HOST_STORE32(bufused, used);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 

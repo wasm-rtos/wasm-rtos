@@ -106,8 +106,13 @@ int32_t os_driver_open(const OsDriver* driver, uint32_t name_address, uint32_t n
                        void* context);
 /* A property value for a program (31 bits), or the ABI error for status. */
 int32_t os_driver_property(OsStatus status, uint32_t value);
-/* An optional object name from guest memory: (0, 0) means none; 0 or a negative ABI error. */
-int32_t os_abi_read_name(uint32_t address, uint32_t length, const char** out_name);
+/*
+ * An optional object name from the program's memory, copied into storage
+ * (OS_ABI_NAME_MAX bytes): (0, 0) means none and leaves *out_name NULL; 0
+ * or a negative ABI error.
+ */
+#define OS_ABI_NAME_MAX 32U
+int32_t os_abi_read_name(uint32_t address, uint32_t length, char* storage, const char** out_name);
 
 /* What a call may leave unused. */
 #define OS_ABI_UNUSED() \

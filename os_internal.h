@@ -42,8 +42,55 @@ typedef struct OsWaitTarget
  */
 OsStatus os_guest_begin(uint32_t* raw_return);
 WmResult os_guest_end(void);
-/* Address range of the current task's linear memory, or an error. */
-OsStatus os_guest_memory(uint32_t address, uint32_t length, uint8_t** out_memory);
+
+/* ---- The program's memory ------------------------------------------------ */
+
+/*
+ * The current task's memory is reached by address, as it may be paged:
+ * ranges are checked (OS_STATUS_OUT_OF_BOUNDS when outside it, with
+ * addresses near 4 GiB) and bytes copied in or out.
+ */
+OsStatus os_guest_check(uint32_t address, uint32_t length);
+OsStatus os_guest_read(uint32_t address, void* out, uint32_t length);
+OsStatus os_guest_write(uint32_t address, const void* data, uint32_t length);
+
+/*
+ * A range of the program's memory a port works on in place. data points
+ * into the memory when the bytes lie in one piece; otherwise at a kernel
+ * copy of them, which os_guest_buffer_close writes back when access has
+ * OS_GUEST_OUT (a copy starts as the program's bytes, so what the port
+ * left alone stays). A buffer is open while the port works and is closed
+ * or dropped once. data is NULL for length 0.
+ *
+ * A port working in the background (the program waits meanwhile and keeps
+ * its memory) needs the buffers past the call: os_guest_buffer_keep moves
+ * a copy into a list, and os_guest_kept_close writes the list back when
+ * the transfer ends; after the task has ended it only lets the copies go.
+ * A pointer into the memory needs no keeping.
+ */
+#define OS_GUEST_IN 1U  /* the port reads it */
+#define OS_GUEST_OUT 2U /* the port writes it */
+typedef struct OsGuestBuffer
+{
+    uint8_t* data;
+    uint32_t address;
+    uint32_t length;
+    uint32_t task_id;
+    uint8_t access;
+    uint8_t copied;
+} OsGuestBuffer;
+typedef struct OsGuestKept OsGuestKept;
+OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t length, uint8_t access);
+/* The ABI error for a buffer that did not open: no memory for its copy, or a bad range. */
+#define OS_GUEST_BUFFER_ERROR(STATUS) ((STATUS) == OS_STATUS_OUT_OF_MEMORY ? -WR_ENOMEM : -WR_EFAULT)
+OsStatus os_guest_buffer_close(OsGuestBuffer* buffer);
+/* Let a buffer go without writing a copy back. */
+void os_guest_buffer_drop(OsGuestBuffer* buffer);
+void os_guest_buffer_keep(OsGuestBuffer* buffer, OsGuestKept** list);
+OsStatus os_guest_kept_close(OsGuestKept** list);
+
+/* A queue receive for a program: the item goes to address, now or when one arrives. */
+OsStatus os_queue_receive_wait_guest(OsQueueHandle queue, uint32_t address, uint32_t timeout_ms);
 
 /*
  * Waits for something outside the kernel's objects, named by a key: the

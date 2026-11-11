@@ -506,12 +506,13 @@ static OS_HOST_FUNCTION(os_input_call_open)
     OS_HOST_ARG(uint32_t, name_length);
     OS_HOST_ARG(uint32_t, flags);
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     uint32_t id = 0U;
     int32_t handle = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
-    handle = os_abi_read_name(name_address, name_length, &name);
+    handle = os_abi_read_name(name_address, name_length, name_storage, &name);
     if (handle < 0)
     {
         OS_HOST_RETURN(handle);
@@ -560,19 +561,27 @@ static OS_HOST_FUNCTION(os_input_call_read)
     OS_HOST_ARG(uint32_t, max_events);
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_input_driver, handle, &id);
-    uint8_t* events = NULL;
+    OsGuestBuffer events;
+    uint32_t count = 0U;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    if (max_events > UINT32_MAX / OS_INPUT_EVENT_SIZE ||
-        os_guest_memory(events_address, max_events * OS_INPUT_EVENT_SIZE, &events) != OS_STATUS_OK)
+    if (max_events > UINT32_MAX / OS_INPUT_EVENT_SIZE)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    OS_HOST_RETURN((int32_t)os_input_read(id, events, max_events));
+    status = os_guest_buffer_open(&events, events_address, max_events * OS_INPUT_EVENT_SIZE, OS_GUEST_OUT);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(OS_GUEST_BUFFER_ERROR(status));
+    }
+    count = os_input_read(id, events.data, max_events);
+    (void)os_guest_buffer_close(&events);
+    OS_HOST_RETURN((int32_t)count);
 }
 
 static const OsDriverCall os_input_calls[] =

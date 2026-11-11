@@ -56,6 +56,8 @@ typedef struct OsBus
     } ops;
     OsBusFlag done;
     volatile OsStatus result;
+    /* Copies of the program's buffers the port works on, written back when the transfer ends. */
+    OsGuestKept* kept;
     /* Match ROM and the code, which the port reads during the transfer. */
     uint8_t select[9];
     /* A strong pull-up was left on (POWER 0 last). */
@@ -167,15 +169,77 @@ void os_bus_trace_set(OsBusTraceFunction function, void* context)
 
 static void os_bus_finish(uint8_t kind, OsBus* bus);
 static OsBus* os_bus_by_number(uint8_t kind, uint32_t number);
-/* Program memory for a data range of an op; length 0 needs no memory. */
-static int32_t os_bus_guest_data(uint32_t address, uint32_t length, uint8_t** out_data)
+
+/* The program's buffers of one transaction, open while it is set up and runs. */
+typedef struct OsBusBuffers
 {
+    OsGuestBuffer items[2U * OS_BUS_MAX_OPS];
+    uint32_t count;
+} OsBusBuffers;
+
+/* Program memory for a data range of an op; length 0 needs no memory. */
+static int32_t os_bus_guest_data(OsBusBuffers* buffers, uint32_t address, uint32_t length, uint8_t access,
+                                 uint8_t** out_data)
+{
+    OsGuestBuffer* buffer = &buffers->items[buffers->count];
+    OsStatus status = OS_STATUS_OK;
+
     *out_data = NULL;
     if (length == 0U)
     {
         return 0;
     }
-    return os_guest_memory(address, length, out_data) == OS_STATUS_OK ? 0 : -WR_EFAULT;
+    status = os_guest_buffer_open(buffer, address, length, access);
+    if (status != OS_STATUS_OK)
+    {
+        return OS_GUEST_BUFFER_ERROR(status);
+    }
+    ++buffers->count;
+    *out_data = buffer->data;
+    return 0;
+}
+
+static void os_bus_buffers_drop(OsBusBuffers* buffers)
+{
+    while (buffers->count > 0U)
+    {
+        os_guest_buffer_drop(&buffers->items[--buffers->count]);
+    }
+}
+
+static void os_bus_keep_buffers(uint8_t kind, OsBus* bus, uint32_t task_id);
+static void os_bus_each(uint8_t kind, void (*visit)(uint8_t kind, OsBus* bus, uint32_t task_id), uint32_t task_id);
+static OsBusBuffers* g_bus_keeping;
+
+/*
+ * The transaction is over (status), or the port goes on in the background
+ * (OS_STATUS_PENDING): then copies of the program's buffers wait in the
+ * bus until the end writes them back.
+ */
+static void os_bus_buffers_end(uint8_t kind, OsBusBuffers* buffers, OsStatus status)
+{
+    if (status == OS_STATUS_PENDING)
+    {
+        g_bus_keeping = buffers;
+        os_bus_each(kind, os_bus_keep_buffers, os_task_get_id(os_task_get_current()));
+        g_bus_keeping = NULL;
+    }
+    while (buffers->count > 0U)
+    {
+        (void)os_guest_buffer_close(&buffers->items[--buffers->count]);
+    }
+}
+
+static void os_bus_keep_buffers(uint8_t kind, OsBus* bus, uint32_t task_id)
+{
+    (void)kind;
+    if (bus->busy && bus->task_id == task_id)
+    {
+        while (g_bus_keeping->count > 0U)
+        {
+            os_guest_buffer_keep(&g_bus_keeping->items[--g_bus_keeping->count], &bus->kept);
+        }
+    }
 }
 
 static void os_bus_poll_kind(uint8_t kind);
@@ -211,6 +275,7 @@ static void os_bus_deliver(uint8_t kind, OsBus* bus)
     {
         (void)os_gpio_set(bus->cs, 1U);
     }
+    (void)os_guest_kept_close(&bus->kept);
     os_bus_report(kind, bus->bus, bus->device, task_id, bus->transfer_hz, os_bus_ops(kind, bus), bus->count, status);
     os_transfer_wait_end(task_id, status, 0U);
 }
@@ -1255,12 +1320,13 @@ static OS_HOST_FUNCTION(os_i2c_call_open)
     OS_HOST_ARG(uint32_t, address);
     OS_HOST_ARG(uint32_t, flags);
     const char* bus = NULL;
+    char bus_storage[OS_ABI_NAME_MAX];
     uint32_t id = 0U;
     int32_t handle = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
-    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    handle = os_abi_read_name(bus_address, bus_length, bus_storage, &bus);
     if (handle < 0)
     {
         OS_HOST_RETURN(handle);
@@ -1292,8 +1358,9 @@ static OS_HOST_FUNCTION(os_i2c_call_transaction)
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_i2c_driver, handle, &id);
     OsI2cOp ops[OS_BUS_MAX_OPS];
-    uint8_t* records = NULL;
+    OsBusBuffers buffers = { { { 0 } }, 0U };
     uint32_t index = 0U;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
@@ -1304,22 +1371,29 @@ static OS_HOST_FUNCTION(os_i2c_call_transaction)
     {
         OS_HOST_RETURN(-WR_ELIMIT);
     }
-    if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
+    if (count > 0U && os_guest_check(ops_address, count * 12U) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
-        const uint8_t* record = records + index * 12U;
-        int32_t result = os_bus_guest_data(OS_HOST_READ32(record + 4U), OS_HOST_READ32(record + 8U), &ops[index].data);
-        uint32_t kind = OS_HOST_READ32(record);
-        if (result < 0)
-        {
-            OS_HOST_RETURN(result);
-        }
+        uint8_t record[12];
+        uint32_t kind = 0U;
+        int32_t result = 0;
+
+        (void)os_guest_read(ops_address + index * 12U, record, sizeof(record));
+        kind = OS_HOST_READ32(record);
         if (kind != OS_I2C_WRITE && kind != OS_I2C_READ)
         {
+            os_bus_buffers_drop(&buffers);
             OS_HOST_RETURN(-WR_EINVAL);
+        }
+        result = os_bus_guest_data(&buffers, OS_HOST_READ32(record + 4U), OS_HOST_READ32(record + 8U),
+                                   kind == OS_I2C_WRITE ? OS_GUEST_IN : OS_GUEST_OUT, &ops[index].data);
+        if (result < 0)
+        {
+            os_bus_buffers_drop(&buffers);
+            OS_HOST_RETURN(result);
         }
         ops[index].kind = (uint8_t)kind;
         ops[index].length = OS_HOST_READ32(record + 8U);
@@ -1327,9 +1401,12 @@ static OS_HOST_FUNCTION(os_i2c_call_transaction)
     /* A port working in the background leaves the program waiting; the end writes the result. */
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
+        os_bus_buffers_drop(&buffers);
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    *raw_return = os_abi_error(os_i2c_transaction(id, ops, count));
+    status = os_i2c_transaction(id, ops, count);
+    os_bus_buffers_end(OS_BUS_I2C, &buffers, status);
+    *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
@@ -1364,16 +1441,18 @@ static OS_HOST_FUNCTION(os_spi_call_open)
     OS_HOST_ARG(uint32_t, mode);
     OS_HOST_ARG(uint32_t, frequency_hz);
     const char* bus = NULL;
+    char bus_storage[OS_ABI_NAME_MAX];
     const char* cs = NULL;
+    char cs_storage[OS_ABI_NAME_MAX];
     uint32_t id = 0U;
     int32_t handle = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
-    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    handle = os_abi_read_name(bus_address, bus_length, bus_storage, &bus);
     if (handle >= 0)
     {
-        handle = os_abi_read_name(cs_address, cs_length, &cs);
+        handle = os_abi_read_name(cs_address, cs_length, cs_storage, &cs);
     }
     if (handle < 0)
     {
@@ -1406,8 +1485,9 @@ static OS_HOST_FUNCTION(os_spi_call_transaction)
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_spi_driver, handle, &id);
     OsSpiOp ops[OS_BUS_MAX_OPS];
-    uint8_t* records = NULL;
+    OsBusBuffers buffers = { { { 0 } }, 0U };
     uint32_t index = 0U;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
@@ -1422,33 +1502,38 @@ static OS_HOST_FUNCTION(os_spi_call_transaction)
     {
         OS_HOST_RETURN(-WR_EINVAL);
     }
-    if (os_guest_memory(ops_address, count * 16U, &records) != OS_STATUS_OK)
+    if (os_guest_check(ops_address, count * 16U) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
-        const uint8_t* record = records + index * 16U;
-        uint32_t kind = OS_HOST_READ32(record);
-        uint32_t length = OS_HOST_READ32(record + 12U);
+        uint8_t record[16];
+        uint32_t kind = 0U;
+        uint32_t length = 0U;
         uint8_t* write = NULL;
         uint8_t* read = NULL;
         int32_t result = 0;
 
+        (void)os_guest_read(ops_address + index * 16U, record, sizeof(record));
+        kind = OS_HOST_READ32(record);
+        length = OS_HOST_READ32(record + 12U);
         if (kind < OS_SPI_WRITE || kind > OS_SPI_DELAY_US)
         {
+            os_bus_buffers_drop(&buffers);
             OS_HOST_RETURN(-WR_EINVAL);
         }
         if (kind == OS_SPI_WRITE || kind == OS_SPI_TRANSFER)
         {
-            result = os_bus_guest_data(OS_HOST_READ32(record + 4U), length, &write);
+            result = os_bus_guest_data(&buffers, OS_HOST_READ32(record + 4U), length, OS_GUEST_IN, &write);
         }
         if (result == 0 && (kind == OS_SPI_READ || kind == OS_SPI_TRANSFER))
         {
-            result = os_bus_guest_data(OS_HOST_READ32(record + 8U), length, &read);
+            result = os_bus_guest_data(&buffers, OS_HOST_READ32(record + 8U), length, OS_GUEST_OUT, &read);
         }
         if (result < 0)
         {
+            os_bus_buffers_drop(&buffers);
             OS_HOST_RETURN(result);
         }
         ops[index].kind = (uint8_t)kind;
@@ -1458,9 +1543,12 @@ static OS_HOST_FUNCTION(os_spi_call_transaction)
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
+        os_bus_buffers_drop(&buffers);
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    *raw_return = os_abi_error(os_spi_transaction(id, ops, count));
+    status = os_spi_transaction(id, ops, count);
+    os_bus_buffers_end(OS_BUS_SPI, &buffers, status);
+    *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
@@ -1493,12 +1581,13 @@ static OS_HOST_FUNCTION(os_onewire_call_open)
     OS_HOST_ARG(uint64_t, rom);
     OS_HOST_ARG(uint32_t, flags);
     const char* bus = NULL;
+    char bus_storage[OS_ABI_NAME_MAX];
     uint32_t id = 0U;
     int32_t handle = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
-    handle = os_abi_read_name(bus_address, bus_length, &bus);
+    handle = os_abi_read_name(bus_address, bus_length, bus_storage, &bus);
     if (handle < 0)
     {
         OS_HOST_RETURN(handle);
@@ -1530,8 +1619,9 @@ static OS_HOST_FUNCTION(os_onewire_call_transaction)
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_onewire_driver, handle, &id);
     OsOneWireOp ops[OS_BUS_MAX_OPS];
-    uint8_t* records = NULL;
+    OsBusBuffers buffers = { { { 0 } }, 0U };
     uint32_t index = 0U;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
@@ -1542,28 +1632,37 @@ static OS_HOST_FUNCTION(os_onewire_call_transaction)
     {
         OS_HOST_RETURN(-WR_ELIMIT);
     }
-    if (count > 0U && os_guest_memory(ops_address, count * 12U, &records) != OS_STATUS_OK)
+    if (count > 0U && os_guest_check(ops_address, count * 12U) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
     for (index = 0U; index < count; ++index)
     {
-        const uint8_t* record = records + index * 12U;
-        uint32_t kind = OS_HOST_READ32(record);
-        uint32_t length = OS_HOST_READ32(record + 8U);
-        /* Bit ops use whole bytes, a pull-up and a reset none. */
-        uint32_t bytes = kind == OS_ONEWIRE_WRITE || kind == OS_ONEWIRE_READ ? length
-                         : kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS ? (length + 7U) / 8U
-                                                                                         : 0U;
+        uint8_t record[12];
+        uint32_t kind = 0U;
+        uint32_t length = 0U;
+        uint32_t bytes = 0U;
         int32_t result = 0;
+
+        (void)os_guest_read(ops_address + index * 12U, record, sizeof(record));
+        kind = OS_HOST_READ32(record);
+        length = OS_HOST_READ32(record + 8U);
+        /* Bit ops use whole bytes, a pull-up and a reset none. */
+        bytes = kind == OS_ONEWIRE_WRITE || kind == OS_ONEWIRE_READ ? length
+                : kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS ? (length + 7U) / 8U
+                                                                                : 0U;
         if (kind < OS_ONEWIRE_WRITE || kind > OS_ONEWIRE_RESET ||
             ((kind == OS_ONEWIRE_WRITE_BITS || kind == OS_ONEWIRE_READ_BITS) && length > 0xFFFFFFF8U))
         {
+            os_bus_buffers_drop(&buffers);
             OS_HOST_RETURN(-WR_EINVAL);
         }
-        result = os_bus_guest_data(OS_HOST_READ32(record + 4U), bytes, &ops[index].data);
+        result = os_bus_guest_data(&buffers, OS_HOST_READ32(record + 4U), bytes,
+                                   kind == OS_ONEWIRE_WRITE || kind == OS_ONEWIRE_WRITE_BITS ? OS_GUEST_IN : OS_GUEST_OUT,
+                                   &ops[index].data);
         if (result < 0)
         {
+            os_bus_buffers_drop(&buffers);
             OS_HOST_RETURN(result);
         }
         ops[index].kind = (uint8_t)kind;
@@ -1572,9 +1671,12 @@ static OS_HOST_FUNCTION(os_onewire_call_transaction)
     /* A port working in the background leaves the program waiting; the end writes the result. */
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
+        os_bus_buffers_drop(&buffers);
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    *raw_return = os_abi_error(os_onewire_transaction(id, ops, count));
+    status = os_onewire_transaction(id, ops, count);
+    os_bus_buffers_end(OS_BUS_ONEWIRE, &buffers, status);
+    *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
@@ -1587,14 +1689,15 @@ static OS_HOST_FUNCTION(os_onewire_call_search)
     OS_HOST_ARG(uint32_t, state_address);
     OS_HOST_ARG(uint32_t, flags);
     const char* bus = NULL;
-    uint8_t* memory = NULL;
+    char bus_storage[OS_ABI_NAME_MAX];
+    uint8_t memory[16];
     OsOneWireSearch state;
     uint8_t found = 0U;
     int32_t result = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
-    result = os_abi_read_name(bus_address, bus_length, &bus);
+    result = os_abi_read_name(bus_address, bus_length, bus_storage, &bus);
     if (result < 0)
     {
         OS_HOST_RETURN(result);
@@ -1603,7 +1706,7 @@ static OS_HOST_FUNCTION(os_onewire_call_search)
     {
         OS_HOST_RETURN(-WR_EINVAL);
     }
-    if (os_guest_memory(state_address, 16U, &memory) != OS_STATUS_OK)
+    if (os_guest_read(state_address, memory, sizeof(memory)) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
@@ -1618,6 +1721,7 @@ static OS_HOST_FUNCTION(os_onewire_call_search)
     OS_HOST_WRITE64(memory, state.rom);
     OS_HOST_WRITE32(memory + 8U, state.discrepancy);
     OS_HOST_WRITE32(memory + 12U, state.done);
+    (void)os_guest_write(state_address, memory, sizeof(memory));
     OS_HOST_RETURN((int32_t)found);
 }
 
