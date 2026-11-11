@@ -34,6 +34,22 @@
 #define OS_PAGE_MAX_WRITES 4U
 #endif
 
+/*
+ * Flags the store's side may read or set from another thread or core: a
+ * read or write ends with its status written first and done set after it
+ * (release), and the kernel takes done before the status (acquire).
+ */
+#if defined(__STDC_NO_ATOMICS__)
+typedef volatile uint8_t OsPageFlag;
+#define OS_PAGE_FLAG_GET(flag) (flag)
+#define OS_PAGE_FLAG_PUT(flag, value) ((flag) = (uint8_t)(value))
+#else
+#include <stdatomic.h>
+typedef atomic_uchar OsPageFlag;
+#define OS_PAGE_FLAG_GET(flag) atomic_load_explicit(&(flag), memory_order_acquire)
+#define OS_PAGE_FLAG_PUT(flag, value) atomic_store_explicit(&(flag), (unsigned char)(value), memory_order_release)
+#endif
+
 /* A frame the store reads (for a waiting program) or writes (on its way out) in the background. */
 typedef struct OsPageRead
 {
@@ -41,11 +57,11 @@ typedef struct OsPageRead
     uint32_t index;
     uint32_t slot;
     uint32_t task_id;
-    uint8_t busy;
+    OsPageFlag busy;
     uint8_t writing;
-    /* Set by os_page_read_done or os_page_write_done, from anywhere. */
-    volatile uint8_t done;
-    volatile OsStatus status;
+    /* Set by os_page_read_done or os_page_write_done, from anywhere, after status. */
+    OsPageFlag done;
+    OsStatus status;
 } OsPageRead;
 
 static struct
@@ -251,7 +267,7 @@ static OsPageRead* os_page_read_of(uint32_t slot)
 
     for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES; ++i)
     {
-        if (g_page.reads[i].busy && g_page.reads[i].slot == slot)
+        if (OS_PAGE_FLAG_GET(g_page.reads[i].busy) && g_page.reads[i].slot == slot)
         {
             return &g_page.reads[i];
         }
@@ -268,7 +284,7 @@ static WmResult os_page_read_start(void* context, uint32_t slot, uint8_t* frame,
 
     for (i = 0U; i < OS_PAGE_MAX_READS && read == NULL; ++i)
     {
-        read = g_page.reads[i].busy ? NULL : &g_page.reads[i];
+        read = OS_PAGE_FLAG_GET(g_page.reads[i].busy) ? NULL : &g_page.reads[i];
     }
     /* No room to note it, or it failed in the background just now: read it at once. */
     if (read == NULL || slot == g_page.failed_slot)
@@ -280,15 +296,15 @@ static WmResult os_page_read_start(void* context, uint32_t slot, uint8_t* frame,
     read->index = index;
     read->slot = slot;
     read->task_id = os_task_get_id(os_task_get_current());
-    read->done = 0U;
+    OS_PAGE_FLAG_PUT(read->done, 0U);
     read->writing = 0U;
-    read->busy = 1U;
+    OS_PAGE_FLAG_PUT(read->busy, 1U);
     status = g_page.store.read_start(g_page.store.context, slot, frame);
     if (status == OS_STATUS_PENDING)
     {
         return wm_page_wait;
     }
-    read->busy = 0U;
+    OS_PAGE_FLAG_PUT(read->busy, 0U);
     /* The store cannot start another now: read it at once. */
     if (status == OS_STATUS_BUSY)
     {
@@ -313,8 +329,8 @@ static WmResult os_page_finish(void* context, uint32_t slot)
     {
         return NULL;
     }
-    status = read->done ? read->status : g_page.store.finish(g_page.store.context, slot);
-    read->busy = 0U;
+    status = OS_PAGE_FLAG_GET(read->done) ? read->status : g_page.store.finish(g_page.store.context, slot);
+    OS_PAGE_FLAG_PUT(read->busy, 0U);
     if (read->writing)
     {
         /* The memory frees or keeps the frame itself. */
@@ -333,7 +349,7 @@ static WmResult os_page_finish(void* context, uint32_t slot)
 /* A write in the background ended (status): the frame's RAM goes, or it stays, dirty. */
 static void os_page_write_ended(OsPageRead* write, OsStatus status)
 {
-    write->busy = 0U;
+    OS_PAGE_FLAG_PUT(write->busy, 0U);
     --g_page.writes;
     g_page.stores += status == OS_STATUS_OK ? 1U : 0U;
     wm_memory_frame_stored(write->memory, write->index, status == OS_STATUS_OK ? NULL : os_page_store_failed);
@@ -347,9 +363,9 @@ static int os_page_finish_a_write(void)
     for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES; ++i)
     {
         OsPageRead* write = &g_page.reads[i];
-        if (write->busy && write->writing)
+        if (OS_PAGE_FLAG_GET(write->busy) && write->writing)
         {
-            os_page_write_ended(write, write->done ? write->status : g_page.store.finish(g_page.store.context, write->slot));
+            os_page_write_ended(write, OS_PAGE_FLAG_GET(write->done) ? write->status : g_page.store.finish(g_page.store.context, write->slot));
             return 1;
         }
     }
@@ -366,7 +382,7 @@ static WmResult os_page_write_start(void* context, uint32_t* slot, const uint8_t
 
     for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES && write == NULL; ++i)
     {
-        write = g_page.reads[i].busy ? NULL : &g_page.reads[i];
+        write = OS_PAGE_FLAG_GET(g_page.reads[i].busy) ? NULL : &g_page.reads[i];
     }
     if (write == NULL || g_page.writes == OS_PAGE_MAX_WRITES)
     {
@@ -381,9 +397,9 @@ static WmResult os_page_write_start(void* context, uint32_t* slot, const uint8_t
     write->index = index;
     write->slot = chosen;
     write->task_id = 0U;
-    write->done = 0U;
+    OS_PAGE_FLAG_PUT(write->done, 0U);
     write->writing = 1U;
-    write->busy = 1U;
+    OS_PAGE_FLAG_PUT(write->busy, 1U);
     status = g_page.store.write_start(g_page.store.context, chosen, frame);
     if (status == OS_STATUS_PENDING)
     {
@@ -391,7 +407,7 @@ static WmResult os_page_write_start(void* context, uint32_t* slot, const uint8_t
         *slot = chosen;
         return wm_page_wait;
     }
-    write->busy = 0U;
+    OS_PAGE_FLAG_PUT(write->busy, 0U);
     os_page_slot_back(old, chosen);
     /* The store cannot start another now: write it at once. */
     return status == OS_STATUS_BUSY ? os_page_write(context, slot, frame) : os_page_store_failed;
@@ -409,7 +425,7 @@ void os_page_read_done(uint32_t slot, OsStatus status)
     if (read != NULL)
     {
         read->status = status;
-        read->done = 1U;
+        OS_PAGE_FLAG_PUT(read->done, 1U);
     }
 }
 
@@ -420,14 +436,14 @@ void os_page_poll(void)
     for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES; ++i)
     {
         OsPageRead* read = &g_page.reads[i];
-        if (read->busy && read->done && read->writing)
+        if (OS_PAGE_FLAG_GET(read->busy) && OS_PAGE_FLAG_GET(read->done) && read->writing)
         {
             os_page_write_ended(read, read->status);
         }
-        else if (read->busy && read->done)
+        else if (OS_PAGE_FLAG_GET(read->busy) && OS_PAGE_FLAG_GET(read->done))
         {
             OsStatus status = read->status;
-            read->busy = 0U;
+            OS_PAGE_FLAG_PUT(read->busy, 0U);
             if (status == OS_STATUS_OK)
             {
                 ++g_page.loads;
