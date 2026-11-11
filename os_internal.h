@@ -146,6 +146,11 @@ void os_drivers_poll(void);
 void os_drivers_shutdown(void);
 /* Paging ends with the tasks: the page store is forgotten. */
 void os_page_shutdown(void);
+/* Frames the store has read in the background go to their programs, which go on. */
+void os_page_poll(void);
+/* A task waits for a frame read in the background, from the end of its slice; then it goes on. */
+OsStatus os_page_wait_begin(OsTaskHandle task);
+void os_page_wait_end(uint32_t task_id);
 /* The soonest any driver needs polling, in milliseconds (UINT32_MAX: none). */
 uint32_t os_drivers_next_deadline_ms(void);
 /* The kernel clock moved: every driver's time. */
