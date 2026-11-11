@@ -60,7 +60,7 @@ typedef struct OsWasmLibrary* OsWasmLibraryHandle;
  * arrives as a uint32_t address). OS_HOST_RETURN sets the result and returns.
  *
  * The program's memory is reached by address, never through a pointer to
- * all of it: it may be paged, in 4 KiB pieces. OS_HOST_CHECK_ADDR traps a
+ * all of it: it may be paged, in pieces of a frame (4 KiB by default). OS_HOST_CHECK_ADDR traps a
  * range outside the memory; after it, OS_HOST_LOAD32/64 read a value at an
  * address, OS_HOST_STORE8/32/64 write one and OS_HOST_COPY_FROM/TO move a
  * block (linear memory is little-endian, like every target the kernel runs
@@ -573,7 +573,8 @@ OsStatus os_task_load_snapshot(
 );
 
 /*
- * Paging moves single 4 KiB frames of programs' memory, so programs may
+ * Paging moves single frames of programs' memory (4 KiB unless the
+ * interpreter is built with another WM_FRAME_SIZE), so programs may
  * together have more memory than the board has RAM,
  * and a program may have more than RAM itself. With a page store, every
  * program's memory is paged: a frame comes into RAM when the program (or a
@@ -587,7 +588,9 @@ OsStatus os_task_load_snapshot(
  * its slot once stored: one that came back and was only read leaves RAM
  * again without a write.
  *
- * The store has slots numbered from 0, 4096 bytes each; ram_frames is how
+ * The store has slots numbered from 0, each as large as a frame:
+ * wm_frame_size() bytes (WM_FRAME_SIZE, 4096 unless built otherwise; with
+ * 0, memory is never paged and there is no page store). ram_frames is how
  * many frames the kernel keeps in RAM (0: as many as the heap holds). Calls
  * happen from the scheduler or a host call, one at a time. Set the store
  * before creating tasks.
