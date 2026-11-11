@@ -7,6 +7,9 @@
  *
  * A frame keeps its slot once stored, so a frame that came back and was
  * only read leaves RAM again without a write; only dirty frames are written.
+ * Those go like a log: each to the next free slot after the last one
+ * written, freeing the slot it had, so the store sees writes one after
+ * another (what SD cards and flash do fastest) instead of all over it.
  */
 
 #include "os_internal.h"
@@ -24,6 +27,8 @@ static struct
     uint32_t stored;
     uint32_t stores;
     uint32_t loads;
+    /* Where the next frame written goes, or the first free slot after it. */
+    uint32_t head;
     /* The CLOCK hand: a frame's place counting through all memories. */
     uint32_t hand;
 } g_page;
@@ -98,45 +103,53 @@ static int os_page_room(void* context, int again)
     return 1;
 }
 
-static WmResult os_page_write(void* context, uint32_t* slot, const uint8_t* frame)
+static int os_page_slot_used(uint32_t slot)
 {
-    uint32_t index = *slot;
-    (void)context;
+    return (g_page.used[slot / 32U] & (1UL << (slot % 32U))) != 0U;
+}
 
-    /* A frame stored before goes over its own slot. */
-    if (index != 0xFFFFFFFFUL)
-    {
-        if (g_page.store.write(g_page.store.context, index, frame) != OS_STATUS_OK)
-        {
-            return os_page_store_failed;
-        }
-        ++g_page.stores;
-        return NULL;
-    }
-    index = 0U;
-    while (index < g_page.store.slots && (g_page.used[index / 32U] & (1UL << (index % 32U))) != 0U)
-    {
-        ++index;
-    }
-    if (index == g_page.store.slots)
-    {
-        return os_page_store_full;
-    }
-    if (g_page.store.write(g_page.store.context, index, frame) != OS_STATUS_OK)
-    {
-        return os_page_store_failed;
-    }
-    g_page.used[index / 32U] |= 1UL << (index % 32U);
+static void os_page_use_slot(uint32_t slot)
+{
+    g_page.used[slot / 32U] |= 1UL << (slot % 32U);
     ++g_page.stored;
-    ++g_page.stores;
-    *slot = index;
-    return NULL;
 }
 
 static void os_page_free_slot(uint32_t slot)
 {
     g_page.used[slot / 32U] &= ~(1UL << (slot % 32U));
     --g_page.stored;
+}
+
+static WmResult os_page_write(void* context, uint32_t* slot, const uint8_t* frame)
+{
+    uint32_t old = *slot;
+    uint32_t index = g_page.head;
+    uint32_t step = 0U;
+    (void)context;
+
+    /* The frame's old slot is free from now on, unless this write fails. */
+    if (old != 0xFFFFFFFFUL)
+    {
+        os_page_free_slot(old);
+    }
+    while (step < g_page.store.slots && os_page_slot_used(index))
+    {
+        index = index + 1U == g_page.store.slots ? 0U : index + 1U;
+        ++step;
+    }
+    if (step == g_page.store.slots || g_page.store.write(g_page.store.context, index, frame) != OS_STATUS_OK)
+    {
+        if (old != 0xFFFFFFFFUL)
+        {
+            os_page_use_slot(old);
+        }
+        return step == g_page.store.slots ? os_page_store_full : os_page_store_failed;
+    }
+    os_page_use_slot(index);
+    ++g_page.stores;
+    g_page.head = index + 1U == g_page.store.slots ? 0U : index + 1U;
+    *slot = index;
+    return NULL;
 }
 
 static WmResult os_page_read(void* context, uint32_t slot, uint8_t* frame)
