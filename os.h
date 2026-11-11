@@ -616,7 +616,9 @@ typedef struct OsPageStore
      * thread): start reading slot into frame and return OS_STATUS_PENDING,
      * then call os_page_read_done when the read ends, also from an
      * interrupt or another thread; finish waits for a read in flight to end
-     * and returns its status. Meanwhile only the program that touched the
+     * and returns its status. Once finish has returned for a read, its
+     * os_page_read_done must have come already or never come: a late one
+     * could meet a new read of the same slot. Meanwhile only the program that touched the
      * frame waits, and the others run. OS_STATUS_OK: read at once;
      * OS_STATUS_BUSY: it cannot start another read now, and the kernel
      * reads the frame at once with read. Only predecoded code waits: code
