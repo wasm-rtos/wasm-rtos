@@ -6959,14 +6959,51 @@ OsStatus os_guest_check(uint32_t address, uint32_t length)
     return os_host_memory_in_bounds(memory, address, length) ? OS_STATUS_OK : OS_STATUS_OUT_OF_BOUNDS;
 }
 
+/*
+ * What an access to the current task's memory in bounds came to: a failure
+ * there (a paged memory whose frame could not come back) also ends the
+ * program's call with that trap once the host function returns, as if the
+ * program had touched the frame itself.
+ */
+static OsStatus os_guest_fault(WmResult result)
+{
+    if (result != NULL && g_os.current_task != NULL && g_os.current_task->wasm_runtime != NULL)
+    {
+        (void)wm_trap(g_os.current_task->wasm_runtime, result);
+    }
+    return os_memory_status(result);
+}
+
 OsStatus os_guest_read(uint32_t address, void* out, uint32_t length)
 {
-    return os_task_read_memory(g_os.current_task, address, (uint8_t*)out, length);
+    WmMemory* memory = NULL;
+    OsStatus status = os_task_memory(g_os.current_task, &memory);
+
+    if (status != OS_STATUS_OK || memory == NULL)
+    {
+        return status != OS_STATUS_OK || length != 0U || address != 0U ? OS_STATUS_OUT_OF_BOUNDS : OS_STATUS_OK;
+    }
+    if (!os_host_memory_in_bounds(memory, address, length))
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+    return os_guest_fault(wm_memory_read(memory, address, out, length));
 }
 
 OsStatus os_guest_write(uint32_t address, const void* data, uint32_t length)
 {
-    return os_task_write_memory(g_os.current_task, address, (const uint8_t*)data, length);
+    WmMemory* memory = NULL;
+    OsStatus status = os_task_memory(g_os.current_task, &memory);
+
+    if (status != OS_STATUS_OK || memory == NULL)
+    {
+        return status != OS_STATUS_OK || length != 0U || address != 0U ? OS_STATUS_OUT_OF_BOUNDS : OS_STATUS_OK;
+    }
+    if (!os_host_memory_in_bounds(memory, address, length))
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+    return os_guest_fault(wm_memory_write(memory, address, data, length));
 }
 
 /*
@@ -7010,7 +7047,13 @@ static OsStatus os_guest_copy_write_back(const OsGuestKept* copy)
     {
         os_guest_unpin(copy->task_id, copy->address, copy->length);
     }
-    return task != NULL ? os_task_write_memory(task, copy->address, copy->data, copy->length) : OS_STATUS_OK;
+    if (task == NULL)
+    {
+        return OS_STATUS_OK;
+    }
+    /* During the task's own call a failure traps it; a background transfer's end only reports it. */
+    return task == g_os.current_task ? os_guest_write(copy->address, copy->data, copy->length)
+                                     : os_task_write_memory(task, copy->address, copy->data, copy->length);
 }
 
 OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t length, uint8_t access)
@@ -7036,7 +7079,7 @@ OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t 
     {
         return OS_STATUS_OK;
     }
-    status = os_memory_status(wm_memory_pointer(memory, address, length, &buffer->data));
+    status = os_guest_fault(wm_memory_pointer(memory, address, length, &buffer->data));
     if (status != OS_STATUS_OK)
     {
         return status;
@@ -7070,7 +7113,7 @@ OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t 
     copy->task_id = buffer->task_id;
     copy->access = access;
     copy->pinned = 0U;
-    status = os_memory_status(wm_memory_read(memory, address, copy->data, length));
+    status = os_guest_fault(wm_memory_read(memory, address, copy->data, length));
     if (status != OS_STATUS_OK)
     {
         free(copy);
