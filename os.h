@@ -65,7 +65,10 @@ typedef struct OsWasmLibrary* OsWasmLibraryHandle;
  * address, OS_HOST_STORE8/32/64 write one and OS_HOST_COPY_FROM/TO move a
  * block (linear memory is little-endian, like every target the kernel runs
  * on). A port that works on a buffer in place opens an OsGuestBuffer
- * (os_internal.h).
+ * (os_internal.h). In bounds, an access can still fail when the memory is
+ * paged (its frame could not come back from the page store, or into RAM):
+ * the program's call then ends with that trap once the host function
+ * returns, as it would had the program touched the frame itself.
  */
 typedef WmHostFunction OsHostImportFunction;
 
@@ -88,15 +91,15 @@ typedef WmHostFunction OsHostImportFunction;
         if (!os_host_memory_in_bounds(os_host_memory, (uint32_t)(ADDRESS), (uint64_t)(LENGTH))) \
             return os_host_out_of_bounds; \
     } while (0)
-#define OS_HOST_LOAD32(ADDRESS) os_host_load32(os_host_memory, (uint32_t)(ADDRESS))
-#define OS_HOST_LOAD64(ADDRESS) os_host_load64(os_host_memory, (uint32_t)(ADDRESS))
-#define OS_HOST_STORE8(ADDRESS, VALUE) os_host_store8(os_host_memory, (uint32_t)(ADDRESS), (uint8_t)(VALUE))
-#define OS_HOST_STORE32(ADDRESS, VALUE) os_host_store32(os_host_memory, (uint32_t)(ADDRESS), (uint32_t)(VALUE))
-#define OS_HOST_STORE64(ADDRESS, VALUE) os_host_store64(os_host_memory, (uint32_t)(ADDRESS), (uint64_t)(VALUE))
+#define OS_HOST_LOAD32(ADDRESS) os_host_load32(runtime, os_host_memory, (uint32_t)(ADDRESS))
+#define OS_HOST_LOAD64(ADDRESS) os_host_load64(runtime, os_host_memory, (uint32_t)(ADDRESS))
+#define OS_HOST_STORE8(ADDRESS, VALUE) os_host_store8(runtime, os_host_memory, (uint32_t)(ADDRESS), (uint8_t)(VALUE))
+#define OS_HOST_STORE32(ADDRESS, VALUE) os_host_store32(runtime, os_host_memory, (uint32_t)(ADDRESS), (uint32_t)(VALUE))
+#define OS_HOST_STORE64(ADDRESS, VALUE) os_host_store64(runtime, os_host_memory, (uint32_t)(ADDRESS), (uint64_t)(VALUE))
 #define OS_HOST_COPY_FROM(ADDRESS, OUT, LENGTH) \
-    ((void)wm_memory_read(os_host_memory, (uint32_t)(ADDRESS), (OUT), (uint32_t)(LENGTH)))
+    os_host_fault(runtime, wm_memory_read(os_host_memory, (uint32_t)(ADDRESS), (OUT), (uint32_t)(LENGTH)))
 #define OS_HOST_COPY_TO(ADDRESS, DATA, LENGTH) \
-    ((void)wm_memory_write(os_host_memory, (uint32_t)(ADDRESS), (DATA), (uint32_t)(LENGTH)))
+    os_host_fault(runtime, wm_memory_write(os_host_memory, (uint32_t)(ADDRESS), (DATA), (uint32_t)(LENGTH)))
 /* Little-endian values in kernel memory (a record copied out of the program). */
 #define OS_HOST_READ32(POINTER) os_host_read32(POINTER)
 #define OS_HOST_READ64(POINTER) os_host_read64(POINTER)
@@ -116,29 +119,37 @@ static inline int os_host_memory_in_bounds(const WmMemory* memory, uint32_t addr
     (void)wm_memory_data(memory, &size);
     return (uint64_t)address + length <= size;
 }
-static inline uint32_t os_host_load32(const WmMemory* memory, uint32_t address)
+/* An access in bounds that failed (paged memory): the call traps when the host function returns. */
+static inline void os_host_fault(WmRuntime* runtime, WmResult result)
+{
+    if (result != NULL)
+    {
+        (void)wm_trap(runtime, result);
+    }
+}
+static inline uint32_t os_host_load32(WmRuntime* runtime, const WmMemory* memory, uint32_t address)
 {
     uint32_t value = 0U;
-    (void)wm_memory_read(memory, address, &value, sizeof(value));
+    os_host_fault(runtime, wm_memory_read(memory, address, &value, sizeof(value)));
     return value;
 }
-static inline uint64_t os_host_load64(const WmMemory* memory, uint32_t address)
+static inline uint64_t os_host_load64(WmRuntime* runtime, const WmMemory* memory, uint32_t address)
 {
     uint64_t value = 0U;
-    (void)wm_memory_read(memory, address, &value, sizeof(value));
+    os_host_fault(runtime, wm_memory_read(memory, address, &value, sizeof(value)));
     return value;
 }
-static inline void os_host_store8(WmMemory* memory, uint32_t address, uint8_t value)
+static inline void os_host_store8(WmRuntime* runtime, WmMemory* memory, uint32_t address, uint8_t value)
 {
-    (void)wm_memory_write(memory, address, &value, sizeof(value));
+    os_host_fault(runtime, wm_memory_write(memory, address, &value, sizeof(value)));
 }
-static inline void os_host_store32(WmMemory* memory, uint32_t address, uint32_t value)
+static inline void os_host_store32(WmRuntime* runtime, WmMemory* memory, uint32_t address, uint32_t value)
 {
-    (void)wm_memory_write(memory, address, &value, sizeof(value));
+    os_host_fault(runtime, wm_memory_write(memory, address, &value, sizeof(value)));
 }
-static inline void os_host_store64(WmMemory* memory, uint32_t address, uint64_t value)
+static inline void os_host_store64(WmRuntime* runtime, WmMemory* memory, uint32_t address, uint64_t value)
 {
-    (void)wm_memory_write(memory, address, &value, sizeof(value));
+    os_host_fault(runtime, wm_memory_write(memory, address, &value, sizeof(value)));
 }
 static inline uint32_t os_host_read32(const void* pointer)
 {

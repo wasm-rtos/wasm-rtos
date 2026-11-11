@@ -829,7 +829,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_prestat_dir_name)
 }
 
 /* A path a program passes, copied out; longer than the kernel keeps is OS_WASI_ERRNO_NAMETOOLONG. */
-static os_wasi_errno_t os_fs_read_path(WmMemory* os_host_memory, uint32_t address, uint32_t length, char* out)
+static os_wasi_errno_t os_fs_read_path(WmRuntime* runtime, WmMemory* os_host_memory, uint32_t address, uint32_t length, char* out)
 {
     if (!os_host_memory_in_bounds(os_host_memory, address, length))
     {
@@ -873,7 +873,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
     (void)rights_inheriting;
 
     OS_HOST_CHECK_ADDR(out_fd, sizeof(os_wasi_fd_t));
-    error = os_fs_read_path(os_host_memory, path_address, path_len, path);
+    error = os_fs_read_path(runtime, os_host_memory, path_address, path_len, path);
     if (error != OS_WASI_ERRNO_SUCCESS)
     {
         OS_HOST_RETURN(error);
@@ -1274,7 +1274,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_fdstat_get)
 }
 
 /* A WASI filestat, 64 bytes, into the program's memory at buf. */
-static void os_fs_write_filestat(WmMemory* os_host_memory, uint32_t buf, const char* path, const OsFsStat* stat)
+static void os_fs_write_filestat(WmRuntime* runtime, WmMemory* os_host_memory, uint32_t buf, const char* path, const OsFsStat* stat)
 {
     uint8_t filestat[64];
 
@@ -1311,7 +1311,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_filestat_get)
     {
         stat.type = OS_FS_TYPE_DIRECTORY;
         stat.size = 0U;
-        os_fs_write_filestat(os_host_memory, buf, "/", &stat);
+        os_fs_write_filestat(runtime, os_host_memory, buf, "/", &stat);
         OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
     }
     if (file == NULL)
@@ -1320,7 +1320,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_fd_filestat_get)
     }
     stat.type = file->is_directory ? OS_FS_TYPE_DIRECTORY : OS_FS_TYPE_FILE;
     stat.size = file->size;
-    os_fs_write_filestat(os_host_memory, buf, file->path != NULL ? file->path : "", &stat);
+    os_fs_write_filestat(runtime, os_host_memory, buf, file->path != NULL ? file->path : "", &stat);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
@@ -1343,7 +1343,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_filestat_get)
     (void)flags;
 
     OS_HOST_CHECK_ADDR(buf, 64);
-    error = os_fs_read_path(os_host_memory, path_address, path_len, path);
+    error = os_fs_read_path(runtime, os_host_memory, path_address, path_len, path);
     if (error != OS_WASI_ERRNO_SUCCESS)
     {
         OS_HOST_RETURN(error);
@@ -1362,7 +1362,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_filestat_get)
     {
         OS_HOST_RETURN(os_fs_errno(status));
     }
-    os_fs_write_filestat(os_host_memory, buf, normalized, &stat);
+    os_fs_write_filestat(runtime, os_host_memory, buf, normalized, &stat);
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
 
