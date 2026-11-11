@@ -32,6 +32,8 @@ programs, and the same program uses the same fuel on every device.
 - Snapshots and swapping: a program between two slices can be saved and
   continued in a new task, also on another device, or moved out of RAM while
   it waits and brought back when it runs.
+- Paging: with a page store, programs' memory is a cache in RAM of 4 KiB
+  frames, so programs may have more memory than the board has RAM.
 
 ## Building
 
@@ -370,6 +372,30 @@ static const OsSwapPort swap = { sd_card, swap_write, swap_read, swap_discard };
 os_swap_port_set(&swap);
 os_task_swap_out(menu_task);   /* RAM back, until the menu has work to do */
 ```
+
+### Paging
+
+Swapping moves whole tasks; paging moves single 4 KiB frames of programs'
+memory, so a program may have more memory than the board has RAM. Give the
+kernel a page store before creating tasks: slots of 4096 bytes with `write`
+and `read`, backed by a file on an SD card, external SPI RAM or FRAM, or a
+flash partition, and how many frames to keep in RAM. Then every program's
+memory is paged: a frame comes into RAM when it is touched, and when RAM is
+full the kernel stores the frame touched least recently and brings it back
+when it is needed. A program sees nothing of this, only time.
+
+Memory is promised only as far as it can be kept: creating a task or growing
+its memory fails unless all programs' frames fit in RAM frames plus slots,
+so a program never runs out of memory it was given. A port's buffer stays in
+RAM while the port works on it.
+
+```c
+static const OsPageStore store = { sd_card, 256, 24, frame_write, frame_read };
+os_page_store_set(&store);     /* 1 MiB on the card, 96 KiB of RAM for frames */
+```
+
+On an ESP32 with about 250 KiB of free heap, a program with 640 KiB of
+memory runs this way from a file on an SD card.
 
 ### Program output
 
