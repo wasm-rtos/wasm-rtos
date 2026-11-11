@@ -41,6 +41,8 @@ typedef struct OsPulseChannel
     volatile uint32_t count;
     /* The program's buffer for a capture, in items; 0 when sending. */
     uint32_t max;
+    /* Copies of the program's buffers the port works on, written back when it is done. */
+    OsGuestKept* kept;
 } OsPulseChannel;
 
 static struct
@@ -104,6 +106,7 @@ static void os_pulse_deliver(OsPulseChannel* channel)
     {
         channel->count = channel->max;
     }
+    (void)os_guest_kept_close(&channel->kept);
     os_transfer_wait_end(channel->task_id, channel->result, channel->count);
 }
 
@@ -375,21 +378,36 @@ static OS_HOST_FUNCTION(os_pulse_call_open)
     OS_HOST_RETURN(os_driver_open(&os_pulse_driver, name_address, name_length, os_pulse_call_opener, &flags));
 }
 
-/* Items are 32-bit words the port reads in place: they must be aligned. */
-static int32_t os_pulse_guest_items(uint32_t address, uint32_t count, uint32_t** out_items)
+/* Items are 32-bit words the port works on in place: they must be aligned. */
+static int32_t os_pulse_guest_items(uint32_t address, uint32_t count, uint8_t access, OsGuestBuffer* out_items)
 {
-    uint8_t* memory = NULL;
+    OsStatus status = OS_STATUS_OK;
 
     if (count > 0x3FFFFFFFU || (address & 3U) != 0U)
     {
         return count > 0x3FFFFFFFU ? -WR_EFAULT : -WR_EINVAL;
     }
-    if (count > 0U && os_guest_memory(address, count * 4U, &memory) != OS_STATUS_OK)
+    status = os_guest_buffer_open(out_items, address, count * 4U, access);
+    return status == OS_STATUS_OK ? 0 : OS_GUEST_BUFFER_ERROR(status);
+}
+
+/*
+ * The port is done with a program's buffer (status), or works on in the
+ * background (OS_STATUS_PENDING): then a copy waits in the channel until
+ * the end writes it back.
+ */
+static void os_pulse_buffer_end(uint32_t id, OsGuestBuffer* buffer, OsStatus status)
+{
+    OsPulseChannel* channel = os_pulse_slot(id);
+
+    if (status == OS_STATUS_PENDING && channel != NULL)
     {
-        return -WR_EFAULT;
+        os_guest_buffer_keep(buffer, &channel->kept);
     }
-    *out_items = (uint32_t*)(void*)memory;
-    return 0;
+    else
+    {
+        (void)os_guest_buffer_close(buffer);
+    }
 }
 
 static OS_HOST_FUNCTION(os_pulse_call_send)
@@ -401,24 +419,28 @@ static OS_HOST_FUNCTION(os_pulse_call_send)
     OS_HOST_ARG(uint32_t, carrier_hz);
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_pulse_driver, handle, &id);
-    uint32_t* items = NULL;
+    OsGuestBuffer items;
     int32_t result = 0;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    result = os_pulse_guest_items(items_address, count, &items);
+    result = os_pulse_guest_items(items_address, count, OS_GUEST_IN, &items);
     if (result < 0)
     {
         OS_HOST_RETURN(result);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
+        os_guest_buffer_drop(&items);
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    *raw_return = os_abi_error(os_pulse_send(id, items, count, carrier_hz));
+    status = os_pulse_send(id, (const uint32_t*)(void*)items.data, count, carrier_hz);
+    os_pulse_buffer_end(id, &items, status);
+    *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
@@ -435,22 +457,31 @@ static OS_HOST_FUNCTION(os_pulse_call_send_bits)
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_pulse_driver, handle, &id);
     uint32_t timing[4] = { zero_high_ns, zero_low_ns, one_high_ns, one_low_ns };
-    uint8_t* data = NULL;
+    OsGuestBuffer data;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
+    if (length > 0x7FFFFFFFU)
     {
         OS_HOST_RETURN(-WR_EFAULT);
+    }
+    status = os_guest_buffer_open(&data, data_address, length, OS_GUEST_IN);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(OS_GUEST_BUFFER_ERROR(status));
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
+        os_guest_buffer_drop(&data);
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    *raw_return = os_abi_error(os_pulse_send_bits(id, data, length, timing));
+    status = os_pulse_send_bits(id, data.data, length, timing);
+    os_pulse_buffer_end(id, &data, status);
+    *raw_return = os_abi_error(status);
     return os_guest_end();
 }
 
@@ -464,7 +495,7 @@ static OS_HOST_FUNCTION(os_pulse_call_receive)
     OS_HOST_ARG(uint32_t, timeout_ms);
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_pulse_driver, handle, &id);
-    uint32_t* items = NULL;
+    OsGuestBuffer items;
     uint32_t count = 0U;
     int32_t result = 0;
     OsStatus status = OS_STATUS_OK;
@@ -474,17 +505,19 @@ static OS_HOST_FUNCTION(os_pulse_call_receive)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    result = os_pulse_guest_items(items_address, max, &items);
+    result = os_pulse_guest_items(items_address, max, OS_GUEST_OUT, &items);
     if (result < 0)
     {
         OS_HOST_RETURN(result);
     }
     if (os_guest_begin((uint32_t*)raw_return) != OS_STATUS_OK)
     {
+        os_guest_buffer_drop(&items);
         OS_HOST_RETURN(-WR_EFAULT);
     }
     /* Done at once: the count now; in the background, the wakeup writes it. */
-    status = os_pulse_receive(id, items, max, idle_ns, timeout_ms, &count);
+    status = os_pulse_receive(id, (uint32_t*)(void*)items.data, max, idle_ns, timeout_ms, &count);
+    os_pulse_buffer_end(id, &items, status);
     *raw_return = status == OS_STATUS_OK ? (int32_t)count : os_abi_error(status);
     return os_guest_end();
 }

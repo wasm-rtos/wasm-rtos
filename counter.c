@@ -459,7 +459,6 @@ static OS_HOST_FUNCTION(os_counter_call_read)
     OS_HOST_ARG(uint32_t, out_address);
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_counter_driver, handle, &id);
-    uint8_t* out = NULL;
     int32_t count = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
@@ -468,14 +467,14 @@ static OS_HOST_FUNCTION(os_counter_call_read)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    if (os_guest_memory(out_address, 4U, &out) != OS_STATUS_OK)
+    if (os_guest_check(out_address, sizeof(count)) != OS_STATUS_OK)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_counter_read(id, &count);
     if (status == OS_STATUS_OK)
     {
-        OS_HOST_WRITE32(out, (uint32_t)count);
+        (void)os_guest_write(out_address, &count, sizeof(count));
     }
     OS_HOST_RETURN(os_abi_error(status));
 }

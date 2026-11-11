@@ -56,9 +56,16 @@ typedef struct OsWasmLibrary* OsWasmLibraryHandle;
  * their arguments in 32-bit slots, i64 and f64 taking two, and leave their
  * result in the first. OS_HOST_FUNCTION declares one. Inside it,
  * OS_HOST_RETURNS(type) comes first and names the result slot raw_return;
- * OS_HOST_ARG reads the next argument and OS_HOST_ARG_MEM the next one as a
- * pointer into linear memory, which OS_HOST_CHECK_MEM bounds-checks before
- * use. OS_HOST_RETURN sets the result and returns.
+ * OS_HOST_ARG reads the next argument (a pointer into the program's memory
+ * arrives as a uint32_t address). OS_HOST_RETURN sets the result and returns.
+ *
+ * The program's memory is reached by address, never through a pointer to
+ * all of it: it may be paged, in 4 KiB pieces. OS_HOST_CHECK_ADDR traps a
+ * range outside the memory; after it, OS_HOST_LOAD32/64 read a value at an
+ * address, OS_HOST_STORE8/32/64 write one and OS_HOST_COPY_FROM/TO move a
+ * block (linear memory is little-endian, like every target the kernel runs
+ * on). A port that works on a buffer in place opens an OsGuestBuffer
+ * (os_internal.h).
  */
 typedef WmHostFunction OsHostImportFunction;
 
@@ -69,31 +76,69 @@ typedef WmHostFunction OsHostImportFunction;
     TYPE NAME; \
     memcpy(&NAME, os_host_slot, sizeof(TYPE)); \
     os_host_slot += (sizeof(TYPE) + 3U) / 4U
-#define OS_HOST_ARG_MEM(TYPE, NAME) TYPE NAME = (TYPE)OS_HOST_PTR(*os_host_slot++)
-#define OS_HOST_PTR(OFFSET) ((void*)(os_host_memory_base(os_host_memory) + (uint32_t)(OFFSET)))
-#define OS_HOST_OFFSET(POINTER) ((uint32_t)((uint8_t*)(POINTER) - os_host_memory_base(os_host_memory)))
 #define OS_HOST_RETURN(VALUE) \
     do \
     { \
         *raw_return = (VALUE); \
         return NULL; \
     } while (0)
-#define OS_HOST_CHECK_MEM(ADDRESS, LENGTH) \
+#define OS_HOST_CHECK_ADDR(ADDRESS, LENGTH) \
     do \
     { \
-        if (!os_host_memory_check(os_host_memory, (const void*)(ADDRESS), (uint64_t)(LENGTH))) \
+        if (!os_host_memory_in_bounds(os_host_memory, (uint32_t)(ADDRESS), (uint64_t)(LENGTH))) \
             return os_host_out_of_bounds; \
     } while (0)
-/* Linear memory is little-endian, like every target the kernel runs on. */
+#define OS_HOST_LOAD32(ADDRESS) os_host_load32(os_host_memory, (uint32_t)(ADDRESS))
+#define OS_HOST_LOAD64(ADDRESS) os_host_load64(os_host_memory, (uint32_t)(ADDRESS))
+#define OS_HOST_STORE8(ADDRESS, VALUE) os_host_store8(os_host_memory, (uint32_t)(ADDRESS), (uint8_t)(VALUE))
+#define OS_HOST_STORE32(ADDRESS, VALUE) os_host_store32(os_host_memory, (uint32_t)(ADDRESS), (uint32_t)(VALUE))
+#define OS_HOST_STORE64(ADDRESS, VALUE) os_host_store64(os_host_memory, (uint32_t)(ADDRESS), (uint64_t)(VALUE))
+#define OS_HOST_COPY_FROM(ADDRESS, OUT, LENGTH) \
+    ((void)wm_memory_read(os_host_memory, (uint32_t)(ADDRESS), (OUT), (uint32_t)(LENGTH)))
+#define OS_HOST_COPY_TO(ADDRESS, DATA, LENGTH) \
+    ((void)wm_memory_write(os_host_memory, (uint32_t)(ADDRESS), (DATA), (uint32_t)(LENGTH)))
+/* Little-endian values in kernel memory (a record copied out of the program). */
 #define OS_HOST_READ32(POINTER) os_host_read32(POINTER)
 #define OS_HOST_READ64(POINTER) os_host_read64(POINTER)
 #define OS_HOST_WRITE8(POINTER, VALUE) (*(uint8_t*)(POINTER) = (uint8_t)(VALUE))
 #define OS_HOST_WRITE32(POINTER, VALUE) os_host_write32((POINTER), (uint32_t)(VALUE))
 #define OS_HOST_WRITE64(POINTER, VALUE) os_host_write64((POINTER), (uint64_t)(VALUE))
 
-static inline uint8_t* os_host_memory_base(const WmMemory* memory)
+/* Whether length bytes from address lie in the memory. */
+static inline int os_host_memory_in_bounds(const WmMemory* memory, uint32_t address, uint64_t length)
 {
-    return memory != NULL ? wm_memory_data(memory, NULL) : NULL;
+    uint32_t size = 0U;
+
+    if (memory == NULL)
+    {
+        return 0;
+    }
+    (void)wm_memory_data(memory, &size);
+    return (uint64_t)address + length <= size;
+}
+static inline uint32_t os_host_load32(const WmMemory* memory, uint32_t address)
+{
+    uint32_t value = 0U;
+    (void)wm_memory_read(memory, address, &value, sizeof(value));
+    return value;
+}
+static inline uint64_t os_host_load64(const WmMemory* memory, uint32_t address)
+{
+    uint64_t value = 0U;
+    (void)wm_memory_read(memory, address, &value, sizeof(value));
+    return value;
+}
+static inline void os_host_store8(WmMemory* memory, uint32_t address, uint8_t value)
+{
+    (void)wm_memory_write(memory, address, &value, sizeof(value));
+}
+static inline void os_host_store32(WmMemory* memory, uint32_t address, uint32_t value)
+{
+    (void)wm_memory_write(memory, address, &value, sizeof(value));
+}
+static inline void os_host_store64(WmMemory* memory, uint32_t address, uint64_t value)
+{
+    (void)wm_memory_write(memory, address, &value, sizeof(value));
 }
 static inline uint32_t os_host_read32(const void* pointer)
 {
@@ -109,9 +154,7 @@ static inline uint64_t os_host_read64(const void* pointer)
 }
 static inline void os_host_write32(void* pointer, uint32_t value) { memcpy(pointer, &value, sizeof(value)); }
 static inline void os_host_write64(void* pointer, uint64_t value) { memcpy(pointer, &value, sizeof(value)); }
-/* Whether length bytes from address lie in the memory. */
-int os_host_memory_check(const WmMemory* memory, const void* address, uint64_t length);
-/* The trap OS_HOST_CHECK_MEM returns. */
+/* The trap OS_HOST_CHECK_ADDR returns. */
 extern const char os_host_out_of_bounds[];
 
 typedef enum OsStatus
@@ -613,6 +656,7 @@ typedef struct OsTaskMemoryUsage
     uint32_t stack_bytes;            /* interpreter value stack */
     uint32_t stack_peak_bytes;       /* the most of it the task has used, also after it ends */
     uint32_t linear_memory_bytes;    /* the program's linear memory, with spare room from memory.grow */
+    uint32_t resident_memory_bytes;  /* the part of it in RAM now: all of it, or the pages touched when paged */
     uint32_t code_bytes;             /* compiled code pages */
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
     uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */

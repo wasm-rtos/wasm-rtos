@@ -389,12 +389,13 @@ static OS_HOST_FUNCTION(os_display_call_open)
     OS_HOST_ARG(uint32_t, name_length);
     OS_HOST_ARG(uint32_t, flags);
     const char* name = NULL;
+    char name_storage[OS_ABI_NAME_MAX];
     uint32_t id = 0U;
     int32_t handle = 0;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
-    handle = os_abi_read_name(name_address, name_length, &name);
+    handle = os_abi_read_name(name_address, name_length, name_storage, &name);
     if (handle < 0)
     {
         OS_HOST_RETURN(handle);
@@ -448,19 +449,23 @@ static OS_HOST_FUNCTION(os_display_call_write)
     OS_HOST_ARG(uint32_t, length);
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_display_driver, handle, &id);
-    uint8_t* pixels = NULL;
+    OsGuestBuffer pixels;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    if (length > 0U && os_guest_memory(pixels_address, length, &pixels) != OS_STATUS_OK)
+    status = os_guest_buffer_open(&pixels, pixels_address, length, OS_GUEST_IN);
+    if (status != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(-WR_EFAULT);
+        OS_HOST_RETURN(OS_GUEST_BUFFER_ERROR(status));
     }
-    /* The port reads the program's memory in place, during this call only. */
-    OS_HOST_RETURN(os_abi_error(os_display_write(id, x, y, width, height, format, pixels, length)));
+    /* The port reads the pixels during this call only. */
+    status = os_display_write(id, x, y, width, height, format, pixels.data, length);
+    os_guest_buffer_drop(&pixels);
+    OS_HOST_RETURN(os_abi_error(status));
 }
 
 static OS_HOST_FUNCTION(os_display_call_fill)

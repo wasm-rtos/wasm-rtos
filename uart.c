@@ -464,18 +464,27 @@ static OS_HOST_FUNCTION(os_uart_call_read)
     OS_HOST_ARG(uint32_t, max);
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_uart_driver, handle, &id);
-    uint8_t* buffer = NULL;
+    OsGuestBuffer buffer;
+    uint32_t count = 0U;
+    OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
     if (!found)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    if (max > 0x7FFFFFFFU || (max > 0U && os_guest_memory(buffer_address, max, &buffer) != OS_STATUS_OK))
+    if (max > 0x7FFFFFFFU)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    OS_HOST_RETURN((int32_t)os_uart_read(id, buffer, max));
+    status = os_guest_buffer_open(&buffer, buffer_address, max, OS_GUEST_OUT);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(OS_GUEST_BUFFER_ERROR(status));
+    }
+    count = os_uart_read(id, buffer.data, max);
+    (void)os_guest_buffer_close(&buffer);
+    OS_HOST_RETURN((int32_t)count);
 }
 
 static OS_HOST_FUNCTION(os_uart_call_write)
@@ -486,7 +495,7 @@ static OS_HOST_FUNCTION(os_uart_call_write)
     OS_HOST_ARG(uint32_t, length);
     uint32_t id = 0U;
     int found = os_driver_handle_get(&os_uart_driver, handle, &id);
-    uint8_t* data = NULL;
+    OsGuestBuffer data;
     uint32_t written = 0U;
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
@@ -495,11 +504,18 @@ static OS_HOST_FUNCTION(os_uart_call_write)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    if (length > 0x7FFFFFFFU || (length > 0U && os_guest_memory(data_address, length, &data) != OS_STATUS_OK))
+    if (length > 0x7FFFFFFFU)
     {
         OS_HOST_RETURN(-WR_EFAULT);
     }
-    status = os_uart_write(id, data, length, &written);
+    status = os_guest_buffer_open(&data, data_address, length, OS_GUEST_IN);
+    if (status != OS_STATUS_OK)
+    {
+        OS_HOST_RETURN(OS_GUEST_BUFFER_ERROR(status));
+    }
+    /* The port takes the bytes during this call. */
+    status = os_uart_write(id, data.data, length, &written);
+    os_guest_buffer_drop(&data);
     OS_HOST_RETURN(status == OS_STATUS_OK ? (int32_t)written : os_abi_error(status));
 }
 

@@ -164,15 +164,6 @@ int os_name_is(const char* text, uint32_t length, const char* name)
     return strlen(name) == length && memcmp(text, name, length) == 0;
 }
 
-int os_host_memory_check(const WmMemory* memory, const void* address, uint64_t length)
-{
-    uint32_t size = 0U;
-    const uint8_t* base = memory != NULL ? wm_memory_data(memory, &size) : NULL;
-    const uint8_t* at = (const uint8_t*)address;
-
-    return base != NULL && at >= base && (uint64_t)(at - base) + length <= size;
-}
-
 static uint8_t os_signature_type(char letter)
 {
     switch (letter)
@@ -692,13 +683,9 @@ static void os_task_count_fuel(OsTaskHandle task);
 static OsStatus os_validate_entry_function(OsTaskHandle task);
 static OsStatus os_capture_entry_return_value(OsTaskHandle task);
 static OsStatus os_call_entry_function(OsTaskHandle task, WmResult* out_result);
-static OsStatus os_task_get_memory_pointer(
-    OsTaskHandle task,
-    uint32_t wasm_address,
-    uint32_t byte_count,
-    uint8_t** out_memory
-);
-static uint8_t* os_task_linear_memory(OsTaskHandle task, uint32_t* out_size);
+static OsStatus os_task_memory(OsTaskHandle task, WmMemory** out_memory);
+static uint32_t os_task_linear_memory_size(OsTaskHandle task);
+static uint32_t os_task_resident_memory_size(OsTaskHandle task);
 static OsStatus os_task_get_memory_address(
     OsTaskHandle task,
     const void* memory,
@@ -1095,25 +1082,14 @@ OsStatus os_queue_send_wait(
     return status;
 }
 
-OsStatus os_queue_receive_wait(
-    OsQueueHandle queue,
-    void* out_item,
-    uint32_t timeout_ms
-)
+/*
+ * An empty queue: the current task waits for an item, which the sender's
+ * wakeup writes to wasm_output_address in its memory.
+ */
+static OsStatus os_queue_receive_begin_wait(OsQueueHandle queue, uint32_t wasm_output_address, uint32_t timeout_ms)
 {
     OsTaskHandle task = g_os.current_task;
-    uint32_t wasm_output_address = 0U;
-    OsStatus status = os_queue_receive(queue, out_item);
-
-    if (status != OS_STATUS_QUEUE_EMPTY)
-    {
-        if (task != NULL)
-        {
-            task->last_wait_status = status;
-            task->last_wait_value = 0U;
-        }
-        return status;
-    }
+    OsStatus status = OS_STATUS_OK;
 
     if (timeout_ms == 0U)
     {
@@ -1136,19 +1112,6 @@ OsStatus os_queue_receive_wait(
         return status;
     }
 
-    status = os_task_get_memory_address(
-        task,
-        out_item,
-        queue->item_size,
-        &wasm_output_address
-    );
-    if (status != OS_STATUS_OK)
-    {
-        task->last_wait_status = OS_STATUS_UNSUPPORTED;
-        task->last_wait_value = 0U;
-        return OS_STATUS_UNSUPPORTED;
-    }
-
     task->wait_object.queue = queue;
     task->wait_queue_has_wasm_output = 1U;
     task->wait_queue_wasm_output_address = wasm_output_address;
@@ -1160,6 +1123,77 @@ OsStatus os_queue_receive_wait(
     }
 
     return status;
+}
+
+OsStatus os_queue_receive_wait(
+    OsQueueHandle queue,
+    void* out_item,
+    uint32_t timeout_ms
+)
+{
+    OsTaskHandle task = g_os.current_task;
+    uint32_t wasm_output_address = 0U;
+    OsStatus status = os_queue_receive(queue, out_item);
+
+    if (status != OS_STATUS_QUEUE_EMPTY)
+    {
+        if (task != NULL)
+        {
+            task->last_wait_status = status;
+            task->last_wait_value = 0U;
+        }
+        return status;
+    }
+    if (timeout_ms == 0U || task == NULL || task->state != OS_TASK_RUNNING)
+    {
+        return os_queue_receive_begin_wait(queue, 0U, timeout_ms);
+    }
+
+    /* Only a pointer into the task's own one-block memory can be written to later. */
+    status = os_task_get_memory_address(task, out_item, queue->item_size, &wasm_output_address);
+    if (status != OS_STATUS_OK)
+    {
+        task->last_wait_status = OS_STATUS_UNSUPPORTED;
+        task->last_wait_value = 0U;
+        return OS_STATUS_UNSUPPORTED;
+    }
+    return os_queue_receive_begin_wait(queue, wasm_output_address, timeout_ms);
+}
+
+OsStatus os_queue_receive_wait_guest(OsQueueHandle queue, uint32_t address, uint32_t timeout_ms)
+{
+    OsTaskHandle task = g_os.current_task;
+    OsGuestBuffer item;
+    OsStatus status = OS_STATUS_OK;
+
+    if (queue == NULL || !os_queue_is_in_list(queue))
+    {
+        return OS_STATUS_QUEUE_NOT_FOUND;
+    }
+    status = os_guest_buffer_open(&item, address, queue->item_size, OS_GUEST_OUT);
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    status = os_queue_receive(queue, item.data);
+    if (status == OS_STATUS_OK)
+    {
+        status = os_guest_buffer_close(&item);
+    }
+    else
+    {
+        os_guest_buffer_drop(&item);
+    }
+    if (status != OS_STATUS_QUEUE_EMPTY)
+    {
+        if (task != NULL)
+        {
+            task->last_wait_status = status;
+            task->last_wait_value = 0U;
+        }
+        return status;
+    }
+    return os_queue_receive_begin_wait(queue, address, timeout_ms);
 }
 
 uint32_t os_queue_get_count(OsQueueHandle queue)
@@ -3545,7 +3579,8 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
         /* The interpreter keeps two guard slots around the stack. */
         (void)wm_runtime_stack(task->wasm_runtime, &out_usage->stack_bytes);
         out_usage->stack_bytes += 2U * (uint32_t)sizeof(uint32_t);
-        (void)os_task_linear_memory(task, &out_usage->linear_memory_bytes);
+        out_usage->linear_memory_bytes = os_task_linear_memory_size(task);
+        out_usage->resident_memory_bytes = os_task_resident_memory_size(task);
         out_usage->code_bytes = wm_module_code_bytes(task->wasm_module);
     }
     out_usage->stack_peak_bytes = os_task_stack_peak(task);
@@ -3570,8 +3605,18 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
     out_usage->total_bytes = out_usage->image_bytes + out_usage->kernel_bytes +
         (out_usage->interpreter_bytes != 0U
             ? out_usage->interpreter_bytes
-            : out_usage->stack_bytes + out_usage->linear_memory_bytes + out_usage->code_bytes);
+            : out_usage->stack_bytes + out_usage->resident_memory_bytes + out_usage->code_bytes);
     return OS_STATUS_OK;
+}
+
+/* The status for what the interpreter said about a memory access. */
+static OsStatus os_memory_status(WmResult result)
+{
+    if (result == NULL)
+    {
+        return OS_STATUS_OK;
+    }
+    return strncmp(result, "exhaustion", 10U) == 0 ? OS_STATUS_OUT_OF_MEMORY : OS_STATUS_OUT_OF_BOUNDS;
 }
 
 OsStatus os_task_read_memory(
@@ -3581,7 +3626,7 @@ OsStatus os_task_read_memory(
     uint32_t byte_count
 )
 {
-    uint8_t* memory = NULL;
+    WmMemory* memory = NULL;
     OsStatus status = OS_STATUS_OK;
 
     if (byte_count > 0U && out_buffer == NULL)
@@ -3589,18 +3634,16 @@ OsStatus os_task_read_memory(
         return OS_STATUS_INVALID_ARGUMENT;
     }
 
-    status = os_task_get_memory_pointer(task, wasm_address, byte_count, &memory);
+    status = os_task_memory(task, &memory);
     if (status != OS_STATUS_OK)
     {
         return status;
     }
-
-    if (byte_count > 0U)
+    if (memory == NULL)
     {
-        memcpy(out_buffer, memory, byte_count);
+        return byte_count == 0U && wasm_address == 0U ? OS_STATUS_OK : OS_STATUS_OUT_OF_BOUNDS;
     }
-
-    return OS_STATUS_OK;
+    return os_memory_status(wm_memory_read(memory, wasm_address, out_buffer, byte_count));
 }
 
 OsStatus os_task_write_memory(
@@ -3610,7 +3653,7 @@ OsStatus os_task_write_memory(
     uint32_t byte_count
 )
 {
-    uint8_t* memory = NULL;
+    WmMemory* memory = NULL;
     OsStatus status = OS_STATUS_OK;
 
     if (byte_count > 0U && buffer == NULL)
@@ -3618,18 +3661,16 @@ OsStatus os_task_write_memory(
         return OS_STATUS_INVALID_ARGUMENT;
     }
 
-    status = os_task_get_memory_pointer(task, wasm_address, byte_count, &memory);
+    status = os_task_memory(task, &memory);
     if (status != OS_STATUS_OK)
     {
         return status;
     }
-
-    if (byte_count > 0U)
+    if (memory == NULL)
     {
-        memcpy(memory, buffer, byte_count);
+        return byte_count == 0U && wasm_address == 0U ? OS_STATUS_OK : OS_STATUS_OUT_OF_BOUNDS;
     }
-
-    return OS_STATUS_OK;
+    return os_memory_status(wm_memory_write(memory, wasm_address, buffer, byte_count));
 }
 
 const char* os_get_last_error_phase(void)
@@ -5222,25 +5263,30 @@ static OsStatus os_call_entry_function(OsTaskHandle task, WmResult* out_result)
     return OS_STATUS_OK;
 }
 
-/* The task's linear memory, or NULL. */
-static uint8_t* os_task_linear_memory(OsTaskHandle task, uint32_t* out_size)
+/* The size of the task's linear memory, 0 without one. */
+static uint32_t os_task_linear_memory_size(OsTaskHandle task)
+{
+    WmMemory* memory = task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
+    uint32_t size = 0U;
+
+    if (memory != NULL)
+    {
+        (void)wm_memory_data(memory, &size);
+    }
+    return size;
+}
+
+/* The part of the task's linear memory in RAM, 0 without one. */
+static uint32_t os_task_resident_memory_size(OsTaskHandle task)
 {
     WmMemory* memory = task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
 
-    *out_size = 0U;
-    return memory != NULL ? wm_memory_data(memory, out_size) : NULL;
+    return memory != NULL ? wm_memory_resident(memory) : 0U;
 }
 
-static OsStatus os_task_get_memory_pointer(
-    OsTaskHandle task,
-    uint32_t wasm_address,
-    uint32_t byte_count,
-    uint8_t** out_memory
-)
+/* The task's linear memory to reach now; NULL (and OS_STATUS_OK) when the program has none. */
+static OsStatus os_task_memory(OsTaskHandle task, WmMemory** out_memory)
 {
-    uint8_t* memory = NULL;
-    uint32_t memory_size = 0U;
-
     if (task == NULL || out_memory == NULL)
     {
         return OS_STATUS_INVALID_ARGUMENT;
@@ -5263,26 +5309,11 @@ static OsStatus os_task_get_memory_pointer(
         return OS_STATUS_TASK_DEAD;
     }
 
-    memory = os_task_linear_memory(task, &memory_size);
-    if (byte_count > 0U && memory == NULL)
-    {
-        return OS_STATUS_OUT_OF_BOUNDS;
-    }
-
-    if (wasm_address > memory_size)
-    {
-        return OS_STATUS_OUT_OF_BOUNDS;
-    }
-
-    if (byte_count > memory_size - wasm_address)
-    {
-        return OS_STATUS_OUT_OF_BOUNDS;
-    }
-
-    *out_memory = memory != NULL ? memory + wasm_address : NULL;
+    *out_memory = task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
     return OS_STATUS_OK;
 }
 
+/* The wasm address of a host pointer into the task's one-block memory; a paged memory has none. */
 static OsStatus os_task_get_memory_address(
     OsTaskHandle task,
     const void* memory,
@@ -5290,11 +5321,12 @@ static OsStatus os_task_get_memory_address(
     uint32_t* out_wasm_address
 )
 {
-    uint8_t* wasm_memory = NULL;
+    WmMemory* wasm_memory = NULL;
+    uint8_t* data = NULL;
     uint32_t memory_size = 0U;
     uintptr_t memory_address = (uintptr_t)memory;
-    uintptr_t wasm_memory_address = 0U;
     uintptr_t offset = 0U;
+    OsStatus status = OS_STATUS_OK;
 
     if (task == NULL || memory == NULL || out_wasm_address == NULL)
     {
@@ -5303,29 +5335,18 @@ static OsStatus os_task_get_memory_address(
 
     *out_wasm_address = 0U;
 
-    if (!os_task_is_in_list(task))
+    status = os_task_memory(task, &wasm_memory);
+    if (status != OS_STATUS_OK)
     {
-        return OS_STATUS_TASK_NOT_FOUND;
+        return status == OS_STATUS_TASK_DEAD ? OS_STATUS_OUT_OF_BOUNDS : status;
     }
-
-    if (task->wasm_runtime == NULL)
-    {
-        return OS_STATUS_OUT_OF_BOUNDS;
-    }
-
-    wasm_memory = os_task_linear_memory(task, &memory_size);
-    if (wasm_memory == NULL)
+    data = wasm_memory != NULL ? wm_memory_data(wasm_memory, &memory_size) : NULL;
+    if (data == NULL || memory_address < (uintptr_t)data)
     {
         return OS_STATUS_OUT_OF_BOUNDS;
     }
 
-    wasm_memory_address = (uintptr_t)wasm_memory;
-    if (memory_address < wasm_memory_address)
-    {
-        return OS_STATUS_OUT_OF_BOUNDS;
-    }
-
-    offset = memory_address - wasm_memory_address;
+    offset = memory_address - (uintptr_t)data;
     if (offset > (uintptr_t)memory_size ||
         byte_count > memory_size - (uint32_t)offset)
     {
@@ -6912,9 +6933,150 @@ WmResult os_guest_end(void)
     return os_import_wait_end(1U);
 }
 
-OsStatus os_guest_memory(uint32_t address, uint32_t length, uint8_t** out_memory)
+OsStatus os_guest_check(uint32_t address, uint32_t length)
 {
-    return os_task_get_memory_pointer(g_os.current_task, address, length, out_memory);
+    WmMemory* memory = NULL;
+    OsStatus status = os_task_memory(g_os.current_task, &memory);
+
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    return os_host_memory_in_bounds(memory, address, length) ? OS_STATUS_OK : OS_STATUS_OUT_OF_BOUNDS;
+}
+
+OsStatus os_guest_read(uint32_t address, void* out, uint32_t length)
+{
+    return os_task_read_memory(g_os.current_task, address, (uint8_t*)out, length);
+}
+
+OsStatus os_guest_write(uint32_t address, const void* data, uint32_t length)
+{
+    return os_task_write_memory(g_os.current_task, address, (const uint8_t*)data, length);
+}
+
+/* A copy of a buffer's bytes, with what writing it back takes; a kept one is in a list. */
+struct OsGuestKept
+{
+    struct OsGuestKept* next;
+    uint32_t address;
+    uint32_t length;
+    uint32_t task_id;
+    uint32_t access;
+    uint8_t data[];
+};
+
+static OsGuestKept* os_guest_copy_of(const OsGuestBuffer* buffer)
+{
+    return (OsGuestKept*)(void*)(buffer->data - offsetof(OsGuestKept, data));
+}
+
+/* Write a copy back into its task's memory, if the task is still there. */
+static OsStatus os_guest_copy_write_back(const OsGuestKept* copy)
+{
+    OsTaskHandle task = (copy->access & OS_GUEST_OUT) != 0U ? os_task_find_by_id(copy->task_id) : NULL;
+
+    return task != NULL ? os_task_write_memory(task, copy->address, copy->data, copy->length) : OS_STATUS_OK;
+}
+
+OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t length, uint8_t access)
+{
+    WmMemory* memory = NULL;
+    OsGuestKept* copy = NULL;
+    OsStatus status = os_task_memory(g_os.current_task, &memory);
+
+    memset(buffer, 0, sizeof(*buffer));
+    if (status != OS_STATUS_OK)
+    {
+        return status;
+    }
+    if (!os_host_memory_in_bounds(memory, address, length))
+    {
+        return OS_STATUS_OUT_OF_BOUNDS;
+    }
+    buffer->address = address;
+    buffer->length = length;
+    buffer->task_id = g_os.current_task->id;
+    buffer->access = access;
+    if (length == 0U)
+    {
+        return OS_STATUS_OK;
+    }
+    status = os_memory_status(wm_memory_pointer(memory, address, length, &buffer->data));
+    if (status != OS_STATUS_OK || buffer->data != NULL)
+    {
+        return status;
+    }
+    /* Split across pages: the port works on a copy. */
+    copy = (OsGuestKept*)malloc(offsetof(OsGuestKept, data) + length);
+    if (copy == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    copy->next = NULL;
+    copy->address = address;
+    copy->length = length;
+    copy->task_id = buffer->task_id;
+    copy->access = access;
+    status = os_memory_status(wm_memory_read(memory, address, copy->data, length));
+    if (status != OS_STATUS_OK)
+    {
+        free(copy);
+        return status;
+    }
+    buffer->data = copy->data;
+    buffer->copied = 1U;
+    return OS_STATUS_OK;
+}
+
+OsStatus os_guest_buffer_close(OsGuestBuffer* buffer)
+{
+    OsStatus status = buffer->copied ? os_guest_copy_write_back(os_guest_copy_of(buffer)) : OS_STATUS_OK;
+
+    os_guest_buffer_drop(buffer);
+    return status;
+}
+
+void os_guest_buffer_drop(OsGuestBuffer* buffer)
+{
+    if (buffer->copied)
+    {
+        free(os_guest_copy_of(buffer));
+    }
+    buffer->data = NULL;
+    buffer->copied = 0U;
+    buffer->length = 0U;
+}
+
+void os_guest_buffer_keep(OsGuestBuffer* buffer, OsGuestKept** list)
+{
+    if (buffer->copied)
+    {
+        OsGuestKept* copy = os_guest_copy_of(buffer);
+        copy->next = *list;
+        *list = copy;
+    }
+    buffer->data = NULL;
+    buffer->copied = 0U;
+    buffer->length = 0U;
+}
+
+OsStatus os_guest_kept_close(OsGuestKept** list)
+{
+    OsStatus status = OS_STATUS_OK;
+
+    while (*list != NULL)
+    {
+        OsGuestKept* copy = *list;
+        OsStatus one = os_guest_copy_write_back(copy);
+        if (one != OS_STATUS_OK)
+        {
+            status = one;
+        }
+        *list = copy->next;
+        free(copy);
+    }
+    return status;
 }
 
 void** os_task_abi_state(OsTaskHandle task)

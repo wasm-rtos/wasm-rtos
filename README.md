@@ -168,8 +168,9 @@ it as an input without pulls.
 Register each display of the device profile with its size, shape, pixel
 formats and density, and draw through a display port. The kernel checks
 every call, so `write` only ever gets a whole rectangle inside the display
-in a format it accepts; the pixels point into the program's memory and are
-valid during the call. `fill` and `flush` are optional: without `fill`, or
+in a format it accepts; the pixels are the program's buffer (or the kernel's
+copy of it, when the program's memory is paged) and are valid during the
+call. `fill` and `flush` are optional: without `fill`, or
 when it returns `OS_STATUS_UNSUPPORTED` for a display or format, the kernel
 writes rows, and `flush` is for displays that buffer (e-paper, a frame
 sent whole).
@@ -212,8 +213,9 @@ loop report it.
 Register the I2C and SPI buses of the device profile with their speed and
 move bytes through a port. The kernel lends devices on them to programs,
 checks every transaction and drives SPI chip selects through the GPIO port,
-so the port gets whole transactions: a list of ops with pointers into the
-program's memory, valid during the call. A trace hook sees every finished
+so the port gets whole transactions: a list of ops with the program's
+buffers (or the kernel's copies of them, when the program's memory is
+paged), valid until the transaction ends. A trace hook sees every finished
 transaction, for logs and bus analyzers.
 
 ```c
