@@ -1,5 +1,5 @@
 /*
- * Paging: programs' memory in 4 KiB frames with RAM a cache of it, and a
+ * Paging: programs' memory in frames (4 KiB by default) with RAM a cache of it, and a
  * page store the platform gives for the rest. The interpreter moves frames
  * through the pager here; the kernel decides which frame leaves RAM (CLOCK:
  * the first one not touched since the hand last passed it) and keeps the
@@ -494,9 +494,10 @@ int os_page_store_on(void)
     return g_page.on;
 }
 
-/* ---- State images: a snapshot in slots, 4 KiB at a time ---- */
+/* ---- State images: a snapshot in slots, a frame's size at a time ---- */
 
-#define OS_PAGE_SLOT_BYTES 4096U
+/* A slot holds a frame: WM_FRAME_SIZE bytes, as the interpreter is built. */
+#define OS_PAGE_SLOT_BYTES wm_frame_size()
 
 typedef struct OsPageImageStream
 {

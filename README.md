@@ -31,8 +31,8 @@ programs, and the same program uses the same fuel on every device.
   interrupt handlers delivered to waiting programs.
 - Snapshots: a program between two slices can be saved and continued in a
   new task, also on another device.
-- Paging: with a page store, programs' memory is a cache in RAM of 4 KiB
-  frames, so programs may have more memory than the board has RAM, and a
+- Paging: with a page store, programs' memory is a cache in RAM of frames
+  (4 KiB by default), so programs may have more memory than the board has RAM, and a
   waiting program can leave RAM altogether and come back when it runs.
 
 ## Building
@@ -356,10 +356,11 @@ os_counter_add("enc0", 0, &encoder);
 
 ### Paging
 
-Paging moves single 4 KiB frames of programs' memory out of RAM and back,
-so a program may have more memory than the board has RAM. Give the
-kernel a page store before creating tasks: slots of 4096 bytes with `write`
-and `read`, backed by a file on an SD card, external SPI RAM or FRAM, or a
+Paging moves single frames of programs' memory out of RAM and back, so a
+program may have more memory than the board has RAM. Give the kernel a page
+store before creating tasks: slots of a frame's size (`wm_frame_size()`:
+4096 bytes, or what the interpreter is built with as `WM_FRAME_SIZE`, from
+256 for small external RAM to 64 KiB on a desktop) with `write` and `read`, backed by a file on an SD card, external SPI RAM or FRAM, or a
 flash partition, and how many frames to keep in RAM. Then every program's
 memory is paged: a frame comes into RAM when it is touched, and when RAM is
 full the kernel stores the frame touched least recently and brings it back
