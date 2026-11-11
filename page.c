@@ -76,8 +76,6 @@ static struct
     uint32_t loads;
     /* Where the next frame written goes, or the first free slot after it. */
     uint32_t head;
-    /* The CLOCK hand: a frame's place counting through all memories. */
-    uint32_t hand;
     OsPageRead reads[OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES];
     /* Writes in the background now. */
     uint32_t writes;
@@ -105,33 +103,27 @@ static int os_page_reserve(void* context, int32_t frames)
     return 1;
 }
 
-/* Store one frame that was not touched lately: 0 when there is none to take. */
+/*
+ * Take one frame out of RAM that was not touched since the hand last
+ * passed it (CLOCK, over the frames in RAM only): 0 when none may go.
+ */
 static int os_page_take_one(void)
 {
-    uint32_t total = 0U;
-    uint32_t step = 0U;
     WmMemory* memory = NULL;
-
-    for (memory = wm_memory_next(NULL); memory != NULL; memory = wm_memory_next(memory))
-    {
-        total += wm_memory_frames(memory);
-    }
+    uint32_t index = 0U;
+    uint32_t step = 0U;
     /* Two rounds clear every mark, so a third finds a frame if any may go. */
-    for (step = 0U; total != 0U && step < 3U * total; ++step)
+    uint32_t steps = 3U * wm_pager_resident();
+
+    for (step = 0U; step < steps && wm_pager_hand(&memory, &index); ++step)
     {
-        uint32_t at = g_page.hand++ % total;
-        for (memory = wm_memory_next(NULL); memory != NULL; memory = wm_memory_next(memory))
+        if (wm_memory_frame_look(memory, index) == 0)
         {
-            uint32_t frames = wm_memory_frames(memory);
-            if (at < frames)
+            WmResult result = wm_memory_frame_take(memory, index);
+            if (result == NULL || result == wm_page_wait)
             {
-                if (wm_memory_frame_look(memory, at) == 0 && wm_memory_frame_take(memory, at) == NULL)
-                {
-                    return 1;
-                }
-                break;
+                return 1;
             }
-            at -= frames;
         }
     }
     return 0;
