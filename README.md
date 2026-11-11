@@ -385,9 +385,11 @@ full the kernel stores the frame touched least recently and brings it back
 when it is needed. A program sees nothing of this, only time.
 
 Memory is promised only as far as it can be kept: creating a task or growing
-its memory fails unless all programs' frames fit in RAM frames plus slots,
-so a program never runs out of memory it was given. A port's buffer stays in
-RAM while the port works on it.
+its memory fails unless every program's frame could have a slot, so a
+program never runs out of memory it was given. Only dirty frames are
+written: a frame keeps its slot once stored, so one that came back and was
+only read leaves RAM again for free, as one never written leaves as zeros.
+A port's buffer stays in RAM while the port works on it.
 
 ```c
 static const OsPageStore store = { sd_card, 256, 24, frame_write, frame_read };

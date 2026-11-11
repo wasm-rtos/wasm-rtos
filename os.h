@@ -594,13 +594,15 @@ OsStatus os_swap_port_set(const OsSwapPort* port);
  * back when it is touched again.
  *
  * Memory is promised only as far as it can be kept: creating a task or
- * growing its memory fails unless every frame of every program fits in RAM
- * frames plus slots, so a program never runs out of memory it was given.
+ * growing its memory fails unless every frame of every program could have
+ * a slot, so a program never runs out of memory it was given. A frame keeps
+ * its slot once stored: one that came back and was only read leaves RAM
+ * again without a write.
  *
  * The store has slots numbered from 0, 4096 bytes each; ram_frames is how
- * many frames the kernel keeps in RAM (0: as many as the heap holds, and
- * then only the slots count as room). Calls happen from the scheduler or a
- * host call, one at a time. Set the store before creating tasks.
+ * many frames the kernel keeps in RAM (0: as many as the heap holds). Calls
+ * happen from the scheduler or a host call, one at a time. Set the store
+ * before creating tasks.
  */
 typedef struct OsPageStore
 {
@@ -618,9 +620,9 @@ OsStatus os_page_store_set(const OsPageStore* store);
 typedef struct OsPageStats
 {
     uint32_t reserved_frames; /* frames promised to programs */
-    uint32_t limit_frames;    /* how many can be promised: RAM frames plus slots */
+    uint32_t limit_frames;    /* how many can be promised: the slots */
     uint32_t ram_frames;      /* frames in RAM */
-    uint32_t stored_frames;   /* frames in the store's slots */
+    uint32_t stored_frames;   /* slots in use (a frame in RAM may keep one, holding a copy) */
     uint32_t stores;          /* frames written to the store so far */
     uint32_t loads;           /* frames read back so far */
 } OsPageStats;
@@ -700,7 +702,7 @@ typedef struct OsTaskMemoryUsage
     uint32_t stack_peak_bytes;       /* the most of it the task has used, also after it ends */
     uint32_t linear_memory_bytes;    /* the program's linear memory, with spare room from memory.grow */
     uint32_t resident_memory_bytes;  /* the part of it in RAM now: all of it, or the pages touched when paged */
-    uint32_t stored_memory_bytes;    /* the part of it a page store holds */
+    uint32_t stored_memory_bytes;    /* the part of it only a page store holds */
     uint32_t code_bytes;             /* compiled code pages */
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
     uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */

@@ -3,7 +3,10 @@
  * page store the platform gives for the rest. The interpreter moves frames
  * through the pager here; the kernel decides which frame leaves RAM (CLOCK:
  * the first one not touched since the hand last passed it) and keeps the
- * promise that every frame a program was given fits in RAM or a slot.
+ * promise that every frame a program was given has a slot to go to.
+ *
+ * A frame keeps its slot once stored, so a frame that came back and was
+ * only read leaves RAM again without a write; only dirty frames are written.
  */
 
 #include "os_internal.h"
@@ -28,9 +31,10 @@ static struct
 static const char os_page_store_full[] = "exhaustion: the page store has no free slot";
 static const char os_page_store_failed[] = "exhaustion: the page store could not move a frame";
 
+/* Every frame may come to need a slot of its own. */
 static uint32_t os_page_limit(void)
 {
-    return g_page.store.slots + g_page.store.ram_frames;
+    return g_page.store.slots;
 }
 
 static int os_page_reserve(void* context, int32_t frames)
@@ -96,9 +100,20 @@ static int os_page_room(void* context, int again)
 
 static WmResult os_page_write(void* context, uint32_t* slot, const uint8_t* frame)
 {
-    uint32_t index = 0U;
+    uint32_t index = *slot;
     (void)context;
 
+    /* A frame stored before goes over its own slot. */
+    if (index != 0xFFFFFFFFUL)
+    {
+        if (g_page.store.write(g_page.store.context, index, frame) != OS_STATUS_OK)
+        {
+            return os_page_store_failed;
+        }
+        ++g_page.stores;
+        return NULL;
+    }
+    index = 0U;
     while (index < g_page.store.slots && (g_page.used[index / 32U] & (1UL << (index % 32U))) != 0U)
     {
         ++index;
@@ -131,7 +146,6 @@ static WmResult os_page_read(void* context, uint32_t slot, uint8_t* frame)
     {
         return os_page_store_failed;
     }
-    os_page_free_slot(slot);
     ++g_page.loads;
     return NULL;
 }
