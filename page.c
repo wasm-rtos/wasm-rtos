@@ -15,6 +15,10 @@
  * stored frame wait for it while the others run: the read is noted here,
  * the store says when it ends (os_page_read_done, from anywhere), and the
  * scheduler hands the frame over and wakes the program (os_page_poll).
+ * A store that writes in the background takes dirty frames on their way
+ * out the same way: nobody waits, and a frame's RAM goes when its write
+ * ends (os_page_write_done). Frames being written do not count against
+ * the RAM budget, but at most OS_PAGE_MAX_WRITES are.
  */
 
 #include "os_internal.h"
@@ -22,12 +26,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Background reads at once; a read when all are busy is made at once instead. */
+/* Reads and writes in the background at once; one more is made at once instead. */
 #ifndef OS_PAGE_MAX_READS
 #define OS_PAGE_MAX_READS 8U
 #endif
+#ifndef OS_PAGE_MAX_WRITES
+#define OS_PAGE_MAX_WRITES 4U
+#endif
 
-/* A frame the store reads in the background, for a waiting program. */
+/* A frame the store reads (for a waiting program) or writes (on its way out) in the background. */
 typedef struct OsPageRead
 {
     WmMemory* memory;
@@ -35,7 +42,8 @@ typedef struct OsPageRead
     uint32_t slot;
     uint32_t task_id;
     uint8_t busy;
-    /* Set by os_page_read_done, from anywhere. */
+    uint8_t writing;
+    /* Set by os_page_read_done or os_page_write_done, from anywhere. */
     volatile uint8_t done;
     volatile OsStatus status;
 } OsPageRead;
@@ -54,7 +62,9 @@ static struct
     uint32_t head;
     /* The CLOCK hand: a frame's place counting through all memories. */
     uint32_t hand;
-    OsPageRead reads[OS_PAGE_MAX_READS];
+    OsPageRead reads[OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES];
+    /* Writes in the background now. */
+    uint32_t writes;
     /* A slot whose background read failed: the next read of it is made at once. */
     uint32_t failed_slot;
 } g_page;
@@ -111,17 +121,28 @@ static int os_page_take_one(void)
     return 0;
 }
 
+static int os_page_finish_a_write(void);
+
 static int os_page_room(void* context, int again)
 {
     (void)context;
     if (again)
     {
-        return os_page_take_one();
+        /* No heap for a frame: a write ends and its frame's RAM goes, or one more frame leaves now. */
+        if (os_page_finish_a_write())
+        {
+            return 1;
+        }
+        return os_page_take_one() && (g_page.writes == 0U || os_page_finish_a_write());
     }
-    /* Pinned frames may keep RAM over its budget for a while. */
-    while (g_page.store.ram_frames != 0U && wm_pager_resident() >= g_page.store.ram_frames)
+    /* Pinned frames may keep RAM over its budget for a while; frames being written are on their way out. */
+    while (g_page.store.ram_frames != 0U && wm_pager_resident() - g_page.writes >= g_page.store.ram_frames)
     {
-        if (!os_page_take_one())
+        if (g_page.writes == OS_PAGE_MAX_WRITES)
+        {
+            (void)os_page_finish_a_write();
+        }
+        else if (!os_page_take_one())
         {
             break;
         }
@@ -146,14 +167,16 @@ static void os_page_free_slot(uint32_t slot)
     --g_page.stored;
 }
 
-static WmResult os_page_write(void* context, uint32_t* slot, const uint8_t* frame)
+/*
+ * A slot for a dirty frame: the next free one after the last written, and
+ * the slot it had is free from then on. Undone with os_page_slot_back when
+ * the write fails.
+ */
+static uint32_t os_page_next_slot(uint32_t old)
 {
-    uint32_t old = *slot;
     uint32_t index = g_page.head;
     uint32_t step = 0U;
-    (void)context;
 
-    /* The frame's old slot is free from now on, unless this write fails. */
     if (old != 0xFFFFFFFFUL)
     {
         os_page_free_slot(old);
@@ -163,17 +186,44 @@ static WmResult os_page_write(void* context, uint32_t* slot, const uint8_t* fram
         index = index + 1U == g_page.store.slots ? 0U : index + 1U;
         ++step;
     }
-    if (step == g_page.store.slots || g_page.store.write(g_page.store.context, index, frame) != OS_STATUS_OK)
+    if (step == g_page.store.slots)
     {
         if (old != 0xFFFFFFFFUL)
         {
             os_page_use_slot(old);
         }
-        return step == g_page.store.slots ? os_page_store_full : os_page_store_failed;
+        return 0xFFFFFFFFUL;
     }
     os_page_use_slot(index);
-    ++g_page.stores;
     g_page.head = index + 1U == g_page.store.slots ? 0U : index + 1U;
+    return index;
+}
+
+static void os_page_slot_back(uint32_t old, uint32_t index)
+{
+    os_page_free_slot(index);
+    if (old != 0xFFFFFFFFUL)
+    {
+        os_page_use_slot(old);
+    }
+}
+
+static WmResult os_page_write(void* context, uint32_t* slot, const uint8_t* frame)
+{
+    uint32_t old = *slot;
+    uint32_t index = os_page_next_slot(old);
+    (void)context;
+
+    if (index == 0xFFFFFFFFUL)
+    {
+        return os_page_store_full;
+    }
+    if (g_page.store.write(g_page.store.context, index, frame) != OS_STATUS_OK)
+    {
+        os_page_slot_back(old, index);
+        return os_page_store_failed;
+    }
+    ++g_page.stores;
     *slot = index;
     return NULL;
 }
@@ -199,7 +249,7 @@ static OsPageRead* os_page_read_of(uint32_t slot)
 {
     uint32_t i = 0U;
 
-    for (i = 0U; i < OS_PAGE_MAX_READS; ++i)
+    for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES; ++i)
     {
         if (g_page.reads[i].busy && g_page.reads[i].slot == slot)
         {
@@ -231,6 +281,7 @@ static WmResult os_page_read_start(void* context, uint32_t slot, uint8_t* frame,
     read->slot = slot;
     read->task_id = os_task_get_id(os_task_get_current());
     read->done = 0U;
+    read->writing = 0U;
     read->busy = 1U;
     status = g_page.store.read_start(g_page.store.context, slot, frame);
     if (status == OS_STATUS_PENDING)
@@ -264,12 +315,91 @@ static WmResult os_page_finish(void* context, uint32_t slot)
     }
     status = read->done ? read->status : g_page.store.finish(g_page.store.context, slot);
     read->busy = 0U;
+    if (read->writing)
+    {
+        /* The memory frees or keeps the frame itself. */
+        --g_page.writes;
+        g_page.stores += status == OS_STATUS_OK ? 1U : 0U;
+        return status == OS_STATUS_OK ? NULL : os_page_store_failed;
+    }
     if (status == OS_STATUS_OK)
     {
         ++g_page.loads;
     }
     os_page_wait_end(read->task_id);
     return status == OS_STATUS_OK ? NULL : os_page_store_failed;
+}
+
+/* A write in the background ended (status): the frame's RAM goes, or it stays, dirty. */
+static void os_page_write_ended(OsPageRead* write, OsStatus status)
+{
+    write->busy = 0U;
+    --g_page.writes;
+    g_page.stores += status == OS_STATUS_OK ? 1U : 0U;
+    wm_memory_frame_stored(write->memory, write->index, status == OS_STATUS_OK ? NULL : os_page_store_failed);
+}
+
+/* Wait for one write in flight to end: 0 when none is. */
+static int os_page_finish_a_write(void)
+{
+    uint32_t i = 0U;
+
+    for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES; ++i)
+    {
+        OsPageRead* write = &g_page.reads[i];
+        if (write->busy && write->writing)
+        {
+            os_page_write_ended(write, write->done ? write->status : g_page.store.finish(g_page.store.context, write->slot));
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static WmResult os_page_write_start(void* context, uint32_t* slot, const uint8_t* frame, WmMemory* memory, uint32_t index)
+{
+    OsPageRead* write = NULL;
+    uint32_t old = *slot;
+    uint32_t chosen = 0U;
+    OsStatus status = OS_STATUS_OK;
+    uint32_t i = 0U;
+
+    for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES && write == NULL; ++i)
+    {
+        write = g_page.reads[i].busy ? NULL : &g_page.reads[i];
+    }
+    if (write == NULL || g_page.writes == OS_PAGE_MAX_WRITES)
+    {
+        return os_page_write(context, slot, frame);
+    }
+    chosen = os_page_next_slot(old);
+    if (chosen == 0xFFFFFFFFUL)
+    {
+        return os_page_store_full;
+    }
+    write->memory = memory;
+    write->index = index;
+    write->slot = chosen;
+    write->task_id = 0U;
+    write->done = 0U;
+    write->writing = 1U;
+    write->busy = 1U;
+    status = g_page.store.write_start(g_page.store.context, chosen, frame);
+    if (status == OS_STATUS_PENDING)
+    {
+        ++g_page.writes;
+        *slot = chosen;
+        return wm_page_wait;
+    }
+    write->busy = 0U;
+    os_page_slot_back(old, chosen);
+    /* The store cannot start another now: write it at once. */
+    return status == OS_STATUS_BUSY ? os_page_write(context, slot, frame) : os_page_store_failed;
+}
+
+void os_page_write_done(uint32_t slot, OsStatus status)
+{
+    os_page_read_done(slot, status);
 }
 
 void os_page_read_done(uint32_t slot, OsStatus status)
@@ -287,10 +417,14 @@ void os_page_poll(void)
 {
     uint32_t i = 0U;
 
-    for (i = 0U; i < OS_PAGE_MAX_READS; ++i)
+    for (i = 0U; i < OS_PAGE_MAX_READS + OS_PAGE_MAX_WRITES; ++i)
     {
         OsPageRead* read = &g_page.reads[i];
-        if (read->busy && read->done)
+        if (read->busy && read->done && read->writing)
+        {
+            os_page_write_ended(read, read->status);
+        }
+        else if (read->busy && read->done)
         {
             OsStatus status = read->status;
             read->busy = 0U;
@@ -308,7 +442,7 @@ void os_page_poll(void)
     }
 }
 
-static WmPager os_pager = {NULL, os_page_reserve, os_page_room, os_page_write, os_page_read, os_page_drop, NULL, NULL};
+static WmPager os_pager = {NULL, os_page_reserve, os_page_room, os_page_write, os_page_read, os_page_drop, NULL, NULL, NULL};
 
 OsStatus os_page_store_set(const OsPageStore* store)
 {
@@ -319,7 +453,7 @@ OsStatus os_page_store_set(const OsPageStore* store)
         return OS_STATUS_BUSY;
     }
     if (store != NULL && (store->write == NULL || store->read == NULL || store->slots == 0U ||
-                          (store->read_start == NULL) != (store->finish == NULL)))
+                          ((store->read_start != NULL || store->write_start != NULL) && store->finish == NULL)))
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
@@ -340,7 +474,8 @@ OsStatus os_page_store_set(const OsPageStore* store)
         g_page.failed_slot = 0xFFFFFFFFUL;
         /* Background reads only when the store has both halves of them. */
         os_pager.read_start = store->read_start != NULL ? os_page_read_start : NULL;
-        os_pager.finish = store->read_start != NULL ? os_page_finish : NULL;
+        os_pager.write_start = store->write_start != NULL ? os_page_write_start : NULL;
+        os_pager.finish = store->finish != NULL ? os_page_finish : NULL;
         wm_set_pager(&os_pager);
     }
     return OS_STATUS_OK;

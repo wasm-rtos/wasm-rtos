@@ -625,10 +625,19 @@ typedef struct OsPageStore
      */
     OsStatus (*read_start)(void* context, uint32_t slot, void* frame);
     OsStatus (*finish)(void* context, uint32_t slot);
+    /*
+     * Optional, the same for writes: start writing frame to slot and return
+     * OS_STATUS_PENDING, then call os_page_write_done when the write ends.
+     * The frame leaves RAM only then, and nobody waits for it meanwhile;
+     * finish waits for such a write too (it needs finish). OS_STATUS_OK:
+     * written at once; OS_STATUS_BUSY: the kernel writes it at once.
+     */
+    OsStatus (*write_start)(void* context, uint32_t slot, const void* frame);
 } OsPageStore;
 
-/* A background read the store started has ended. */
+/* A background read or write the store started has ended. */
 void os_page_read_done(uint32_t slot, OsStatus status);
+void os_page_write_done(uint32_t slot, OsStatus status);
 
 /* NULL turns paging off. OS_STATUS_BUSY while tasks exist. */
 OsStatus os_page_store_set(const OsPageStore* store);
