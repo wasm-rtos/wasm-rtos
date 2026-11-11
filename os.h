@@ -611,7 +611,24 @@ typedef struct OsPageStore
     uint32_t ram_frames;
     OsStatus (*write)(void* context, uint32_t slot, const void* frame);
     OsStatus (*read)(void* context, uint32_t slot, void* frame);
+    /*
+     * Optional, for a store that reads in the background (DMA, another
+     * thread): start reading slot into frame and return OS_STATUS_PENDING,
+     * then call os_page_read_done when the read ends, also from an
+     * interrupt or another thread; finish waits for a read in flight to end
+     * and returns its status. Meanwhile only the program that touched the
+     * frame waits, and the others run. OS_STATUS_OK: read at once;
+     * OS_STATUS_BUSY: it cannot start another read now, and the kernel
+     * reads the frame at once with read. Only predecoded code waits: code
+     * run in place (WM_PREDECODE off, or a build too large to predecode)
+     * reads frames at once.
+     */
+    OsStatus (*read_start)(void* context, uint32_t slot, void* frame);
+    OsStatus (*finish)(void* context, uint32_t slot);
 } OsPageStore;
+
+/* A background read the store started has ended. */
+void os_page_read_done(uint32_t slot, OsStatus status);
 
 /* NULL turns paging off. OS_STATUS_BUSY while tasks exist. */
 OsStatus os_page_store_set(const OsPageStore* store);

@@ -61,6 +61,7 @@ typedef enum OsTaskWaitType
     OS_TASK_WAIT_ANY,
     /* A bus or pulse transfer in the background: the port uses the task's memory until it ends. */
     OS_TASK_WAIT_TRANSFER,
+    OS_TASK_WAIT_PAGE,
     /* Something outside the kernel's objects, by key (os_signal_wait). */
     OS_TASK_WAIT_SIGNAL
 } OsTaskWaitType;
@@ -3960,6 +3961,7 @@ OsStatus os_schedule(void)
 
     /* What drivers saw in the background, such as edges from interrupt handlers. */
     os_drivers_poll();
+    os_page_poll();
 
     if (g_os.clock_port.now_ms != NULL)
     {
@@ -6334,6 +6336,15 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
         return OS_TASK_RUN_FUEL_EXHAUSTED;
     }
 
+    /* The program touched a frame the page store reads in the background: it waits, the access runs again. */
+    if (result == wm_page_wait && os_page_wait_begin(task) == OS_STATUS_OK)
+    {
+        os_clear_last_error();
+        g_os.preempt_requested = 0U;
+        task->wasm_needs_resume = 1U;
+        return OS_TASK_RUN_SUSPENDED;
+    }
+
     if (result == wm_yielded || (task->wasm_runtime != NULL && wm_is_suspended(task->wasm_runtime)))
     {
         os_clear_last_error();
@@ -7538,6 +7549,30 @@ void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value)
         return;
     }
     os_complete_task_wait(task, status, value);
+    os_recalculate_task_counters();
+}
+
+OsStatus os_page_wait_begin(OsTaskHandle task)
+{
+    if (task == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    /* Outside any host call: nothing to return into. */
+    task->wait_has_return_slot = 0U;
+    task->wait_return_kind = OS_WAIT_RETURN_STATUS;
+    return os_begin_task_wait(task, OS_TASK_WAIT_PAGE, OS_WAIT_FOREVER);
+}
+
+void os_page_wait_end(uint32_t task_id)
+{
+    OsTaskHandle task = os_task_find_by_id(task_id);
+
+    if (task == NULL || task->wait_type != OS_TASK_WAIT_PAGE)
+    {
+        return;
+    }
+    os_complete_task_wait(task, OS_STATUS_OK, 0U);
     os_recalculate_task_counters();
 }
 
