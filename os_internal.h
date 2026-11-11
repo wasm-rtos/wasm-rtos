@@ -146,6 +146,23 @@ void os_drivers_poll(void);
 void os_drivers_shutdown(void);
 /* Paging ends with the tasks: the page store is forgotten. */
 void os_page_shutdown(void);
+/* Whether a page store is set. */
+int os_page_store_on(void);
+/*
+ * A task's state image (a swapped-out task's snapshot without its memory)
+ * in the page store's slots, which it reserves like frames: save writes
+ * what the snapshot gives, load reads it back in order, drop lets the
+ * slots go. Errors leave nothing behind.
+ */
+typedef struct OsPageImage
+{
+    uint32_t* slots;
+    uint32_t count;
+    uint32_t bytes;
+} OsPageImage;
+OsStatus os_page_image_save(OsPageImage* image, WmRuntime* runtime, WmInstance* instance, WmResult* out_result);
+OsStatus os_page_image_load(const OsPageImage* image, WmRuntime* runtime, WmInstance* instance, WmResult* out_result);
+void os_page_image_drop(OsPageImage* image);
 /* Frames the store has read in the background go to their programs, which go on. */
 void os_page_poll(void);
 /* A task waits for a frame read in the background, from the end of its slice; then it goes on. */

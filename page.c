@@ -489,6 +489,175 @@ OsStatus os_page_store_set(const OsPageStore* store)
     return OS_STATUS_OK;
 }
 
+int os_page_store_on(void)
+{
+    return g_page.on;
+}
+
+/* ---- State images: a snapshot in slots, 4 KiB at a time ---- */
+
+#define OS_PAGE_SLOT_BYTES 4096U
+
+typedef struct OsPageImageStream
+{
+    OsPageImage* image;
+    const OsPageImage* source;
+    uint8_t* buffer;
+    uint32_t used;
+    uint32_t next;
+    OsStatus status;
+} OsPageImageStream;
+
+/* The buffer, full or the last part padded, into a slot reserved for it. */
+static OsStatus os_page_image_flush(OsPageImageStream* stream)
+{
+    OsPageImage* image = stream->image;
+    uint32_t* slots = NULL;
+    uint32_t slot = 0U;
+
+    if (!os_page_reserve(NULL, 1))
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    slots = (uint32_t*)realloc(image->slots, ((size_t)image->count + 1U) * sizeof(uint32_t));
+    if (slots == NULL)
+    {
+        os_page_reserve(NULL, -1);
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    image->slots = slots;
+    slot = os_page_next_slot(0xFFFFFFFFUL);
+    if (slot == 0xFFFFFFFFUL)
+    {
+        os_page_reserve(NULL, -1);
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    memset(stream->buffer + stream->used, 0, OS_PAGE_SLOT_BYTES - stream->used);
+    if (g_page.store.write(g_page.store.context, slot, stream->buffer) != OS_STATUS_OK)
+    {
+        os_page_free_slot(slot);
+        os_page_reserve(NULL, -1);
+        return OS_STATUS_ERROR;
+    }
+    ++g_page.stores;
+    image->slots[image->count++] = slot;
+    stream->used = 0U;
+    return OS_STATUS_OK;
+}
+
+static WmResult os_page_image_put(void* context, const void* data, uint32_t size)
+{
+    OsPageImageStream* stream = (OsPageImageStream*)context;
+    const uint8_t* bytes = (const uint8_t*)data;
+
+    while (size > 0U && stream->status == OS_STATUS_OK)
+    {
+        uint32_t n = OS_PAGE_SLOT_BYTES - stream->used < size ? OS_PAGE_SLOT_BYTES - stream->used : size;
+        memcpy(stream->buffer + stream->used, bytes, n);
+        stream->used += n;
+        stream->image->bytes += n;
+        bytes += n;
+        size -= n;
+        if (stream->used == OS_PAGE_SLOT_BYTES)
+        {
+            stream->status = os_page_image_flush(stream);
+        }
+    }
+    return stream->status == OS_STATUS_OK ? NULL : os_page_store_failed;
+}
+
+static WmResult os_page_image_get(void* context, void* data, uint32_t size)
+{
+    OsPageImageStream* stream = (OsPageImageStream*)context;
+    uint8_t* bytes = (uint8_t*)data;
+
+    while (size > 0U && stream->status == OS_STATUS_OK)
+    {
+        uint32_t n = 0U;
+        if (stream->used == OS_PAGE_SLOT_BYTES || stream->next == 0U)
+        {
+            if (stream->next == stream->source->count)
+            {
+                stream->status = OS_STATUS_ERROR;
+                break;
+            }
+            stream->status = g_page.store.read(g_page.store.context, stream->source->slots[stream->next++], stream->buffer);
+            stream->used = 0U;
+            ++g_page.loads;
+            continue;
+        }
+        n = OS_PAGE_SLOT_BYTES - stream->used < size ? OS_PAGE_SLOT_BYTES - stream->used : size;
+        memcpy(bytes, stream->buffer + stream->used, n);
+        stream->used += n;
+        bytes += n;
+        size -= n;
+    }
+    return stream->status == OS_STATUS_OK ? NULL : os_page_store_failed;
+}
+
+OsStatus os_page_image_save(OsPageImage* image, WmRuntime* runtime, WmInstance* instance, WmResult* out_result)
+{
+    OsPageImageStream stream;
+
+    memset(image, 0, sizeof(*image));
+    memset(&stream, 0, sizeof(stream));
+    stream.image = image;
+    stream.buffer = (uint8_t*)malloc(OS_PAGE_SLOT_BYTES);
+    if (!g_page.on || stream.buffer == NULL)
+    {
+        free(stream.buffer);
+        return g_page.on ? OS_STATUS_OUT_OF_MEMORY : OS_STATUS_UNSUPPORTED;
+    }
+    *out_result = wm_snapshot_write_state(runtime, instance, os_page_image_put, &stream);
+    if (*out_result == NULL && stream.used > 0U)
+    {
+        stream.status = os_page_image_flush(&stream);
+    }
+    free(stream.buffer);
+    if (*out_result != NULL || stream.status != OS_STATUS_OK)
+    {
+        os_page_image_drop(image);
+        return stream.status != OS_STATUS_OK ? stream.status : OS_STATUS_WASM_ERROR;
+    }
+    return OS_STATUS_OK;
+}
+
+OsStatus os_page_image_load(const OsPageImage* image, WmRuntime* runtime, WmInstance* instance, WmResult* out_result)
+{
+    OsPageImageStream stream;
+
+    memset(&stream, 0, sizeof(stream));
+    stream.source = image;
+    stream.buffer = (uint8_t*)malloc(OS_PAGE_SLOT_BYTES);
+    if (stream.buffer == NULL)
+    {
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    *out_result = wm_snapshot_read(runtime, instance, os_page_image_get, &stream);
+    free(stream.buffer);
+    if (stream.status != OS_STATUS_OK)
+    {
+        return stream.status;
+    }
+    return *out_result == NULL ? OS_STATUS_OK : OS_STATUS_WASM_ERROR;
+}
+
+void os_page_image_drop(OsPageImage* image)
+{
+    uint32_t i = 0U;
+
+    for (i = 0U; i < image->count && g_page.on; ++i)
+    {
+        os_page_free_slot(image->slots[i]);
+    }
+    if (image->count > 0U && g_page.on)
+    {
+        os_page_reserve(NULL, -(int32_t)image->count);
+    }
+    free(image->slots);
+    memset(image, 0, sizeof(*image));
+}
+
 OsStatus os_page_get_stats(OsPageStats* out_stats)
 {
     if (out_stats == NULL)

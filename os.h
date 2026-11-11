@@ -573,31 +573,8 @@ OsStatus os_task_load_snapshot(
 );
 
 /*
- * Swapping moves a task's interpreter state (stack, linear memory, compiled
- * code) out of RAM into storage the platform provides, and brings it back
- * when the task runs again. Unlike a snapshot, the task stays where it is:
- * it keeps waiting, its timers and handles keep working, and whatever its
- * wait delivers meanwhile is applied when it comes back.
- *
- * The port stores one image per task id. write appends: offsets start at 0
- * and grow with each call. read returns bytes written earlier; discard
- * forgets the image. Calls happen from os_task_swap_out, os_task_swap_in and
- * the scheduler, never at the same time.
- */
-typedef struct OsSwapPort
-{
-    void* context;
-    OsStatus (*write)(void* context, uint32_t task_id, uint32_t offset, const void* data, uint32_t size);
-    OsStatus (*read)(void* context, uint32_t task_id, uint32_t offset, void* data, uint32_t size);
-    void (*discard)(void* context, uint32_t task_id);
-} OsSwapPort;
-
-/* NULL turns swapping off; tasks already swapped out keep their images. */
-OsStatus os_swap_port_set(const OsSwapPort* port);
-
-/*
- * Paging moves single 4 KiB frames of programs' memory instead of whole
- * tasks, so programs may together have more memory than the board has RAM,
+ * Paging moves single 4 KiB frames of programs' memory, so programs may
+ * together have more memory than the board has RAM,
  * and a program may have more than RAM itself. With a page store, every
  * program's memory is paged: a frame comes into RAM when the program (or a
  * host call) touches it, and when RAM is full the kernel stores the frame
@@ -684,10 +661,17 @@ typedef struct OsOutputPort
 OsStatus os_output_port_set(const OsOutputPort* port);
 
 /*
- * Write the task out and free its interpreter state. Any task but the one
- * running can be swapped out, waiting or not; a task that has not started
- * frees its state without writing anything. OS_STATUS_UNSUPPORTED without a
- * port or for linked tasks; errors from the port leave the task as it was.
+ * Swapping a task out frees all its RAM but the control block, at once,
+ * through the page store: its state (stack, calls, globals, tables) is
+ * written to the store's slots and its memory's frames go there as they
+ * would one by one; the memory itself stays apart, paged. The task stays
+ * where it is: it keeps waiting, its timers and handles keep working, and a
+ * queue item its wait delivers goes straight into its memory. It comes back
+ * from that state with the same memory, whose frames return as they are
+ * touched. Any task but the one running can be swapped out, waiting or not;
+ * one that has not started frees its state and starts afresh.
+ * OS_STATUS_UNSUPPORTED without a page store or for linked tasks; errors
+ * leave the task as it was.
  */
 OsStatus os_task_swap_out(OsTaskHandle task);
 
@@ -746,7 +730,7 @@ typedef struct OsTaskMemoryUsage
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
     uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */
     uint32_t image_bytes;            /* kernel copy of the module; 0 when it runs in place or the host owns it */
-    uint32_t swap_bytes;             /* size of the image in swap storage while swapped out, else 0 */
+    uint32_t swap_bytes;             /* size of its state in the page store while swapped out, else 0 */
     uint32_t kernel_bytes;           /* task control block */
     uint32_t total_bytes;
 } OsTaskMemoryUsage;
@@ -756,7 +740,8 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
 /*
  * Copy to or from a task's linear memory at a wasm address. The whole range
  * must lie inside the memory (OS_STATUS_OUT_OF_BOUNDS), including addresses
- * near 4 GiB. A swapped-out task has no memory to reach (OS_STATUS_BUSY).
+ * near 4 GiB. A swapped-out task's memory is reached too (its frames come
+ * back); one that never started has none (OS_STATUS_BUSY).
  */
 OsStatus os_task_read_memory(
     OsTaskHandle task,
