@@ -29,11 +29,11 @@ programs, and the same program uses the same fuel on every device.
   library's data, as with ELF shared objects.
 - GPIO by pin name from the device profile, one owner per pin, edges from
   interrupt handlers delivered to waiting programs.
-- Snapshots and swapping: a program between two slices can be saved and
-  continued in a new task, also on another device, or moved out of RAM while
-  it waits and brought back when it runs.
+- Snapshots: a program between two slices can be saved and continued in a
+  new task, also on another device.
 - Paging: with a page store, programs' memory is a cache in RAM of 4 KiB
-  frames, so programs may have more memory than the board has RAM.
+  frames, so programs may have more memory than the board has RAM, and a
+  waiting program can leave RAM altogether and come back when it runs.
 
 ## Building
 
@@ -354,35 +354,31 @@ os_counter_port_set(&pcnt);
 os_counter_add("enc0", 0, &encoder);
 ```
 
-### Swapping
-
-To move idle programs out of RAM, give the kernel somewhere to put them: a
-swap port with `write`, `read` and `discard` for one image per task, backed
-by a file on an SD card, a flash partition, PSRAM or IndexedDB. Then
-`os_task_swap_out(task)` frees the task's linear memory, interpreter stack and
-compiled code, leaving the task control block. The task keeps waiting, its
-timers and handles keep working, and what its wait delivers meanwhile (a
-queue item, a result) is applied when it returns. The scheduler brings it
-back before its next slice. When and what to swap out is the platform's
-choice; a program playing music should stay, a menu waiting for a button can
-go.
-
-```c
-static const OsSwapPort swap = { sd_card, swap_write, swap_read, swap_discard };
-os_swap_port_set(&swap);
-os_task_swap_out(menu_task);   /* RAM back, until the menu has work to do */
-```
-
 ### Paging
 
-Swapping moves whole tasks; paging moves single 4 KiB frames of programs'
-memory, so a program may have more memory than the board has RAM. Give the
+Paging moves single 4 KiB frames of programs' memory out of RAM and back,
+so a program may have more memory than the board has RAM. Give the
 kernel a page store before creating tasks: slots of 4096 bytes with `write`
 and `read`, backed by a file on an SD card, external SPI RAM or FRAM, or a
 flash partition, and how many frames to keep in RAM. Then every program's
 memory is paged: a frame comes into RAM when it is touched, and when RAM is
 full the kernel stores the frame touched least recently and brings it back
 when it is needed. A program sees nothing of this, only time.
+
+A whole task can also leave RAM at once, through the same store:
+`os_task_swap_out(task)` writes its state (stack, calls, globals, tables)
+to a few slots, sends its memory's frames to the store as it would one by
+one, and frees everything else, leaving the task control block. The task
+keeps waiting, its timers and handles keep working, and a queue item its
+wait delivers goes straight into its memory. The scheduler brings it back
+before its next slice, from that state and with the same memory, whose
+frames return as they are touched. When and what to swap out is the
+platform's choice; a program playing music should stay, a menu waiting for
+a button can go.
+
+```c
+os_task_swap_out(menu_task);   /* RAM back, until the menu has work to do */
+```
 
 Memory is promised only as far as it can be kept: creating a task or growing
 its memory fails unless every program's frame could have a slot, so a
