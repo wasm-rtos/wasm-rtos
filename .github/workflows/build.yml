@@ -1,0 +1,64 @@
+name: Build
+
+# The kernel with its interpreter (the vm submodule), built in every
+# configuration of the kernel's and the interpreter's options with warnings
+# as errors, then started and shut down. Its tests run in wasm-rtos-tests.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build every configuration
+        run: |
+          cat > "$RUNNER_TEMP/main.c" <<'EOF'
+          #include "os.h"
+          int main(void)
+          {
+              if (os_init() != OS_STATUS_OK)
+                  return 1;
+              os_schedule();
+              os_shutdown();
+              return 0;
+          }
+          EOF
+          fail=0
+          while read -r flags; do
+            if clang -std=c11 -O1 -Wall -Wextra -Wno-unused-parameter -Werror -I. $flags \
+                 "$RUNNER_TEMP/main.c" *.c vm/source/*.c -lm -o "$RUNNER_TEMP/kernel" &&
+               "$RUNNER_TEMP/kernel"; then
+              echo "ok   [$flags]"
+            else
+              echo "FAIL [$flags]"
+              fail=1
+            fi
+          done <<'EOF'
+
+          -DOS_HAS_PROCESSES=0
+          -DOS_HAS_FS=0
+          -DOS_HAS_WASI=0
+          -DOS_HAS_DYLINK=1
+          -DOS_HAS_MEMORY_ACCOUNTING=1
+          -DOS_HAS_DYLINK=1 -DOS_HAS_MEMORY_ACCOUNTING=1
+          -DOS_HAS_PROCESSES=0 -DOS_HAS_FS=0 -DOS_HAS_WASI=0
+          -DWM_FRAME_SIZE=0
+          -DWM_PREDECODE=0
+          -DWM_HAS_I64=0 -DWM_HAS_REF_TYPES=0 -DWM_HAS_FLOAT=0
+          -DWM_FRAME_SIZE=0 -DWM_PREDECODE=0 -DOS_HAS_PROCESSES=0 -DOS_HAS_FS=0 -DOS_HAS_WASI=0
+          EOF
+          exit $fail
