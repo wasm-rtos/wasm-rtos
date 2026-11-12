@@ -38,6 +38,18 @@ static void* os_vm_allocate(void* pointer, size_t size)
     }
     return moved + 1;
 }
+
+/* Predecoded records are a cache every task shares and none owns (wm_set_code_allocator): charged to none. */
+static void* os_vm_code_allocate(void* pointer, size_t size)
+{
+    OsMemoryAccount* account = g_os_memory_account;
+    void* result;
+
+    g_os_memory_account = NULL;
+    result = os_vm_allocate(pointer, size);
+    g_os_memory_account = account;
+    return result;
+}
 #endif
 
 static OsHostFunctionNode* g_os_host_functions;
@@ -231,6 +243,7 @@ OsStatus os_init(void)
 #endif
 #if OS_HAS_MEMORY_ACCOUNTING
     wm_set_allocator(os_vm_allocate);
+    wm_set_code_allocator(os_vm_code_allocate);
 #endif
     g_os.initialized = 1U;
     os_clear_last_error();
@@ -899,6 +912,20 @@ static WmResult os_resolve_import(
 
 static OsStatus os_find_entry_function(OsTaskHandle task, const char* entry_function_name);
 
+/*
+ * Out of memory while making a program: the code cache's records (only a
+ * speed-up, made again when called) go, and it gets one more try.
+ */
+static uint8_t os_retry_without_code_cache(WmResult result)
+{
+    if (result == NULL || strncmp(result, "exhaustion", 10) != 0 || wm_code_cache_bytes() == 0U)
+    {
+        return 0U;
+    }
+    wm_code_cache_trim(0U);
+    return 1U;
+}
+
 OsStatus os_task_create_wasm(
     OsTaskHandle task,
     uint8_t* wasm_bytes,
@@ -915,6 +942,11 @@ OsStatus os_task_create_wasm(
 
     /* Frames: one per 64 bytes of stack, enough for calls that keep a few values each. */
     task->wasm_runtime = wm_runtime_new(stack_size, stack_size / 64U < 32U ? 32U : stack_size / 64U);
+    if (task->wasm_runtime == NULL && wm_code_cache_bytes() != 0U)
+    {
+        wm_code_cache_trim(0U);
+        task->wasm_runtime = wm_runtime_new(stack_size, stack_size / 64U < 32U ? 32U : stack_size / 64U);
+    }
     if (task->wasm_runtime == NULL)
     {
         return OS_STATUS_OUT_OF_MEMORY;
@@ -924,6 +956,10 @@ OsStatus os_task_create_wasm(
     task->wasm_stack_base = stack;
 
     result = wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+    if (os_retry_without_code_cache(result))
+    {
+        result = wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+    }
     if (result != NULL)
     {
         OsStatus status = os_wasm_result_to_status(result);
@@ -967,6 +1003,10 @@ OsStatus os_task_create_wasm(
     if (kept != NULL)
     {
         result = wm_instantiate_with_memory(&task->wasm_instance, task->wasm_module, kept, os_resolve_import, &link);
+        if (task->wasm_instance == NULL && os_retry_without_code_cache(result))
+        {
+            result = wm_instantiate_with_memory(&task->wasm_instance, task->wasm_module, kept, os_resolve_import, &link);
+        }
         if (task->wasm_instance != NULL && wm_instance_memory(task->wasm_instance) == kept)
         {
             task->swapped_memory = NULL;
@@ -975,6 +1015,10 @@ OsStatus os_task_create_wasm(
     else
     {
         result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
+        if (task->wasm_instance == NULL && os_retry_without_code_cache(result))
+        {
+            result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
+        }
     }
     if (result != NULL)
     {
