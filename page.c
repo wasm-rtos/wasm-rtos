@@ -142,6 +142,29 @@ static int os_page_block(void* context, uint32_t frames)
            (uint64_t)wm_pager_resident() - g_page.writes + frames <= g_page.store.ram_frames;
 }
 
+void os_page_block_in(WmMemory* memory)
+{
+    uint32_t frames = 0U;
+    uint32_t stored = 0U;
+    if (memory == NULL || g_page.store.slots == 0U || wm_memory_block_frames(memory) != 0U ||
+        (frames = wm_memory_frames(memory)) == 0U)
+    {
+        return;
+    }
+    /* Room for all of it besides the frames of it that are in RAM already. */
+    if (g_page.store.ram_frames != 0U &&
+        (uint64_t)wm_pager_resident() - wm_memory_resident(memory) / wm_frame_size() + frames > g_page.store.ram_frames)
+    {
+        return;
+    }
+    stored = wm_memory_stored(memory) / wm_frame_size();
+    if (stored * 4U > frames)
+    {
+        return;
+    }
+    (void)wm_memory_block_in(memory);
+}
+
 static int os_page_finish_a_write(void);
 
 /*

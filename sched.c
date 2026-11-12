@@ -705,6 +705,11 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
     }
 
     task->wasm_stack_base = wm_runtime_stack(task->wasm_runtime, NULL);
+    /* Paged while RAM was short: one block again, at full speed, when it has room. */
+    if (task->wasm_started && task->wasm_instance != NULL)
+    {
+        os_page_block_in(wm_instance_memory(task->wasm_instance));
+    }
     wm_set_fuel(task->wasm_runtime,
                 OS_TASK_SLICE_FUEL > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)OS_TASK_SLICE_FUEL);
     task->fuel_taken_back = 0U;

@@ -577,6 +577,8 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
         out_usage->resident_memory_bytes = os_task_resident_memory_size(task);
         out_usage->stored_memory_bytes = task->wasm_instance != NULL && wm_instance_memory(task->wasm_instance) != NULL
             ? wm_memory_stored(wm_instance_memory(task->wasm_instance)) : 0U;
+        out_usage->block_memory_bytes = task->wasm_instance != NULL && wm_instance_memory(task->wasm_instance) != NULL
+            ? wm_memory_block_frames(wm_instance_memory(task->wasm_instance)) * wm_frame_size() : 0U;
         out_usage->code_bytes = wm_module_code_bytes(task->wasm_module);
     }
     out_usage->stack_peak_bytes = os_task_stack_peak(task);

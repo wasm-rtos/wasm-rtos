@@ -268,7 +268,11 @@ and when RAM is full the kernel stores a frame not touched lately and brings
 it back when it is needed. When RAM runs short the coldest memory goes
 first: a frame of a program that is not running, then the whole block of a
 program that waits (it goes on paged when it wakes), then the running
-program's own frames. A program sees nothing of this, only time.
+program's own frames. When RAM has room again, a paged memory goes back
+into one block before its program's next slice, if no more than a quarter
+of it is left in the store to read back; `block_memory_bytes` in
+`os_task_get_memory_usage` tells whether it is. A program sees nothing of
+this, only time.
 
 A whole task can also leave RAM at once, through the same store:
 `os_task_swap_out(task)` writes its state (stack, calls, globals, tables)
