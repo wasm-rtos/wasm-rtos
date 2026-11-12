@@ -280,6 +280,32 @@ uint8_t os_task_is_swapped(OsTaskHandle task)
     return task != NULL && os_task_is_in_list(task) && task->swapped ? 1U : 0U;
 }
 
+WmMemory* os_task_running_memory(void)
+{
+    OsTaskHandle task = g_os.current_task;
+    return task != NULL && task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
+}
+
+int os_task_block_out_one(int waiting_only)
+{
+    OsTaskHandle task = NULL;
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        WmMemory* memory = task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
+        if (task == g_os.current_task || !task->wasm_started || task->swapped || memory == NULL ||
+            task->wait_type == OS_TASK_WAIT_TRANSFER || wm_memory_block_frames(memory) == 0U ||
+            (waiting_only && task->state != OS_TASK_WAITING))
+        {
+            continue;
+        }
+        if (wm_memory_block_out(memory) == NULL)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 OsStatus os_task_swap_out(OsTaskHandle task)
 {
     WmResult result = NULL;
@@ -334,6 +360,15 @@ OsStatus os_task_swap_out(OsTaskHandle task)
     if (task->wasm_started)
     {
         WmMemory* memory = wm_instance_memory(task->wasm_instance);
+        /* A memory in one block leaves RAM whole first; its frames are then stored as any paged ones. */
+        result = memory != NULL ? wm_memory_block_out(memory) : NULL;
+        if (result != NULL)
+        {
+            /* As for a failed write of the state: the task stays in RAM. */
+            status = OS_STATUS_ERROR;
+            os_set_last_error(task, "swap_out", result, status);
+            return status;
+        }
         status = os_page_image_save(&task->swap_image, task->wasm_runtime, task->wasm_instance, &result);
         if (status != OS_STATUS_OK)
         {
