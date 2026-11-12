@@ -280,13 +280,23 @@ uint8_t os_task_is_swapped(OsTaskHandle task)
     return task != NULL && os_task_is_in_list(task) && task->swapped ? 1U : 0U;
 }
 
-WmMemory* os_task_running_memory(void)
+/* A waiting task that wakes sooner than this keeps its block when frames will do. */
+#ifndef OS_PAGE_COLD_MS
+#define OS_PAGE_COLD_MS 10U
+#endif
+
+/* Waits, and will not wake within OS_PAGE_COLD_MS. */
+static uint8_t os_task_is_cold(OsTaskHandle task)
 {
-    OsTaskHandle task = g_os.current_task;
-    return task != NULL && task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
+    if (task->state != OS_TASK_WAITING)
+    {
+        return 0U;
+    }
+    return !task->wait_has_timeout ||
+           (!os_time_reached(g_os.tick_ms, task->wake_tick_ms) && task->wake_tick_ms - g_os.tick_ms >= OS_PAGE_COLD_MS);
 }
 
-int os_task_block_out_one(int waiting_only)
+int os_task_block_out_one(int cold_only)
 {
     OsTaskHandle task = NULL;
     for (task = g_os.task_list; task != NULL; task = task->next)
@@ -294,7 +304,7 @@ int os_task_block_out_one(int waiting_only)
         WmMemory* memory = task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
         if (task == g_os.current_task || !task->wasm_started || task->swapped || memory == NULL ||
             task->wait_type == OS_TASK_WAIT_TRANSFER || wm_memory_block_frames(memory) == 0U ||
-            (waiting_only && task->state != OS_TASK_WAITING))
+            (cold_only && !os_task_is_cold(task)))
         {
             continue;
         }

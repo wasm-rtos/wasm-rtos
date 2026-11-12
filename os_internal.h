@@ -171,12 +171,10 @@ void os_page_wait_end(uint32_t task_id);
 /*
  * The memory of another task, in one block, leaves RAM whole
  * (wm_memory_block_out): only a task between two slices (started, not
- * running, no transfer using its memory), and with waiting_only one that
- * waits. 0 when none can.
+ * running, no transfer using its memory), and with cold_only one that waits
+ * with no deadline or one OS_PAGE_COLD_MS away or more. 0 when none can.
  */
-int os_task_block_out_one(int waiting_only);
-/* The memory of the task running now, or NULL. */
-WmMemory* os_task_running_memory(void);
+int os_task_block_out_one(int cold_only);
 /* The soonest any driver needs polling, in milliseconds (UINT32_MAX: none). */
 uint32_t os_drivers_next_deadline_ms(void);
 /* The kernel clock moved: every driver's time. */

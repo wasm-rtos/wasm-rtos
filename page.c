@@ -105,20 +105,20 @@ static int os_page_reserve(void* context, int32_t frames)
 
 /*
  * Take one frame out of RAM that was not touched since the hand last
- * passed it (CLOCK, over the frames in RAM only), none of spare's (NULL:
- * any memory's): 0 when none may go.
+ * passed it (CLOCK, over the frames in RAM only), going at most rounds
+ * times round: 0 when none may go. One round finds only a frame that was
+ * cold already; two clear every mark, so a third finds one if any may go.
  */
-static int os_page_take_one(const WmMemory* spare)
+static int os_page_take_one(uint32_t rounds)
 {
     WmMemory* memory = NULL;
     uint32_t index = 0U;
     uint32_t step = 0U;
-    /* Two rounds clear every mark, so a third finds a frame if any may go. */
-    uint32_t steps = 3U * wm_pager_resident();
+    uint32_t steps = rounds * wm_pager_resident();
 
     for (step = 0U; step < steps && wm_pager_hand(&memory, &index); ++step)
     {
-        if (memory != spare && wm_memory_frame_look(memory, index) == 0)
+        if (wm_memory_frame_look(memory, index) == 0)
         {
             WmResult result = wm_memory_frame_take(memory, index);
             if (result == NULL || result == wm_page_wait)
@@ -145,14 +145,14 @@ static int os_page_block(void* context, uint32_t frames)
 static int os_page_finish_a_write(void);
 
 /*
- * Room for one frame, the coldest memory first: a frame of another task
- * than the running one, then a waiting task's block whole, then the
- * running task's own frames, then the block of a task that is ready.
+ * Room for one frame, the coldest memory first: the block of a task that
+ * waits and will not wake soon, whole (a block keeps no marks of its own
+ * touches, but the kernel knows when the task wakes); then a frame by
+ * CLOCK; then the block of any task between two slices.
  */
 static int os_page_make_room(void)
 {
-    const WmMemory* running = os_task_running_memory();
-    return os_page_take_one(running) || os_task_block_out_one(1) || os_page_take_one(NULL) || os_task_block_out_one(0);
+    return os_task_block_out_one(1) || os_page_take_one(3U) || os_task_block_out_one(0);
 }
 
 static int os_page_room(void* context, int again)
