@@ -175,6 +175,12 @@ void os_page_wait_end(uint32_t task_id);
  * with no deadline or one OS_PAGE_COLD_MS away or more. 0 when none can.
  */
 int os_task_block_out_one(int cold_only);
+/*
+ * Before a task's slice: its paged memory goes back into one block when RAM
+ * has room for all of it (besides the frames of it already there), and at
+ * most a quarter of its frames are only in the store (they are read back).
+ */
+void os_page_block_in(WmMemory* memory);
 /* The soonest any driver needs polling, in milliseconds (UINT32_MAX: none). */
 uint32_t os_drivers_next_deadline_ms(void);
 /* The kernel clock moved: every driver's time. */

@@ -732,6 +732,7 @@ typedef struct OsTaskMemoryUsage
     uint32_t linear_memory_bytes;    /* the program's linear memory, with spare room from memory.grow */
     uint32_t resident_memory_bytes;  /* the part of it in RAM now: all of it, or the pages touched when paged */
     uint32_t stored_memory_bytes;    /* the part of it only a page store holds */
+    uint32_t block_memory_bytes;     /* with a page store: all of it while it is one block, reached at full speed; else 0 */
     uint32_t code_bytes;             /* its module's predecoded code made so far (a cache tasks share, not in interpreter_bytes) */
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
     uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */
