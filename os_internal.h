@@ -489,4 +489,34 @@ void os_transfer_wait_end(uint32_t task_id, OsStatus status, uint32_t value);
 /* End every background transfer of task_id now, through the ports' finish. */
 void os_transfer_finish_task(uint32_t task_id);
 
+/* ---- Saving the whole system (system.c) ------------------------------------ */
+
+/*
+ * The stream os_system_save writes and os_system_restore reads: numbers
+ * little-endian, texts as a length and bytes. The first failure sticks:
+ * OS_STATUS_INVALID_ARGUMENT marks a stream that does not agree with itself.
+ */
+typedef struct OsSystemStream OsSystemStream;
+void os_system_put32(OsSystemStream* stream, uint32_t value);
+void os_system_put64(OsSystemStream* stream, uint64_t value);
+/* A text, or none for NULL. */
+void os_system_put_text(OsSystemStream* stream, const char* text);
+uint32_t os_system_get32(OsSystemStream* stream);
+uint64_t os_system_get64(OsSystemStream* stream);
+/* A text in the heap, or NULL for none or a stream that failed. */
+char* os_system_get_text(OsSystemStream* stream);
+void os_system_fail(OsSystemStream* stream, OsStatus status);
+uint8_t os_system_ok(const OsSystemStream* stream);
+
+/* A task's handles (abi.c). The interface of a device it holds, which cannot be saved yet, or NULL. */
+const char* os_abi_task_device(OsTaskHandle task);
+void os_abi_save_task(OsTaskHandle task, OsSystemStream* stream);
+void os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream);
+#if OS_HAS_FS
+/* A task's open files (fs.c): path and position. */
+void os_fs_save_task(uint32_t task_id, OsSystemStream* stream);
+/* Opens them again when apply is set; why one cannot be (the task is lost), or NULL. */
+const char* os_fs_restore_task(uint32_t task_id, OsSystemStream* stream, uint8_t apply);
+#endif
+
 #endif

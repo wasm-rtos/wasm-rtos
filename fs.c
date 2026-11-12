@@ -691,6 +691,119 @@ void os_fs_shutdown(void)
     g_mount_count = 0U;
 }
 
+void os_fs_save_task(uint32_t task_id, OsSystemStream* stream)
+{
+    OsFsProcess* process = os_fs_find_process(task_id, 0U);
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; process != NULL && index < OS_FS_MAX_FILES; ++index)
+    {
+        count += process->files[index].used ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; count > 0U && index < OS_FS_MAX_FILES; ++index)
+    {
+        const OsFsOpenFile* file = &process->files[index];
+        if (file->used)
+        {
+            os_system_put32(stream, index);
+            os_system_put32(stream, file->is_directory);
+            os_system_put_text(stream, file->path);
+            os_system_put64(stream, file->position);
+            os_system_put64(stream, file->size);
+        }
+    }
+}
+
+/* Open a saved file again in place; why it cannot be, or NULL. */
+static const char* os_fs_reopen(OsFsOpenFile* file, char* path, uint8_t is_directory, uint64_t position,
+                                uint64_t size)
+{
+    OsFsStat stat;
+    OsFsMount* mount = NULL;
+    const char* relative = NULL;
+
+    if (os_fs_stat_normalized(path, &stat) != OS_STATUS_OK ||
+        stat.type != (is_directory ? OS_FS_TYPE_DIRECTORY : OS_FS_TYPE_FILE))
+    {
+        free(path);
+        return "a file it had open is gone";
+    }
+    if (!is_directory)
+    {
+        if (stat.size != size)
+        {
+            free(path);
+            return "a file it had open changed";
+        }
+        mount = os_fs_find_mount(path, &relative);
+        if (mount == NULL || mount->driver->open(mount->context, relative, &file->handle) != OS_STATUS_OK)
+        {
+            free(path);
+            return "a file it had open cannot be opened";
+        }
+        file->driver = mount->driver;
+        file->context = mount->context;
+        file->size = size;
+    }
+    file->path = path;
+    file->is_directory = is_directory;
+    file->position = position;
+    file->used = 1U;
+    return NULL;
+}
+
+const char* os_fs_restore_task(uint32_t task_id, OsSystemStream* stream, uint8_t apply)
+{
+    uint32_t count = os_system_get32(stream);
+    OsFsProcess* process = NULL;
+    const char* reason = NULL;
+    uint32_t read = 0U;
+
+    if (count > OS_FS_MAX_FILES)
+    {
+        os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+        return NULL;
+    }
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        uint32_t index = os_system_get32(stream);
+        uint32_t is_directory = os_system_get32(stream);
+        char* path = os_system_get_text(stream);
+        uint64_t position = os_system_get64(stream);
+        uint64_t size = os_system_get64(stream);
+
+        if (!os_system_ok(stream) || index >= OS_FS_MAX_FILES || is_directory > 1U || path == NULL ||
+            path[0] != '/')
+        {
+            free(path);
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return NULL;
+        }
+        if (!apply || reason != NULL)
+        {
+            free(path);
+            continue;
+        }
+        process = process != NULL ? process : os_fs_find_process(task_id, 1U);
+        if (process == NULL)
+        {
+            free(path);
+            os_system_fail(stream, OS_STATUS_OUT_OF_MEMORY);
+            return NULL;
+        }
+        if (process->files[index].used)
+        {
+            free(path);
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return NULL;
+        }
+        reason = os_fs_reopen(&process->files[index], path, (uint8_t)is_directory, position, size);
+    }
+    return reason;
+}
+
 static uint32_t os_fs_current_task_id(void)
 {
     OsTaskHandle task = os_task_get_current();
@@ -922,7 +1035,7 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
         OS_HOST_RETURN(OS_WASI_ERRNO_MFILE);
     }
 
-    if (stat.type == OS_FS_TYPE_DIRECTORY)
+    /* Kept for files too: a saved system opens them again by path. */
     {
         size_t length = strlen(normalized) + 1U;
         file->path = (char*)malloc(length);
@@ -931,6 +1044,9 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
             OS_HOST_RETURN(OS_WASI_ERRNO_NOMEM);
         }
         memcpy(file->path, normalized, length);
+    }
+    if (stat.type == OS_FS_TYPE_DIRECTORY)
+    {
         file->is_directory = 1U;
     }
     else
@@ -941,6 +1057,8 @@ static OS_HOST_FUNCTION(os_fs_wasi_path_open)
             : OS_STATUS_FILE_NOT_FOUND;
         if (status != OS_STATUS_OK)
         {
+            free(file->path);
+            file->path = NULL;
             OS_HOST_RETURN(os_fs_errno(status));
         }
         file->driver = mount->driver;

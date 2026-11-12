@@ -71,6 +71,12 @@ for (;;)
   and counters, each lent to one program at a time.
 - Snapshots: a program between two slices can be saved and continued in a
   new task, also on another device.
+- Deep sleep without losing work: the whole system (every program with what
+  it waits for, the queues, mutexes, semaphores, events and timers it
+  shares, its children and open files) is saved before the device loses its
+  RAM and restored after; programs go on where they were, the clock with the
+  time slept, and need nothing written for it (programs that hold a device
+  cannot be saved yet).
 - Paging: with a page store, programs' memory is a cache in RAM of frames
   (4 KiB by default), so programs may have more memory than the board has RAM, and a
   waiting program can leave RAM altogether and come back when it runs.
@@ -286,6 +292,9 @@ OsStatus os_page_get_stats(OsPageStats* out_stats);
 OsStatus os_task_swap_out(OsTaskHandle task);
 OsStatus os_task_swap_in(OsTaskHandle task);
 uint8_t os_task_is_swapped(OsTaskHandle task);
+OsStatus os_system_save(OsSnapshotWrite write, void* context);
+OsStatus os_system_restore(OsSnapshotRead read, void* context, OsModuleFind find, void* find_context,
+                           uint32_t slept_ms);
 ```
 
 ### Measuring and errors

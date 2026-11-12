@@ -573,6 +573,37 @@ OsStatus os_task_load_snapshot(
 );
 
 /*
+ * The whole system, for a device that loses its RAM in deep sleep or when
+ * switched off: every task (its program's state, what it waits for, its
+ * notifications, handles, open files, children) and every queue, mutex,
+ * semaphore, event group and timer with what it holds, written to a stream
+ * between two slices (not from inside a task). Modules are not written: a
+ * process started by path is opened from it again, one the kernel copied
+ * is in the stream, and for a task the host created the kernel asks find
+ * by task name; a module of other bytes is refused.
+ *
+ * Saving returns OS_STATUS_BUSY while a transfer or page is on its way (try
+ * after the next slice) and OS_STATUS_UNSUPPORTED while a task holds a
+ * device or runs a dylink.0 program; the last error names the task.
+ *
+ * Restore into a kernel set up as at start (os_init, clock, page store,
+ * drivers, host imports, libraries) that has no task or object yet. The
+ * clock goes on from where it was plus slept_ms, and what fell due during
+ * the sleep is delivered at once. A stream that is cut, of another format
+ * or that does not agree with itself restores nothing: an error, and the
+ * kernel is as before. A task whose module was not found or changed, or
+ * whose open file is gone or changed, ends as a task that traps
+ * (OS_TASK_EXIT_WASM_ERROR, its error text "restore: <why>"); every other
+ * task goes on. The host finds its tasks and objects by their ids, which
+ * are those they had.
+ */
+typedef OsStatus (*OsModuleFind)(void* context, const char* task_name, const uint8_t** out_bytes,
+                                 uint32_t* out_size);
+OsStatus os_system_save(OsSnapshotWrite write, void* context);
+OsStatus os_system_restore(OsSnapshotRead read, void* context, OsModuleFind find, void* find_context,
+                           uint32_t slept_ms);
+
+/*
  * Paging moves single frames of programs' memory (4 KiB unless the
  * interpreter is built with another WM_FRAME_SIZE), so programs may
  * together have more memory than the board has RAM,
