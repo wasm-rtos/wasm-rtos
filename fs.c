@@ -1621,6 +1621,13 @@ typedef struct OsTarEntry
     char name[155U + 1U + 100U + 1U];
 } OsTarEntry;
 
+/* The length of a header's text field: up to its first NUL, or all of it (with standard C only). */
+static uint32_t os_tar_field_length(const uint8_t* field, uint32_t size)
+{
+    const uint8_t* end = (const uint8_t*)memchr(field, '\0', size);
+    return end != NULL ? (uint32_t)(end - field) : size;
+}
+
 /* Entry at *offset, advancing *offset; returns 0 at the end of the archive. */
 static uint8_t os_tar_next(const OsFsTar* tar, uint32_t* offset, OsTarEntry* entry)
 {
@@ -1652,13 +1659,13 @@ static uint8_t os_tar_next(const OsFsTar* tar, uint32_t* offset, OsTarEntry* ent
         /* ustar keeps long paths as prefix "/" name. */
         if (memcmp(header + 257, "ustar", 5) == 0 && header[345] != '\0')
         {
-            uint32_t prefix_length = (uint32_t)strnlen((const char*)header + 345, 155U);
+            uint32_t prefix_length = os_tar_field_length(header + 345, 155U);
             memcpy(entry->name, header + 345, prefix_length);
             entry->name[prefix_length] = '/';
             length = prefix_length + 1U;
         }
         {
-            uint32_t name_length = (uint32_t)strnlen((const char*)header, 100U);
+            uint32_t name_length = os_tar_field_length(header, 100U);
             memcpy(entry->name + length, header, name_length);
             length += name_length;
         }
