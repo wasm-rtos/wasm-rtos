@@ -1716,18 +1716,17 @@ OsStatus os_guest_buffer_open(OsGuestBuffer* buffer, uint32_t address, uint32_t 
     if (buffer->data != NULL)
     {
         /*
-         * A paged memory's frame stays in RAM while the port has a pointer
-         * into it. It is in RAM now, so pinning makes no frame and takes none.
+         * The bytes stay where they are while the port has a pointer into
+         * them: a paged memory's frame stays in RAM, and a block of the frame
+         * pool does not move. They are in RAM now, so pinning makes no frame
+         * and takes none.
          */
-        if (wm_memory_data(memory, NULL) == NULL)
+        if (wm_memory_pin(memory, address, length, 1) != NULL)
         {
-            if (wm_memory_pin(memory, address, length, 1) != NULL)
-            {
-                buffer->data = NULL;
-                return OS_STATUS_OUT_OF_MEMORY;
-            }
-            buffer->pinned = 1U;
+            buffer->data = NULL;
+            return OS_STATUS_OUT_OF_MEMORY;
         }
+        buffer->pinned = 1U;
         return OS_STATUS_OK;
     }
     /* Split across pages: the port works on a copy. */

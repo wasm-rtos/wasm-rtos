@@ -626,6 +626,14 @@ typedef struct OsPageStore
      * written at once; OS_STATUS_BUSY: the kernel writes it at once.
      */
     OsStatus (*write_start)(void* context, uint32_t slot, const void* frame);
+    /*
+     * Optional: the region the frames in RAM come from (external RAM, for
+     * one), os_page_ram_bytes(store) bytes. NULL: the kernel takes it from
+     * the heap when the store is set. With a RAM budget (ram_frames not 0)
+     * frames come only from this pool, never cut up the heap, and a
+     * program's memory in one block is its frames in a row there.
+     */
+    void* ram;
 } OsPageStore;
 
 /* A background read or write the store started has ended. */
@@ -634,6 +642,13 @@ void os_page_write_done(uint32_t slot, OsStatus status);
 
 /* NULL turns paging off. OS_STATUS_BUSY while tasks exist. */
 OsStatus os_page_store_set(const OsPageStore* store);
+/*
+ * The bytes of the frame pool for a store: ram_frames frames, and a few
+ * more for frames on their way out when it writes in the background (they
+ * do not count against the budget until their write ends). 0 without a RAM
+ * budget.
+ */
+uint32_t os_page_ram_bytes(const OsPageStore* store);
 
 /* What paging holds now, across all programs. */
 typedef struct OsPageStats
