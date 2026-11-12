@@ -576,23 +576,26 @@ OsStatus os_task_load_snapshot(
  * The whole system, for a device that loses its RAM in deep sleep or when
  * switched off: every task (its program's state, what it waits for, its
  * notifications, handles, open files, children) and every queue, mutex,
- * semaphore, event group and timer with what it holds, written to a stream
+ * semaphore, event group and timer with what it holds, and every device a
+ * task holds (each driver saves its own, by name), written to a stream
  * between two slices (not from inside a task). Modules are not written: a
  * process started by path is opened from it again, one the kernel copied
  * is in the stream, and for a task the host created the kernel asks find
  * by task name; a module of other bytes is refused.
  *
  * Saving returns OS_STATUS_BUSY while a transfer or page is on its way (try
- * after the next slice) and OS_STATUS_UNSUPPORTED while a task holds a
- * device or runs a dylink.0 program; the last error names the task.
+ * after the next slice) and OS_STATUS_UNSUPPORTED while a task runs a
+ * dylink.0 program or holds a display that loses its picture in the sleep
+ * (OsDisplayInfo.keeps_image); the last error says which.
  *
  * Restore into a kernel set up as at start (os_init, clock, page store,
  * drivers, host imports, libraries) that has no task or object yet. The
  * clock goes on from where it was plus slept_ms, and what fell due during
  * the sleep is delivered at once. A stream that is cut, of another format
  * or that does not agree with itself restores nothing: an error, and the
- * kernel is as before. A task whose module was not found or changed, or
- * whose open file is gone or changed, ends as a task that traps
+ * kernel is as before. A task whose module was not found or changed, whose
+ * open file is gone or changed, or whose device the firmware no longer
+ * registers under its name or cannot set up, ends as a task that traps
  * (OS_TASK_EXIT_WASM_ERROR, its error text "restore: <why>"); every other
  * task goes on. The host finds its tasks and objects by their ids, which
  * are those they had.
@@ -966,6 +969,20 @@ void os_gpio_edge(uint32_t pin, uint32_t edges);
 uint32_t os_gpio_get_owner(uint32_t pin);
 
 /*
+ * The pins programs wait on, for a board about to sleep: each pin (the
+ * port's number) with the edges watched on it as the port sees them
+ * (OS_GPIO_EDGE_RISING, OS_GPIO_EDGE_FALLING). Fills up to max and returns
+ * how many there are. The port arms them as wake sources; after the
+ * restore, it reports the edge that woke the board with os_gpio_edge.
+ */
+typedef struct OsGpioWake
+{
+    uint32_t pin;
+    uint32_t edges;
+} OsGpioWake;
+uint32_t os_gpio_wake_pins(OsGpioWake* out, uint32_t max);
+
+/*
  * Displays. The platform registers each display a program may draw on under
  * the device profile's name ("main" for the primary one) and draws through a
  * port; the kernel lends a display to one program at a time and checks every
@@ -1004,6 +1021,7 @@ typedef struct OsDisplayInfo
     uint32_t formats;         /* OS_DISPLAY_FORMAT_BIT of each format write accepts; includes format */
     uint8_t has_brightness;   /* set_brightness works */
     uint8_t brightness;       /* the level at registration, 0-255 */
+    uint8_t keeps_image;      /* keeps its picture while the board sleeps: a saved system may hold it */
 } OsDisplayInfo;
 
 /*

@@ -163,7 +163,7 @@ const char* os_abi_task_device(OsTaskHandle task)
 
     for (index = 0U; state != NULL && index < OS_ABI_MAX_HANDLES; ++index)
     {
-        if (state->handles[index].type == OS_OBJECT_DRIVER)
+        if (state->handles[index].type == OS_OBJECT_DRIVER && state->handles[index].driver->save == NULL)
         {
             return state->handles[index].driver->interface;
         }
@@ -171,7 +171,7 @@ const char* os_abi_task_device(OsTaskHandle task)
     return NULL;
 }
 
-/* The handles in use: number, type and object id of each. */
+/* The handles in use: number, type and object id of each; a device's also its driver's interface. */
 void os_abi_save_task(OsTaskHandle task, OsSystemStream* stream)
 {
     void** slot = os_task_abi_state(task);
@@ -186,35 +186,41 @@ void os_abi_save_task(OsTaskHandle task, OsSystemStream* stream)
     os_system_put32(stream, count);
     for (index = 0U; count > 0U && index < OS_ABI_MAX_HANDLES; ++index)
     {
-        if (state->handles[index].type != OS_OBJECT_NONE)
+        const OsAbiHandle* handle = &state->handles[index];
+        if (handle->type != OS_OBJECT_NONE)
         {
             os_system_put32(stream, index);
-            os_system_put32(stream, (uint32_t)state->handles[index].type);
-            os_system_put32(stream, state->handles[index].id);
+            os_system_put32(stream, (uint32_t)handle->type);
+            os_system_put32(stream, handle->id);
+            if (handle->type == OS_OBJECT_DRIVER)
+            {
+                os_system_put_text(stream, handle->driver->interface);
+            }
         }
     }
 }
 
-void os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream)
+const char* os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream)
 {
     uint32_t count = os_system_get32(stream);
     OsAbiState* state = NULL;
+    const char* lost = NULL;
     uint32_t read = 0U;
 
     if (!os_system_ok(stream) || count == 0U)
     {
-        return;
+        return NULL;
     }
     if (count > OS_ABI_MAX_HANDLES)
     {
         os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
-        return;
+        return NULL;
     }
     state = (OsAbiState*)calloc(1U, sizeof(OsAbiState));
     if (state == NULL)
     {
         os_system_fail(stream, OS_STATUS_OUT_OF_MEMORY);
-        return;
+        return NULL;
     }
     *os_task_abi_state(task) = state;
     for (read = 0U; read < count && os_system_ok(stream); ++read)
@@ -222,17 +228,33 @@ void os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream)
         uint32_t index = os_system_get32(stream);
         uint32_t type = os_system_get32(stream);
         uint32_t id = os_system_get32(stream);
+        const OsDriver* driver = NULL;
 
-        /* Handles to devices are never saved. */
         if (index >= OS_ABI_MAX_HANDLES || state->handles[index].type != OS_OBJECT_NONE ||
-            type < (uint32_t)OS_OBJECT_QUEUE || type > (uint32_t)OS_OBJECT_TASK || id == 0U)
+            type < (uint32_t)OS_OBJECT_QUEUE || type > (uint32_t)OS_OBJECT_DRIVER || id == 0U)
         {
             os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
-            return;
+            return NULL;
+        }
+        if (type == (uint32_t)OS_OBJECT_DRIVER)
+        {
+            /* The device as its driver restored it, under the id it has now. */
+            char* interface = os_system_get_text(stream);
+            const char* gone = NULL;
+            driver = interface != NULL ? os_driver_find(interface) : NULL;
+            free(interface);
+            id = os_system_ok(stream) ? os_system_device_id(stream, driver, id, &gone) : 0U;
+            if (id == 0U)
+            {
+                lost = lost != NULL ? lost : gone;
+                continue;
+            }
         }
         state->handles[index].type = (OsObjectType)type;
         state->handles[index].id = id;
+        state->handles[index].driver = driver;
     }
+    return lost;
 }
 
 /* A new handle for an object the caller already holds a reference to. */
@@ -369,6 +391,30 @@ OsStatus os_driver_add(const OsDriver* driver)
     }
     g_drivers[g_driver_count++] = driver;
     return OS_STATUS_OK;
+}
+
+uint32_t os_driver_count(void)
+{
+    return g_driver_count;
+}
+
+const OsDriver* os_driver_at(uint32_t index)
+{
+    return index < g_driver_count ? g_drivers[index] : NULL;
+}
+
+const OsDriver* os_driver_find(const char* interface)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < g_driver_count; ++index)
+    {
+        if (strcmp(g_drivers[index]->interface, interface) == 0)
+        {
+            return g_drivers[index];
+        }
+    }
+    return NULL;
 }
 
 uint32_t os_driver_signal_key(const OsDriver* driver, uint32_t id)

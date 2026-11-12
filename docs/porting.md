@@ -337,23 +337,31 @@ handles, open files) stays behind.
 ## Deep sleep
 
 A board that loses its RAM while it sleeps saves the whole system first and
-restores it when it wakes (decision 6 in `docs/decisions.md`). When the
-kernel has nothing to do for longer than sleeping and waking take
+restores it when it wakes (decisions 6 and 7 in `docs/decisions.md`). When
+the kernel has nothing to do for longer than sleeping and waking take
 (`os_get_next_wakeup_ms`), the port writes the system to storage that keeps
-it, flash or an SD card, and sleeps:
+it, flash or an SD card, arms the pins programs wait on as wake sources, and
+sleeps:
 
 ```c
 if (os_schedule() == OS_STATUS_NO_READY_TASKS && os_get_next_wakeup_ms() > 5000U)
 {
     uint32_t sleep_ms = os_get_next_wakeup_ms();   /* OS_WAIT_FOREVER: until a pin wakes it */
+    OsGpioWake wake[8];
+    uint32_t pins = os_gpio_wake_pins(wake, 8U);   /* pins (your numbers) and the edges awaited */
     if (os_system_save(flash_write, &cursor) == OS_STATUS_OK)
+    {
+        board_arm_wake_pins(wake, pins < 8U ? pins : 8U);
         board_deep_sleep(sleep_ms);                 /* does not return: the board starts again */
+    }
 }
 ```
 
+A chip that wakes only by level, or only from some pins, arms what it can.
+
 At start, the port sets everything up as at a first start (`os_init`, the
-clock, the page store, file systems, drivers, host imports), but creates no
-task or object; it restores instead:
+clock, the page store, file systems, its ports and devices under the same
+names, host imports), but creates no task or object; it restores instead:
 
 ```c
 static OsStatus find_module(void* context, const char* task_name, const uint8_t** bytes, uint32_t* size)
@@ -366,6 +374,8 @@ static OsStatus find_module(void* context, const char* task_name, const uint8_t*
 if (woke_from_sleep && os_system_restore(flash_read, &cursor, find_module, NULL, slept_ms) == OS_STATUS_OK)
 {
     /* Tasks and objects have the ids they had: os_task_find_by_id, os_queue_find_by_id... */
+    if (woken_by_pin)
+        os_gpio_edge(wake_pin, OS_GPIO_EDGE_FALLING);  /* the press that woke it reaches the program */
 }
 else
 {
@@ -379,8 +389,20 @@ due during the sleep is delivered at once.
 
 - **Saving** happens between slices. It returns `OS_STATUS_BUSY` while a
   transfer or page is on its way (save after the next slice) and
-  `OS_STATUS_UNSUPPORTED` while a program holds a device or runs a dylink.0
-  program; the last error names the task.
+  `OS_STATUS_UNSUPPORTED` while a program runs a dylink.0 program or holds
+  a display that loses its picture in the sleep; the last error says which.
+- **Devices** are saved by their drivers and found again by name, so the
+  firmware may register them in another order. Each is set up again as the
+  program left it: a pin's mode and level, a PWM output's frequency and
+  duty, an analog output's value, a counter's count and window, a serial
+  port's speed and format and the bytes not yet read, input events not yet
+  read, a display's brightness. What happened during the sleep is lost:
+  edges and key presses (except the one that woke the board), bytes that
+  arrived, counts, a 1-Wire strong pull-up (and the conversion it powered).
+- **A display** comes back as the panel kept it. Set
+  `OsDisplayInfo.keeps_image` when the panel keeps its picture (it stays
+  powered, or holds it without power); without it, saving waits until no
+  program holds the display.
 - **Modules** are not in the stream. A process started by path is opened
   from the same path, one the kernel copied (`os_task_spawn`) is in the
   stream, and for a task the host created the kernel calls `find_module` by
@@ -388,7 +410,9 @@ due during the sleep is delivered at once.
 - **A stream that does not fit** (cut, another format, another kernel
   build) restores nothing, and the kernel is as before: start afresh.
 - **A program whose world changed** in the sleep (its module replaced or
-  gone, a file it had open gone or changed) ends as a program that traps,
+  gone, a file it had open gone or changed, a device it held no longer
+  registered under its name or refusing to be set up) ends as a program
+  that traps,
   its error `restore: its module changed` and the like
   (`os_task_get_error`); its mutexes go to the next waiter, its parent sees
   it end, and every other program goes on.
@@ -399,4 +423,8 @@ A driver of your own is an `OsDriver`: the calls of its interface
 (`wasm-rtos:kernel/<name>@1.<minor>.0`), and what the kernel asks of it when
 a program's handle closes, for `wait.any`, on every scheduling decision, when
 the clock moves, when a task must be done with the device, and at shutdown.
-Add it with `os_driver_add`.
+Add it with `os_driver_add`. For deep sleep it gives `save` and `restore`:
+it writes, by name, what each task holds and how it is set up, and after the
+sleep sets it up again and says what became of each with
+`os_system_device` (the kernel then maps the programs' handles); without
+them, a program holding one of its devices cannot be saved.

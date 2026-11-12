@@ -1309,6 +1309,103 @@ static void os_bus_finish_all(uint8_t kind)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: the devices tasks hold on the buses, each in
+ * its slot, on its bus by name. Buses keep nothing between transfers, so
+ * nothing else is set up again; a transfer on its way waits for the next
+ * slice.
+ * ------------------------------------------------------------------------ */
+
+/* Whether a transfer is on its way on one of the buses; the save fails then. */
+static uint8_t os_bus_save_busy(OsSystemStream* stream, OsBus** buses, uint32_t max)
+{
+    uint32_t index = 0U;
+
+    for (index = 0U; index < max; ++index)
+    {
+        if (buses[index] != NULL && buses[index]->busy)
+        {
+            os_system_refuse(stream, OS_STATUS_BUSY, "a bus transfer is on its way: try after the next slice");
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+/* The bus a saved device was on, by name; NULL when the platform has it no more. */
+static OsBus* os_bus_restore_find(OsSystemStream* stream, OsBus** buses, uint32_t max)
+{
+    char name[OS_BUS_NAME_MAX];
+    uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+    OsBus* bus = NULL;
+
+    if (!os_system_ok(stream) || os_bus_find(buses, max, name, length, &bus) != OS_STATUS_OK)
+    {
+        return NULL;
+    }
+    return bus;
+}
+
+static void os_i2c_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    if (os_bus_save_busy(stream, g_i2c.buses, OS_I2C_MAX_BUSES))
+    {
+        return;
+    }
+    for (index = 0U; index < OS_I2C_MAX_DEVICES; ++index)
+    {
+        count += g_i2c.devices[index].owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_I2C_MAX_DEVICES; ++index)
+    {
+        const OsI2cDevice* device = &g_i2c.devices[index];
+        if (device->owner != 0U)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put32(stream, device->owner);
+            os_system_put_bytes(stream, device->bus->name, device->bus->name_length);
+            os_system_put32(stream, device->address);
+        }
+    }
+}
+
+static void os_i2c_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_I2C_MAX_DEVICES);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        uint32_t id = os_system_get_max(stream, OS_I2C_MAX_DEVICES);
+        uint32_t owner = os_system_get32(stream);
+        OsBus* bus = os_bus_restore_find(stream, g_i2c.buses, OS_I2C_MAX_BUSES);
+        uint32_t address = os_system_get_max(stream, 0x7FU);
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        if (id == 0U || owner == 0U || g_i2c.devices[id - 1U].owner != 0U)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        if (bus == NULL || !g_i2c.has_port)
+        {
+            os_system_device(stream, &os_i2c_driver, id, 0U, NULL);
+            continue;
+        }
+        g_i2c.devices[id - 1U].bus = bus;
+        g_i2c.devices[id - 1U].address = address;
+        g_i2c.devices[id - 1U].owner = owner;
+        os_system_device(stream, &os_i2c_driver, id, id, NULL);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The i2c interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -1425,7 +1522,89 @@ const OsDriver os_i2c_driver =
     .poll = os_i2c_poll,
     .finish_task = os_i2c_finish_task,
     .shutdown = os_i2c_shutdown,
+    .save = os_i2c_save,
+    .restore = os_i2c_restore,
 };
+
+static void os_spi_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    if (os_bus_save_busy(stream, g_spi.buses, OS_SPI_MAX_BUSES))
+    {
+        return;
+    }
+    for (index = 0U; index < OS_SPI_MAX_DEVICES; ++index)
+    {
+        count += g_spi.devices[index].owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_SPI_MAX_DEVICES; ++index)
+    {
+        const OsSpiDevice* device = &g_spi.devices[index];
+        if (device->owner != 0U)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put32(stream, device->owner);
+            os_system_put_bytes(stream, device->bus->name, device->bus->name_length);
+            os_system_put32(stream, device->mode);
+            os_system_put32(stream, device->frequency_hz);
+            os_system_put32(stream, device->cs);
+        }
+    }
+}
+
+static void os_spi_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_SPI_MAX_DEVICES);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        uint32_t id = os_system_get_max(stream, OS_SPI_MAX_DEVICES);
+        uint32_t owner = os_system_get32(stream);
+        OsBus* bus = os_bus_restore_find(stream, g_spi.buses, OS_SPI_MAX_BUSES);
+        uint32_t mode = os_system_get32(stream);
+        uint32_t frequency_hz = os_system_get32(stream);
+        uint32_t old_cs = os_system_get32(stream);
+        const char* gone = NULL;
+        uint32_t cs = 0U;
+        OsSpiDevice* device = NULL;
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        if (id == 0U || owner == 0U || g_spi.devices[id - 1U].owner != 0U)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        /* Its chip select, a pin gpio restored first. */
+        if (old_cs != 0U)
+        {
+            cs = os_system_device_id(stream, &os_gpio_driver, old_cs, &gone);
+        }
+        if (bus == NULL || !g_spi.has_port || (old_cs != 0U && cs == 0U))
+        {
+            if (cs != 0U)
+            {
+                os_gpio_close(cs);
+            }
+            os_system_device(stream, &os_spi_driver, id, 0U, gone);
+            continue;
+        }
+        device = &g_spi.devices[id - 1U];
+        device->bus = bus;
+        device->mode = mode;
+        device->frequency_hz = frequency_hz;
+        device->cs = cs;
+        device->cs_pin = cs != 0U ? os_gpio_pin_number(cs) : OS_BUS_NO_CS;
+        device->owner = owner;
+        os_system_device(stream, &os_spi_driver, id, id, NULL);
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * The spi interface for programs
@@ -1567,7 +1746,70 @@ const OsDriver os_spi_driver =
     .poll = os_spi_poll,
     .finish_task = os_spi_finish_task,
     .shutdown = os_spi_shutdown,
+    .save = os_spi_save,
+    .restore = os_spi_restore,
 };
+
+static void os_onewire_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    if (os_bus_save_busy(stream, g_onewire.buses, OS_ONEWIRE_MAX_BUSES))
+    {
+        return;
+    }
+    for (index = 0U; index < OS_ONEWIRE_MAX_DEVICES; ++index)
+    {
+        count += g_onewire.devices[index].owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_ONEWIRE_MAX_DEVICES; ++index)
+    {
+        const OsOneWireDevice* device = &g_onewire.devices[index];
+        if (device->owner != 0U)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put32(stream, device->owner);
+            os_system_put_bytes(stream, device->bus->name, device->bus->name_length);
+            os_system_put64(stream, device->rom);
+        }
+    }
+}
+
+/* A strong pull-up left on is off after the sleep: what it powered lost its power too. */
+static void os_onewire_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_ONEWIRE_MAX_DEVICES);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        uint32_t id = os_system_get_max(stream, OS_ONEWIRE_MAX_DEVICES);
+        uint32_t owner = os_system_get32(stream);
+        OsBus* bus = os_bus_restore_find(stream, g_onewire.buses, OS_ONEWIRE_MAX_BUSES);
+        uint64_t rom = os_system_get64(stream);
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        if (id == 0U || owner == 0U || g_onewire.devices[id - 1U].owner != 0U)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        if (bus == NULL || !g_onewire.has_port)
+        {
+            os_system_device(stream, &os_onewire_driver, id, 0U, NULL);
+            continue;
+        }
+        g_onewire.devices[id - 1U].bus = bus;
+        g_onewire.devices[id - 1U].rom = rom;
+        g_onewire.devices[id - 1U].owner = owner;
+        os_system_device(stream, &os_onewire_driver, id, id, NULL);
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * The onewire interface for programs
@@ -1741,5 +1983,7 @@ const OsDriver os_onewire_driver =
     .poll = os_onewire_poll,
     .finish_task = os_onewire_finish_task,
     .shutdown = os_onewire_shutdown,
+    .save = os_onewire_save,
+    .restore = os_onewire_restore,
 };
 

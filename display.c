@@ -379,6 +379,91 @@ void os_display_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: each display a task holds, by name, with its
+ * brightness; only one that keeps its picture through the sleep
+ * ------------------------------------------------------------------------ */
+
+static void os_display_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_DISPLAY_MAX; ++index)
+    {
+        const OsDisplay* display = &g_display.displays[index];
+        if (!display->used || display->owner == 0U)
+        {
+            continue;
+        }
+        if (!display->info.keeps_image)
+        {
+            /* It would come back blank, and the program would not know to draw again. */
+            os_system_refuse(stream, OS_STATUS_UNSUPPORTED,
+                             "unsupported: a display in use loses its picture in the sleep");
+            return;
+        }
+        ++count;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_DISPLAY_MAX; ++index)
+    {
+        const OsDisplay* display = &g_display.displays[index];
+        if (display->used && display->owner != 0U)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put32(stream, display->owner);
+            os_system_put_bytes(stream, display->name, display->name_length);
+            os_system_put32(stream, display->info.brightness);
+        }
+    }
+}
+
+static void os_display_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_DISPLAY_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        char name[OS_DISPLAY_NAME_MAX];
+        uint32_t old_id = os_system_get32(stream);
+        uint32_t owner = os_system_get32(stream);
+        uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+        uint32_t brightness = os_system_get_max(stream, 255U);
+        OsDisplay* display = NULL;
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        display = g_display.has_port ? os_display_find_name(name, length) : NULL;
+        if (display == NULL)
+        {
+            os_system_device(stream, &os_display_driver, old_id, 0U, NULL);
+            continue;
+        }
+        if (display->owner != 0U || owner == 0U)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        if (display->info.has_brightness && g_display.port.set_brightness != NULL &&
+            brightness != display->info.brightness)
+        {
+            if (g_display.port.set_brightness(g_display.port.context, display->display, (uint8_t)brightness) !=
+                OS_STATUS_OK)
+            {
+                os_system_device(stream, &os_display_driver, old_id, 0U, "a device it held cannot be set up");
+                continue;
+            }
+            display->info.brightness = (uint8_t)brightness;
+        }
+        display->owner = owner;
+        os_system_device(stream, &os_display_driver, old_id, (uint32_t)(display - g_display.displays + 1), NULL);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The display interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -537,5 +622,7 @@ const OsDriver os_display_driver =
     .call_count = (uint32_t)(sizeof(os_display_calls) / sizeof(os_display_calls[0])),
     .close = os_display_close,
     .shutdown = os_display_shutdown,
+    .save = os_display_save,
+    .restore = os_display_restore,
 };
 

@@ -204,6 +204,58 @@ void os_adc_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: every channel by name, so handles find theirs
+ * ------------------------------------------------------------------------ */
+
+static void os_adc_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_ADC_MAX; ++index)
+    {
+        count += g_adc.channels[index] != NULL ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_ADC_MAX; ++index)
+    {
+        if (g_adc.channels[index] != NULL)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put_bytes(stream, g_adc.channels[index]->name, g_adc.channels[index]->name_length);
+        }
+    }
+}
+
+static void os_adc_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_ADC_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        char name[OS_ADC_NAME_MAX];
+        uint32_t old_id = os_system_get32(stream);
+        uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+        uint32_t id = 0U;
+        uint32_t index = 0U;
+
+        for (index = 0U; index < OS_ADC_MAX && os_system_ok(stream); ++index)
+        {
+            const OsAdcChannel* channel = g_adc.channels[index];
+            if (channel != NULL && channel->name_length == length && memcmp(channel->name, name, length) == 0)
+            {
+                id = index + 1U;
+            }
+        }
+        if (os_system_ok(stream))
+        {
+            os_system_device(stream, &os_adc_driver, old_id, g_adc.has_port ? id : 0U, NULL);
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The adc interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -303,5 +355,7 @@ const OsDriver os_adc_driver =
     .calls = os_adc_calls,
     .call_count = (uint32_t)(sizeof(os_adc_calls) / sizeof(os_adc_calls[0])),
     .shutdown = os_adc_shutdown,
+    .save = os_adc_save,
+    .restore = os_adc_restore,
 };
 

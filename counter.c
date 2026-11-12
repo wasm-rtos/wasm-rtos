@@ -37,6 +37,8 @@ typedef struct OsCounter
     OsCounterInfo info;
     /* Owning task id, 0 when free. */
     uint32_t owner;
+    /* What it counts, as the program opened it. */
+    uint32_t mode;
     uint32_t filter_ns;
     /* The window of watch; watching is off when it covers every count. */
     int32_t low;
@@ -209,6 +211,7 @@ OsStatus os_counter_open(const char* name, uint32_t length, uint32_t mode, uint3
         return status;
     }
     counter->owner = os_task_get_id(os_task_get_current());
+    counter->mode = mode;
     counter->low = INT32_MIN;
     counter->high = INT32_MAX;
     counter->watching = 0U;
@@ -423,6 +426,135 @@ void os_counter_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: each counter a task holds, by name, with what
+ * it counts, its window and the count
+ * ------------------------------------------------------------------------ */
+
+static void os_counter_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_COUNTER_MAX; ++index)
+    {
+        count += g_counter.counters[index] != NULL && g_counter.counters[index]->owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_COUNTER_MAX; ++index)
+    {
+        const OsCounter* counter = g_counter.counters[index];
+        int32_t value = 0;
+
+        if (counter == NULL || counter->owner == 0U)
+        {
+            continue;
+        }
+        if (g_counter.port.read(g_counter.port.context, counter->unit, &value) != OS_STATUS_OK)
+        {
+            os_system_refuse(stream, OS_STATUS_ERROR, "a counter cannot be read");
+            return;
+        }
+        os_system_put32(stream, index + 1U);
+        os_system_put32(stream, counter->owner);
+        os_system_put_bytes(stream, counter->name, counter->name_length);
+        os_system_put32(stream, counter->mode);
+        os_system_put32(stream, counter->filter_ns);
+        os_system_put32(stream, (uint32_t)value);
+        os_system_put32(stream, (uint32_t)counter->low);
+        os_system_put32(stream, (uint32_t)counter->high);
+        os_system_put32(stream, counter->watching);
+        os_system_put32(stream, counter->outside);
+        os_system_put32(stream, counter->last_poll_ms);
+    }
+}
+
+static void os_counter_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_COUNTER_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        char name[OS_COUNTER_NAME_MAX];
+        uint32_t old_id = os_system_get32(stream);
+        uint32_t owner = os_system_get32(stream);
+        uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+        uint32_t mode = os_system_get32(stream);
+        uint32_t filter_ns = os_system_get32(stream);
+        int32_t value = (int32_t)os_system_get32(stream);
+        int32_t low = (int32_t)os_system_get32(stream);
+        int32_t high = (int32_t)os_system_get32(stream);
+        uint8_t watching = (uint8_t)os_system_get_max(stream, 1U);
+        uint8_t outside = (uint8_t)os_system_get_max(stream, 1U);
+        uint32_t last_poll_ms = os_system_get32(stream);
+        OsCounter* counter = NULL;
+        uint32_t id = 0U;
+        uint32_t index = 0U;
+        OsStatus status = OS_STATUS_OK;
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        for (index = 0U; index < OS_COUNTER_MAX; ++index)
+        {
+            OsCounter* entry = g_counter.counters[index];
+            if (counter == NULL && entry != NULL && entry->name_length == length &&
+                memcmp(entry->name, name, length) == 0)
+            {
+                counter = entry;
+                id = index + 1U;
+            }
+        }
+        if (counter == NULL || !g_counter.has_port)
+        {
+            os_system_device(stream, &os_counter_driver, old_id, 0U, NULL);
+            continue;
+        }
+        if (counter->owner != 0U || owner == 0U || low > high)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        status = os_counter_mode_fits(counter->info.kind, mode)
+            ? g_counter.port.start(g_counter.port.context, counter->unit, mode, filter_ns, &counter->filter_ns)
+            : OS_STATUS_UNSUPPORTED;
+        if (status == OS_STATUS_OK)
+        {
+            status = g_counter.port.write(g_counter.port.context, counter->unit, value);
+            if (status != OS_STATUS_OK)
+            {
+                g_counter.port.stop(g_counter.port.context, counter->unit);
+            }
+        }
+        /* The window as the program set it; a port that watches is told again. */
+        if (status == OS_STATUS_OK && watching && g_counter.port.watch != NULL)
+        {
+            status = g_counter.port.watch(g_counter.port.context, counter->unit, low, high);
+            if (status != OS_STATUS_OK)
+            {
+                g_counter.port.stop(g_counter.port.context, counter->unit);
+            }
+        }
+        if (status != OS_STATUS_OK)
+        {
+            os_system_device(stream, &os_counter_driver, old_id, 0U, "a device it held cannot be set up");
+            continue;
+        }
+        counter->owner = owner;
+        counter->mode = mode;
+        counter->low = low;
+        counter->high = high;
+        counter->watching = watching;
+        counter->outside = outside;
+        /* Polled at the same moments as before the sleep. */
+        counter->last_poll_ms = last_poll_ms;
+        (void)OS_COUNTER_FLAG_TAKE(counter->event);
+        os_system_device(stream, &os_counter_driver, old_id, id, NULL);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The counter interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -550,5 +682,7 @@ const OsDriver os_counter_driver =
     .poll = os_counter_poll,
     .next_deadline_ms = os_counter_next_deadline_ms,
     .shutdown = os_counter_shutdown,
+    .save = os_counter_save,
+    .restore = os_counter_restore,
 };
 

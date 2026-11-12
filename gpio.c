@@ -43,6 +43,8 @@ typedef struct OsGpioPin
     /* Owning task id, 0 when free. */
     uint32_t owner;
     uint32_t flags;
+    /* The level the program last set on an output (logical), kept for a saved system. */
+    uint8_t level;
     uint32_t watch;
     uint32_t events;
     OsGpioCounter rising;
@@ -348,6 +350,7 @@ OsStatus os_gpio_open(const char* name, uint32_t length, uint32_t flags, uint32_
     }
 
     pin->flags = flags;
+    pin->level = (flags & OS_GPIO_INIT_HIGH) != 0U ? 1U : 0U;
     pin->watch = 0U;
     pin->events = 0U;
     (void)os_gpio_take_counter(&pin->rising);
@@ -435,6 +438,7 @@ void os_gpio_close(uint32_t id)
 OsStatus os_gpio_set(uint32_t id, uint32_t level)
 {
     OsGpioPin* pin = os_gpio_pin(id);
+    OsStatus status = OS_STATUS_OK;
 
     if (pin == NULL || !g_gpio.has_port)
     {
@@ -444,7 +448,12 @@ OsStatus os_gpio_set(uint32_t id, uint32_t level)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
-    return g_gpio.port.write(g_gpio.port.context, pin->pin, (uint8_t)(level ^ os_gpio_inverted(pin)));
+    status = g_gpio.port.write(g_gpio.port.context, pin->pin, (uint8_t)(level ^ os_gpio_inverted(pin)));
+    if (status == OS_STATUS_OK)
+    {
+        pin->level = (uint8_t)level;
+    }
+    return status;
 }
 
 OsStatus os_gpio_get(uint32_t id, uint32_t* out_level)
@@ -486,6 +495,10 @@ OsStatus os_gpio_set_mode(uint32_t id, uint32_t flags)
     if (status != OS_STATUS_OK)
     {
         pin->flags = previous;
+    }
+    else
+    {
+        pin->level = (flags & OS_GPIO_INIT_HIGH) != 0U ? 1U : 0U;
     }
     return status;
 }
@@ -554,6 +567,130 @@ void os_gpio_shutdown(void)
         free(g_gpio.names[index]);
     }
     memset(&g_gpio, 0, sizeof(g_gpio));
+}
+
+uint32_t os_gpio_wake_pins(OsGpioWake* out, uint32_t max)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
+    {
+        const OsGpioPin* pin = g_gpio.pins[index];
+        if (pin == NULL || pin->owner == 0U || pin->watch == 0U)
+        {
+            continue;
+        }
+        if (count < max && out != NULL)
+        {
+            out[count].pin = pin->pin;
+            out[count].edges = os_gpio_port_flags(pin) & (OS_GPIO_EDGE_RISING | OS_GPIO_EDGE_FALLING);
+        }
+        ++count;
+    }
+    return count;
+}
+
+/* ---------------------------------------------------------------------------
+ * Saving the whole system: every pin a task holds, by its first name
+ * ------------------------------------------------------------------------ */
+
+static void os_gpio_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    /* Edges the interrupt handlers counted become the programs' events. */
+    os_gpio_poll();
+    for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
+    {
+        count += g_gpio.pins[index] != NULL && g_gpio.pins[index]->owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_GPIO_MAX_PINS; ++index)
+    {
+        const OsGpioPin* pin = g_gpio.pins[index];
+        uint32_t name = 0U;
+
+        if (pin == NULL || pin->owner == 0U)
+        {
+            continue;
+        }
+        while (name < OS_GPIO_MAX_NAMES && (g_gpio.names[name] == NULL || g_gpio.names[name]->pin != index + 1U))
+        {
+            ++name;
+        }
+        os_system_put32(stream, index + 1U);
+        os_system_put32(stream, pin->owner);
+        os_system_put_bytes(stream, g_gpio.names[name]->name, g_gpio.names[name]->length);
+        os_system_put32(stream, pin->flags);
+        os_system_put32(stream, pin->watch);
+        os_system_put32(stream, pin->events);
+        os_system_put32(stream, pin->level);
+    }
+}
+
+static void os_gpio_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_GPIO_MAX_PINS);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        char name[OS_GPIO_NAME_MAX];
+        uint32_t old_id = os_system_get32(stream);
+        uint32_t owner = os_system_get32(stream);
+        uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+        uint32_t flags = os_system_get32(stream);
+        uint32_t watch = os_system_get32(stream);
+        uint32_t events = os_system_get32(stream);
+        uint8_t level = (uint8_t)os_system_get_max(stream, 1U);
+        OsGpioName* entry = NULL;
+        OsGpioPin* pin = NULL;
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        entry = os_gpio_find_name(name, length);
+        pin = entry != NULL ? g_gpio.pins[entry->pin - 1U] : NULL;
+        if (pin == NULL || !g_gpio.has_port)
+        {
+            os_system_device(stream, &os_gpio_driver, old_id, 0U, NULL);
+            continue;
+        }
+        if (pin->owner != 0U || owner == 0U)
+        {
+            /* Two saved pins on one: the stream is broken. */
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        if (os_gpio_check_flags(pin, flags) != OS_STATUS_OK || (watch & ~OS_GPIO_GUEST_EDGES) != 0U ||
+            (watch != 0U && (pin->capabilities & OS_GPIO_CAN_EDGES) == 0U))
+        {
+            os_system_device(stream, &os_gpio_driver, old_id, 0U, "a device it held cannot be set up");
+            continue;
+        }
+        /* An output comes back at the level the program left it. */
+        pin->flags = (flags & OS_GPIO_OUTPUT) != 0U
+            ? (flags & ~OS_GPIO_INIT_HIGH) | (level != 0U ? OS_GPIO_INIT_HIGH : 0U)
+            : flags;
+        pin->level = level;
+        pin->watch = watch;
+        (void)os_gpio_take_counter(&pin->rising);
+        (void)os_gpio_take_counter(&pin->falling);
+        if (os_gpio_configure(pin) != OS_STATUS_OK)
+        {
+            pin->flags = 0U;
+            pin->watch = 0U;
+            (void)os_gpio_configure(pin);
+            os_system_device(stream, &os_gpio_driver, old_id, 0U, "a device it held cannot be set up");
+            continue;
+        }
+        pin->events = events;
+        pin->owner = owner;
+        os_system_device(stream, &os_gpio_driver, old_id, entry->pin, NULL);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -697,4 +834,6 @@ const OsDriver os_gpio_driver =
     .ready = os_gpio_ready,
     .poll = os_gpio_poll,
     .shutdown = os_gpio_shutdown,
+    .save = os_gpio_save,
+    .restore = os_gpio_restore,
 };

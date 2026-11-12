@@ -43,6 +43,8 @@ typedef struct OsUart
     uint8_t name_length;
     uint32_t max_baud;
     uint32_t baud;
+    /* Parity, stop bits, data bits and flow control, as the program opened it. */
+    uint32_t format;
     /* Owning task id, 0 when free; bytes are kept only while owned. */
     uint32_t owner;
     /*
@@ -284,6 +286,7 @@ OsStatus os_uart_open(const char* name, uint32_t length, uint32_t baud, uint32_t
             return status;
         }
         uart->baud = actual != 0U ? actual : baud;
+        uart->format = format;
         OS_UART_STORE(uart->tail, OS_UART_LOAD(uart->head));
         (void)OS_UART_TAKE(uart->errors);
         (void)OS_UART_TAKE(uart->writable);
@@ -425,6 +428,120 @@ void os_uart_shutdown(void)
         }
     }
     memset(&g_uart, 0, sizeof(g_uart));
+}
+
+/* ---------------------------------------------------------------------------
+ * Saving the whole system: each port a task holds, by name, with its speed
+ * and format and the bytes received and not yet read
+ * ------------------------------------------------------------------------ */
+
+static void os_uart_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_UART_MAX; ++index)
+    {
+        count += g_uart.uarts[index] != NULL && g_uart.uarts[index]->owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_UART_MAX; ++index)
+    {
+        OsUart* uart = g_uart.uarts[index];
+        uint32_t tail = 0U;
+        uint32_t head = 0U;
+
+        if (uart == NULL || uart->owner == 0U)
+        {
+            continue;
+        }
+        tail = OS_UART_LOAD(uart->tail);
+        head = OS_UART_LOAD(uart->head);
+        os_system_put32(stream, index + 1U);
+        os_system_put32(stream, uart->owner);
+        os_system_put_bytes(stream, uart->name, uart->name_length);
+        os_system_put32(stream, uart->baud);
+        os_system_put32(stream, uart->format);
+        os_system_put32(stream, uart->send_blocked);
+        os_system_put32(stream, head - tail);
+        for (; tail != head; ++tail)
+        {
+            os_system_put(stream, &uart->rx[tail % OS_UART_RX_BUFFER], 1U);
+        }
+    }
+}
+
+static void os_uart_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_UART_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        char name[OS_UART_NAME_MAX];
+        uint32_t old_id = os_system_get32(stream);
+        uint32_t owner = os_system_get32(stream);
+        uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+        uint32_t baud = os_system_get32(stream);
+        uint32_t format = os_system_get32(stream);
+        uint8_t send_blocked = (uint8_t)os_system_get_max(stream, 1U);
+        uint32_t unread = os_system_get_max(stream, OS_UART_RX_BUFFER);
+        OsUart* uart = NULL;
+        uint32_t actual = 0U;
+        uint32_t id = 0U;
+        uint32_t index = 0U;
+        OsStatus status = OS_STATUS_OK;
+
+        for (index = 0U; index < OS_UART_MAX && os_system_ok(stream); ++index)
+        {
+            OsUart* entry = g_uart.uarts[index];
+            if (uart == NULL && entry != NULL && entry->name_length == length && memcmp(entry->name, name, length) == 0)
+            {
+                uart = entry;
+                id = index + 1U;
+            }
+        }
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        if (uart != NULL && (uart->owner != 0U || owner == 0U))
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        if (uart != NULL && g_uart.has_port && uart->rx == NULL)
+        {
+            uart->rx = (uint8_t*)malloc(OS_UART_RX_BUFFER);
+            if (uart->rx == NULL)
+            {
+                os_system_fail(stream, OS_STATUS_OUT_OF_MEMORY);
+                return;
+            }
+        }
+        status = uart != NULL && g_uart.has_port
+            ? g_uart.port.configure(g_uart.port.context, uart->uart, baud, format, &actual)
+            : OS_STATUS_FILE_NOT_FOUND;
+        if (status == OS_STATUS_OK)
+        {
+            /* The bytes it had not read, first in its buffer. */
+            OS_UART_STORE(uart->tail, 0U);
+            os_system_get(stream, uart->rx, unread);
+            OS_UART_STORE(uart->head, unread);
+            (void)OS_UART_TAKE(uart->errors);
+            /* The port is idle after the sleep: a program waiting for room gets it. */
+            OS_UART_STORE(uart->writable, 1U);
+            uart->send_blocked = send_blocked;
+            uart->baud = actual != 0U ? actual : baud;
+            uart->format = format;
+            uart->owner = owner;
+            os_system_device(stream, &os_uart_driver, old_id, id, NULL);
+            continue;
+        }
+        os_system_skip(stream, unread);
+        os_system_device(stream, &os_uart_driver, old_id, 0U,
+                         uart != NULL && g_uart.has_port ? "a device it held cannot be set up" : NULL);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -581,5 +698,7 @@ const OsDriver os_uart_driver =
     .ready = os_uart_ready,
     .poll = os_uart_poll,
     .shutdown = os_uart_shutdown,
+    .save = os_uart_save,
+    .restore = os_uart_restore,
 };
 

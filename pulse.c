@@ -359,6 +359,90 @@ void os_pulse_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: each channel in its slot, on its pin, with its
+ * direction and idle level
+ * ------------------------------------------------------------------------ */
+
+static void os_pulse_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_PULSE_MAX; ++index)
+    {
+        const OsPulseChannel* channel = g_pulse.channels[index];
+        if (channel != NULL && channel->busy)
+        {
+            os_system_refuse(stream, OS_STATUS_BUSY, "a pulse train is on its way: try after the next slice");
+            return;
+        }
+        count += channel != NULL ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_PULSE_MAX; ++index)
+    {
+        const OsPulseChannel* channel = g_pulse.channels[index];
+        if (channel != NULL)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put32(stream, channel->gpio);
+            os_system_put32(stream, channel->flags);
+        }
+    }
+}
+
+static void os_pulse_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_PULSE_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        uint32_t id = os_system_get_max(stream, OS_PULSE_MAX);
+        uint32_t old_gpio = os_system_get32(stream);
+        uint32_t flags = os_system_get32(stream);
+        const char* gone = NULL;
+        uint32_t gpio = 0U;
+        OsPulseChannel* channel = NULL;
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        if (id == 0U || g_pulse.channels[id - 1U] != NULL)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        /* Its pin, which gpio restored first. */
+        gpio = os_system_device_id(stream, &os_gpio_driver, old_gpio, &gone);
+        if (gpio == 0U || !g_pulse.has_port)
+        {
+            os_system_device(stream, &os_pulse_driver, id, 0U, gone);
+            continue;
+        }
+        channel = (OsPulseChannel*)calloc(1U, sizeof(OsPulseChannel));
+        if (channel == NULL)
+        {
+            os_system_fail(stream, OS_STATUS_OUT_OF_MEMORY);
+            return;
+        }
+        channel->gpio = gpio;
+        channel->pin = os_gpio_pin_number(gpio);
+        channel->flags = flags;
+        if (g_pulse.port.configure(g_pulse.port.context, channel->pin, flags) != OS_STATUS_OK)
+        {
+            os_gpio_close(gpio);
+            free(channel);
+            os_system_device(stream, &os_pulse_driver, id, 0U, "a device it held cannot be set up");
+            continue;
+        }
+        g_pulse.channels[id - 1U] = channel;
+        os_system_device(stream, &os_pulse_driver, id, id, NULL);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The pulse interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -559,5 +643,7 @@ const OsDriver os_pulse_driver =
     .poll = os_pulse_poll,
     .finish_task = os_pulse_finish_task,
     .shutdown = os_pulse_shutdown,
+    .save = os_pulse_save,
+    .restore = os_pulse_restore,
 };
 
