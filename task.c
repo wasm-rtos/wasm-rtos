@@ -739,11 +739,13 @@ void os_task_free(OsTaskHandle task)
     os_task_free_return_values(task);
     free(task->app_name);
     free(task->error_text);
+    free(task->restored_entry_name);
 #if OS_HAS_PROCESSES
     /* The module was parsed in place, so its bytes outlive the runtime. */
     free(task->owned_wasm_bytes);
 #if OS_HAS_FS
     os_fs_image_close(&task->image);
+    free(task->image_path);
 #endif
     free(task->argv);
     if (task->spawned && g_os.spawned_task_count > 0U)
@@ -1142,6 +1144,7 @@ OsStatus os_task_spawn_path(
 {
     OsProcessImage image;
     char** argv_copy = NULL;
+    char* path_copy = NULL;
     uint32_t index = 0U;
     OsStatus status = OS_STATUS_OK;
 
@@ -1167,16 +1170,31 @@ OsStatus os_task_spawn_path(
         return OS_STATUS_OUT_OF_MEMORY;
     }
 
+    path_copy = (char*)malloc(strlen(path) + 1U);
+    if (path_copy == NULL)
+    {
+        free(argv_copy);
+        return OS_STATUS_OUT_OF_MEMORY;
+    }
+    memcpy(path_copy, path, strlen(path) + 1U);
+
     memset(&image, 0, sizeof(image));
     status = os_fs_image_open(path, &image.file);
+    if (status == OS_STATUS_OK)
+    {
+        image.bytes = image.file.bytes;
+        image.size = image.file.size;
+        status = os_task_spawn_owned(out_task, &image, argv_copy, argc > 0U ? argc : 1U, priority, stack_size);
+        argv_copy = NULL;
+    }
     if (status != OS_STATUS_OK)
     {
         free(argv_copy);
+        free(path_copy);
         return status;
     }
-    image.bytes = image.file.bytes;
-    image.size = image.file.size;
-    return os_task_spawn_owned(out_task, &image, argv_copy, argc > 0U ? argc : 1U, priority, stack_size);
+    (*out_task)->image_path = path_copy;
+    return OS_STATUS_OK;
 }
 #endif
 

@@ -4,9 +4,9 @@
 /*
  * What the kernel's own files share: os.c (start, programs, guest calls),
  * task.c (tasks and processes), sync.c (queues, mutexes, semaphores, event
- * groups, notifications, timers), sched.c (clock, waits, scheduler) and
- * snapshot.c (snapshots and swap). Not for drivers or the ABI layer: they use
- * os_internal.h.
+ * groups, notifications, timers), sched.c (clock, waits, scheduler),
+ * snapshot.c (snapshots and swap) and system.c (the whole system saved and
+ * restored). Not for drivers or the ABI layer: they use os_internal.h.
  */
 
 #include "os.h"
@@ -311,6 +311,8 @@ struct OsTask
     uint8_t* wasm_bytes;
     uint32_t wasm_size;
     const char* entry_function_name;
+    /* The entry name of a restored task, which entry_function_name points at. */
+    char* restored_entry_name;
     uint32_t stack_size;
     /* Most interpreter stack used, kept after the runtime is released. */
     uint32_t stack_peak_bytes;
@@ -351,8 +353,9 @@ struct OsTask
     uint8_t reap_pending;
     uint8_t* owned_wasm_bytes;
 #if OS_HAS_FS
-    /* Program started by path; released with the task. */
+    /* Program started by path, and the path, which a saved system opens again; released with the task. */
     OsFsImage image;
+    char* image_path;
 #endif
     char** argv;
     uint32_t argc;

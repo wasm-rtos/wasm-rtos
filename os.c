@@ -260,9 +260,17 @@ void os_shutdown(void)
         g_os.clock_port.cancel_wakeup(g_os.clock_port.context);
     }
 
+    /* Out of the list before it goes: releasing its handles may delete an object, which looks at the others. */
     while (task != NULL)
     {
         OsTaskHandle next = task->next;
+        g_os.task_list = next;
+        if (next != NULL)
+        {
+            next->previous = NULL;
+        }
+        g_os.current_task = NULL;
+        g_os.last_scheduled_task = NULL;
         os_task_free(task);
         task = next;
     }

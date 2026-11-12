@@ -155,6 +155,86 @@ void os_abi_release_task(OsTaskHandle task)
     free(state);
 }
 
+const char* os_abi_task_device(OsTaskHandle task)
+{
+    void** slot = os_task_abi_state(task);
+    OsAbiState* state = slot != NULL ? (OsAbiState*)*slot : NULL;
+    uint32_t index = 0U;
+
+    for (index = 0U; state != NULL && index < OS_ABI_MAX_HANDLES; ++index)
+    {
+        if (state->handles[index].type == OS_OBJECT_DRIVER)
+        {
+            return state->handles[index].driver->interface;
+        }
+    }
+    return NULL;
+}
+
+/* The handles in use: number, type and object id of each. */
+void os_abi_save_task(OsTaskHandle task, OsSystemStream* stream)
+{
+    void** slot = os_task_abi_state(task);
+    OsAbiState* state = slot != NULL ? (OsAbiState*)*slot : NULL;
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; state != NULL && index < OS_ABI_MAX_HANDLES; ++index)
+    {
+        count += state->handles[index].type != OS_OBJECT_NONE ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; count > 0U && index < OS_ABI_MAX_HANDLES; ++index)
+    {
+        if (state->handles[index].type != OS_OBJECT_NONE)
+        {
+            os_system_put32(stream, index);
+            os_system_put32(stream, (uint32_t)state->handles[index].type);
+            os_system_put32(stream, state->handles[index].id);
+        }
+    }
+}
+
+void os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream)
+{
+    uint32_t count = os_system_get32(stream);
+    OsAbiState* state = NULL;
+    uint32_t read = 0U;
+
+    if (!os_system_ok(stream) || count == 0U)
+    {
+        return;
+    }
+    if (count > OS_ABI_MAX_HANDLES)
+    {
+        os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+        return;
+    }
+    state = (OsAbiState*)calloc(1U, sizeof(OsAbiState));
+    if (state == NULL)
+    {
+        os_system_fail(stream, OS_STATUS_OUT_OF_MEMORY);
+        return;
+    }
+    *os_task_abi_state(task) = state;
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        uint32_t index = os_system_get32(stream);
+        uint32_t type = os_system_get32(stream);
+        uint32_t id = os_system_get32(stream);
+
+        /* Handles to devices are never saved. */
+        if (index >= OS_ABI_MAX_HANDLES || state->handles[index].type != OS_OBJECT_NONE ||
+            type < (uint32_t)OS_OBJECT_QUEUE || type > (uint32_t)OS_OBJECT_TASK || id == 0U)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        state->handles[index].type = (OsObjectType)type;
+        state->handles[index].id = id;
+    }
+}
+
 /* A new handle for an object the caller already holds a reference to. */
 static int32_t os_abi_handle_new(OsObjectType type, uint32_t id)
 {
