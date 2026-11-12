@@ -273,6 +273,114 @@ void os_dac_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: each output a task holds, by name, with the
+ * value written
+ * ------------------------------------------------------------------------ */
+
+static void os_dac_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_DAC_MAX; ++index)
+    {
+        count += g_dac.channels[index] != NULL && g_dac.channels[index]->owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_DAC_MAX; ++index)
+    {
+        const OsDacChannel* channel = g_dac.channels[index];
+        if (channel != NULL && channel->owner != 0U)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put32(stream, channel->owner);
+            os_system_put_bytes(stream, channel->name, channel->name_length);
+            os_system_put32(stream, channel->gpio);
+            os_system_put32(stream, channel->value);
+        }
+    }
+}
+
+static void os_dac_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_DAC_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        char name[OS_DAC_NAME_MAX];
+        uint32_t old_id = os_system_get32(stream);
+        uint32_t owner = os_system_get32(stream);
+        uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+        uint32_t old_gpio = os_system_get32(stream);
+        uint32_t value = os_system_get32(stream);
+        OsDacChannel* channel = NULL;
+        const char* gone = NULL;
+        uint32_t gpio = 0U;
+        uint32_t index = 0U;
+        OsStatus status = OS_STATUS_OK;
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        for (index = 0U; index < OS_DAC_MAX && channel == NULL; ++index)
+        {
+            OsDacChannel* entry = g_dac.channels[index];
+            if (entry != NULL && entry->name_length == length && memcmp(entry->name, name, length) == 0)
+            {
+                channel = entry;
+            }
+        }
+        if (channel == NULL || !g_dac.has_port)
+        {
+            os_system_device(stream, &os_dac_driver, old_id, 0U, NULL);
+            continue;
+        }
+        if (channel->owner != 0U || owner == 0U)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        /* The pin under the output, which gpio restored first. */
+        if (old_gpio != 0U)
+        {
+            gpio = os_system_device_id(stream, &os_gpio_driver, old_gpio, &gone);
+            if (gpio == 0U)
+            {
+                os_system_device(stream, &os_dac_driver, old_id, 0U, gone);
+                continue;
+            }
+        }
+        if (value > os_dac_max_raw(channel))
+        {
+            status = OS_STATUS_INVALID_ARGUMENT;
+        }
+        if (status == OS_STATUS_OK && g_dac.port.start != NULL)
+        {
+            status = g_dac.port.start(g_dac.port.context, channel->channel);
+        }
+        if (status == OS_STATUS_OK)
+        {
+            status = g_dac.port.write(g_dac.port.context, channel->channel, value);
+        }
+        if (status != OS_STATUS_OK)
+        {
+            if (gpio != 0U)
+            {
+                os_gpio_close(gpio);
+            }
+            os_system_device(stream, &os_dac_driver, old_id, 0U, "a device it held cannot be set up");
+            continue;
+        }
+        channel->gpio = gpio;
+        channel->value = value;
+        channel->owner = owner;
+        os_system_device(stream, &os_dac_driver, old_id, (uint32_t)(index), NULL);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The dac interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -363,5 +471,7 @@ const OsDriver os_dac_driver =
     .call_count = (uint32_t)(sizeof(os_dac_calls) / sizeof(os_dac_calls[0])),
     .close = os_dac_close,
     .shutdown = os_dac_shutdown,
+    .save = os_dac_save,
+    .restore = os_dac_restore,
 };
 

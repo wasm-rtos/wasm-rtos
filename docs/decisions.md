@@ -249,3 +249,152 @@ OsStatus os_system_restore(OsSnapshotRead read, void* context,
   move.
 - The stream refers to frames already in the page store instead of copying
   them.
+
+## 7. Drivers save their devices; a watched pin wakes the board
+
+**Decided and built in the kernel (2026-11-13); boards next.**
+
+### Problem
+
+Decision 6 saves the whole system, but refuses while a program holds a
+device (a pin, a bus device, a serial port, a display...): the kernel does
+not know what the device's driver keeps or how to set the hardware up
+again. On a real board almost every program holds one, so deep sleep is of
+little use without it. And a program that waits for a button sleeps
+forever: the board only wakes by its timer.
+
+### Decision
+
+**Drivers write and read their own state.** `OsDriver` gets two optional
+calls:
+
+```c
+/* Write every object a task holds, by name, and how it is set up. */
+void (*save)(OsSystemStream* stream);
+/* Read them back and set the hardware up again through the port. */
+void (*restore)(OsSystemStream* stream);
+```
+
+- Objects are saved **by name** (`"led"`, `"i2c0"`, `"uart1"`), not by
+  slot: after the sleep the platform registers its devices again, and the
+  name finds the same one.
+- A handle to a device saves as its driver's interface and the object's
+  id; a wait for a device (`wait.any`, a serial port's signal wait) the
+  same. Each driver's part of the stream is in chunks, so the part of a
+  driver the firmware no longer has is skipped and its devices are gone.
+  After the drivers restore, the kernel maps each handle and wait to the
+  id its device has now.
+- Restoring a device that **is not there** (the firmware no longer
+  registers that name) or that **the port refuses to set up** is the
+  world changed for the task holding it (decision 6): only that task ends,
+  `restore: a device it held is gone` or `... cannot be set up`.
+- `gpio` restores first: PWM, pulse, DAC and SPI chip select take pins.
+- A driver with no `save` still blocks saving while a task holds one of its
+  objects; the drivers below all get one.
+
+What each driver keeps, and what the sleep loses:
+
+| Driver | Saved and set up again | Lost in the sleep |
+|---|---|---|
+| gpio | owner, mode (output, pull, open drain, active low), output level, edges watched, edges not yet read | edges during the sleep (except the one that woke it) |
+| i2c | owner and address of each device; the bus frequency | — |
+| spi | owner, mode, frequency, chip select pin | — |
+| 1-Wire | owner of the bus or device | a strong pull-up (and the conversion it powered) |
+| uart | owner, baud, format, bytes received and not yet read | bytes that arrived during the sleep |
+| adc | the handles (nothing is set up) | — |
+| dac | owner, the value written | — |
+| pwm | owner, frequency, duty | — |
+| counter | owner, what it counts, filter, watch window, when it was last polled, the count (set back into the port) | counts during the sleep, unless the hardware keeps counting |
+| pulse | owner, direction and idle level | — |
+| input | owner, events not yet read; keys held are released | presses during the sleep (except the one that woke it) |
+| display | owner, brightness | the pixels, if the display loses power: see below |
+
+**A display's pixels** are in the display, not in the kernel. A display
+that keeps power in the sleep keeps its image. One that loses it comes back
+blank, and the kernel cannot redraw it without a copy of every pixel; the
+port says which (`OsDisplayInfo`, a flag *keeps its image*), and for one
+that does not, saving is refused while a program holds it, as now. Keeping
+a framebuffer for that is a later choice, not this one.
+
+**Waking by a pin.** Before it sleeps, the port asks which pins programs
+are waiting on:
+
+```c
+/* Pins (the port's numbers) some program watches, and the edges. */
+uint32_t os_gpio_wake_pins(OsGpioWake* out, uint32_t max);
+```
+
+and arms them as wake sources along with the timer
+(`os_get_next_wakeup_ms`). After the restore it tells the kernel which pin
+woke it, `os_gpio_edge(pin, edges)` as an interrupt handler does, and the
+waiting program sees the edge. A chip that can wake only by level, or only
+from some pins, arms what it can; the port documents which.
+
+### Why
+
+- Each driver already knows what it keeps and how its port sets it up;
+  the kernel cannot know it for every device. Two calls per driver keep
+  `system.c` free of device code.
+- By name, because the platform's registration is the one thing that is
+  the same after the sleep; slots could differ with another firmware.
+- Waking by a pin makes the common case (a button, a sensor's alert line)
+  work without the program knowing the board slept.
+
+### Instead
+
+- **Release every device before sleeping** and let programs reopen them:
+  every program would have to be written for it.
+- **Save the port's registers**: per chip, and some state (a display's
+  memory, a bus device's own registers) is not in the chip at all.
+
+### Checks
+
+- `wasm-rtos-tests/tests/system_devices`: six programs hold a pin they
+  set and a button they wait on, a PWM output, an analog output and input,
+  a counter they watch, a serial port, a keypad, an I2C and an SPI device,
+  a 1-Wire bus, a display and a pulse channel, with fake ports standing in
+  for the hardware. A press and a key arrive just before the save.
+  - Saved after 9 ms; the button is the one wake pin, falling edge; the
+    hardware cleared as at power-on; the firmware after the sleep
+    registers its pins in another order. Restored: the hardware is in the
+    same state as before (pin modes and levels, PWM frequency and duty,
+    analog output, counter mode and count, pulse channel, serial speed and
+    format, brightness), the SPI device and its chip select are the
+    program's again; with the press that woke the board reported after
+    the restore, every program ends with the result of the run never
+    stopped, and the serial line carried the same bytes.
+  - After the sleep the firmware has no counter and the PWM port refuses
+    to start: those two programs end, `restore: a device it held is gone`
+    and `... cannot be set up`; the pin and analog output the second held
+    are free again; the other four end with the results of the run never
+    stopped.
+  - A display that does not keep its picture: saving is refused and the
+    error says why.
+  - Each rule broken on purpose, 17 of them (a pin's level, its unread
+    edges, pins found by slot instead of name, the wake pin's edge, PWM
+    duty, analog output, the count, the counter's poll phase, unread serial
+    bytes, the serial format, unread key events, brightness, handles left
+    at old ids, the chip select, a device gone ignored, the display check,
+    a broken device keeping its pin): the test fails every time.
+- `system_snapshot` (decision 6) and the whole suite pass unchanged, also
+  under the sanitizers; every CI configuration builds with `-Werror`.
+- Mac, the test's six programs with every device held: a stream of 4144
+  bytes, saved in 0.25 to 0.31 ms and restored in 0.28 to 0.32 ms.
+- Boards (next): an ESP32 in deep sleep woken by its timer and by a
+  button, the stream on the SD card; a Black Pill reset, the stream in
+  flash.
+
+### Work, all of it
+
+| # | What | Where | Status |
+|---|---|---|---|
+| 1 | `save`/`restore` in `OsDriver`; handles and waits for devices saved; a lost device ends its task | `driver.h`, `abi.c`, `system.c` | done |
+| 2 | The twelve drivers above | `gpio.c`, `bus.c` (i2c, spi, 1-Wire), `uart.c`, `adc.c`, `dac.c`, `pwm.c`, `counter.c`, `pulse.c`, `input.c`, `display.c` | done |
+| 3 | `os_gpio_wake_pins`; the display flag | `gpio.c`, `os.h`, `display.c` | done |
+| 4 | Test: programs holding every kind of device, saved and restored, the fake ports set up the same way, results equal; a device gone ends its task; a watched pin listed and its edge delivered | `wasm-rtos-tests` | done |
+| 5 | Each rule broken on purpose: the test fails | | done, 17 rules |
+| 6 | Boards: an ESP32 in deep sleep, woken by its timer and by a button, the stream on the SD card; a Black Pill reset, the stream in flash; size and time measured | `esp32-test` (local) | next |
+| 7 | `docs/porting.md` (the sleep loop with wake pins), this decision with the results, the roadmap | | done but the boards |
+
+Not in this work: a framebuffer for displays that lose power; dylink.0
+programs; moving one program to another device.

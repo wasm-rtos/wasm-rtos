@@ -19,7 +19,7 @@
  */
 
 #define OS_SYSTEM_MAGIC 0x31535257U /* "WRS1" */
-#define OS_SYSTEM_VERSION 1U
+#define OS_SYSTEM_VERSION 2U
 #define OS_SYSTEM_FEATURE_PROCESSES 1U
 #define OS_SYSTEM_FEATURE_FS 2U
 #define OS_SYSTEM_FEATURES ((OS_HAS_PROCESSES ? OS_SYSTEM_FEATURE_PROCESSES : 0U) | \
@@ -41,16 +41,30 @@ enum
     OS_SYSTEM_MODULE_BYTES
 };
 
+/* What a restore learned from the drivers: a device saved as old_id is new_id now (0: gone, and why). */
+typedef struct OsSystemDevice
+{
+    const OsDriver* driver;
+    uint32_t old_id;
+    uint32_t new_id;
+    const char* reason;
+} OsSystemDevice;
+
 struct OsSystemStream
 {
     OsSnapshotWrite write;
     OsSnapshotRead read;
     void* context;
     OsStatus status;
+    /* While set, puts and gets go through chunks: the engine's snapshot, a driver's part. */
+    uint8_t chunked;
+    uint8_t chunk_end;
     uint8_t chunk[OS_SYSTEM_CHUNK];
     uint32_t chunk_used;
     uint32_t chunk_left;
-    uint8_t chunk_end;
+    OsSystemDevice* devices;
+    uint32_t device_count;
+    uint32_t device_capacity;
 };
 
 static const char os_system_stream_failed[] = "system stream failed";
@@ -65,12 +79,22 @@ void os_system_fail(OsSystemStream* stream, OsStatus status)
     }
 }
 
+void os_system_refuse(OsSystemStream* stream, OsStatus status, const char* why)
+{
+    if (stream->status == OS_STATUS_OK)
+    {
+        os_set_last_error(NULL, "system_save", why, status);
+        stream->status = status;
+    }
+}
+
 uint8_t os_system_ok(const OsSystemStream* stream)
 {
     return stream->status == OS_STATUS_OK ? 1U : 0U;
 }
 
-static void os_system_put(OsSystemStream* stream, const void* data, uint32_t size)
+/* Straight to the host's callbacks. */
+static void os_system_write(OsSystemStream* stream, const void* data, uint32_t size)
 {
     if (stream->status == OS_STATUS_OK && size > 0U)
     {
@@ -78,34 +102,7 @@ static void os_system_put(OsSystemStream* stream, const void* data, uint32_t siz
     }
 }
 
-void os_system_put32(OsSystemStream* stream, uint32_t value)
-{
-    uint8_t bytes[4];
-    bytes[0] = (uint8_t)value;
-    bytes[1] = (uint8_t)(value >> 8U);
-    bytes[2] = (uint8_t)(value >> 16U);
-    bytes[3] = (uint8_t)(value >> 24U);
-    os_system_put(stream, bytes, 4U);
-}
-
-void os_system_put64(OsSystemStream* stream, uint64_t value)
-{
-    os_system_put32(stream, (uint32_t)value);
-    os_system_put32(stream, (uint32_t)(value >> 32U));
-}
-
-void os_system_put_text(OsSystemStream* stream, const char* text)
-{
-    if (text == NULL)
-    {
-        os_system_put32(stream, OS_SYSTEM_NO_TEXT);
-        return;
-    }
-    os_system_put32(stream, (uint32_t)strlen(text));
-    os_system_put(stream, text, (uint32_t)strlen(text));
-}
-
-static void os_system_get(OsSystemStream* stream, void* data, uint32_t size)
+static void os_system_read(OsSystemStream* stream, void* data, uint32_t size)
 {
     if (stream->status == OS_STATUS_OK && size > 0U)
     {
@@ -117,18 +114,218 @@ static void os_system_get(OsSystemStream* stream, void* data, uint32_t size)
     }
 }
 
+static void os_system_encode32(uint8_t* bytes, uint32_t value)
+{
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8U);
+    bytes[2] = (uint8_t)(value >> 16U);
+    bytes[3] = (uint8_t)(value >> 24U);
+}
+
+static uint32_t os_system_decode32(const uint8_t* bytes)
+{
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) | ((uint32_t)bytes[2] << 16U) |
+           ((uint32_t)bytes[3] << 24U);
+}
+
+/*
+ * Chunks: a length (at most OS_SYSTEM_CHUNK), then that many bytes; a
+ * length of 0 ends them. What is written in chunks can be skipped by one who
+ * cannot read it: the snapshot of a task not restored, the part of a driver
+ * the firmware no longer has.
+ */
+static void os_system_chunk_flush(OsSystemStream* stream)
+{
+    if (stream->chunk_used > 0U)
+    {
+        uint8_t length[4];
+        os_system_encode32(length, stream->chunk_used);
+        os_system_write(stream, length, 4U);
+        os_system_write(stream, stream->chunk, stream->chunk_used);
+        stream->chunk_used = 0U;
+    }
+}
+
+static void os_system_chunks_begin(OsSystemStream* stream)
+{
+    stream->chunked = 1U;
+    stream->chunk_used = 0U;
+    stream->chunk_left = 0U;
+    stream->chunk_end = 0U;
+}
+
+static void os_system_chunks_end_write(OsSystemStream* stream)
+{
+    uint8_t end[4] = { 0U, 0U, 0U, 0U };
+    os_system_chunk_flush(stream);
+    os_system_write(stream, end, 4U);
+    stream->chunked = 0U;
+}
+
+/* The next chunk's length into chunk_left; at the end, chunk_end. */
+static void os_system_chunk_next(OsSystemStream* stream)
+{
+    uint8_t bytes[4];
+    uint32_t length = 0U;
+    os_system_read(stream, bytes, 4U);
+    length = os_system_decode32(bytes);
+    if (length > OS_SYSTEM_CHUNK)
+    {
+        os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+        length = 0U;
+    }
+    stream->chunk_left = length;
+    stream->chunk_end = length == 0U ? 1U : 0U;
+}
+
+/* Past the end of the chunks; whole means all was read, as it must be after a load. */
+static void os_system_chunks_end_read(OsSystemStream* stream, uint8_t whole)
+{
+    uint8_t skipped[32];
+    while (os_system_ok(stream) && !stream->chunk_end)
+    {
+        while (stream->chunk_left > 0U && os_system_ok(stream))
+        {
+            uint32_t take = stream->chunk_left < sizeof(skipped) ? stream->chunk_left : (uint32_t)sizeof(skipped);
+            if (whole)
+            {
+                os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+                break;
+            }
+            os_system_read(stream, skipped, take);
+            stream->chunk_left -= take;
+        }
+        if (!os_system_ok(stream))
+        {
+            break;
+        }
+        os_system_chunk_next(stream);
+        if (whole && !stream->chunk_end)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+        }
+    }
+    stream->chunked = 0U;
+}
+
+void os_system_put(OsSystemStream* stream, const void* data, uint32_t size)
+{
+    const uint8_t* bytes = (const uint8_t*)data;
+
+    if (!stream->chunked)
+    {
+        os_system_write(stream, data, size);
+        return;
+    }
+    while (size > 0U && os_system_ok(stream))
+    {
+        uint32_t take = OS_SYSTEM_CHUNK - stream->chunk_used;
+        take = take < size ? take : size;
+        memcpy(stream->chunk + stream->chunk_used, bytes, take);
+        stream->chunk_used += take;
+        bytes += take;
+        size -= take;
+        if (stream->chunk_used == OS_SYSTEM_CHUNK)
+        {
+            os_system_chunk_flush(stream);
+        }
+    }
+}
+
+void os_system_get(OsSystemStream* stream, void* data, uint32_t size)
+{
+    uint8_t* bytes = (uint8_t*)data;
+
+    if (!stream->chunked)
+    {
+        os_system_read(stream, data, size);
+        return;
+    }
+    while (size > 0U && os_system_ok(stream))
+    {
+        uint32_t take = 0U;
+        if (stream->chunk_left == 0U)
+        {
+            if (!stream->chunk_end)
+            {
+                os_system_chunk_next(stream);
+            }
+            if (stream->chunk_end)
+            {
+                /* More is read than was written: the stream is broken. */
+                os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            }
+            continue;
+        }
+        take = stream->chunk_left < size ? stream->chunk_left : size;
+        os_system_read(stream, bytes, take);
+        stream->chunk_left -= take;
+        bytes += take;
+        size -= take;
+    }
+    if (!os_system_ok(stream))
+    {
+        memset(bytes, 0, size);
+    }
+}
+
+void os_system_put32(OsSystemStream* stream, uint32_t value)
+{
+    uint8_t bytes[4];
+    os_system_encode32(bytes, value);
+    os_system_put(stream, bytes, 4U);
+}
+
+void os_system_put64(OsSystemStream* stream, uint64_t value)
+{
+    os_system_put32(stream, (uint32_t)value);
+    os_system_put32(stream, (uint32_t)(value >> 32U));
+}
+
+void os_system_put_bytes(OsSystemStream* stream, const void* data, uint32_t size)
+{
+    os_system_put32(stream, size);
+    os_system_put(stream, data, size);
+}
+
+void os_system_put_text(OsSystemStream* stream, const char* text)
+{
+    if (text == NULL)
+    {
+        os_system_put32(stream, OS_SYSTEM_NO_TEXT);
+        return;
+    }
+    os_system_put_bytes(stream, text, (uint32_t)strlen(text));
+}
+
 uint32_t os_system_get32(OsSystemStream* stream)
 {
     uint8_t bytes[4];
     os_system_get(stream, bytes, 4U);
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) | ((uint32_t)bytes[2] << 16U) |
-           ((uint32_t)bytes[3] << 24U);
+    return os_system_decode32(bytes);
 }
 
 uint64_t os_system_get64(OsSystemStream* stream)
 {
     uint64_t low = os_system_get32(stream);
     return low | ((uint64_t)os_system_get32(stream) << 32U);
+}
+
+uint32_t os_system_get_bytes(OsSystemStream* stream, void* out, uint32_t max)
+{
+    uint32_t length = os_system_get32(stream);
+
+    if (!os_system_ok(stream))
+    {
+        return 0U;
+    }
+    if (length > max)
+    {
+        os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+        return 0U;
+    }
+    os_system_get(stream, out, length);
+    return os_system_ok(stream) ? length : 0U;
 }
 
 char* os_system_get_text(OsSystemStream* stream)
@@ -162,7 +359,7 @@ char* os_system_get_text(OsSystemStream* stream)
 }
 
 /* A number that has to be at most max, or the stream is broken. */
-static uint32_t os_system_get_max(OsSystemStream* stream, uint32_t max)
+uint32_t os_system_get_max(OsSystemStream* stream, uint32_t max)
 {
     uint32_t value = os_system_get32(stream);
     if (value > max)
@@ -174,7 +371,7 @@ static uint32_t os_system_get_max(OsSystemStream* stream, uint32_t max)
 }
 
 /* Bytes the stream holds that nothing needs: a task not restored. */
-static void os_system_skip(OsSystemStream* stream, uint32_t size)
+void os_system_skip(OsSystemStream* stream, uint32_t size)
 {
     uint8_t bytes[32];
     while (size > 0U && os_system_ok(stream))
@@ -185,105 +382,67 @@ static void os_system_skip(OsSystemStream* stream, uint32_t size)
     }
 }
 
-/* ---- The engine's snapshot in chunks: a length, then that many bytes; 0 ends it. */
-
-static void os_system_chunk_flush(OsSystemStream* stream)
-{
-    if (stream->chunk_used > 0U)
-    {
-        os_system_put32(stream, stream->chunk_used);
-        os_system_put(stream, stream->chunk, stream->chunk_used);
-        stream->chunk_used = 0U;
-    }
-}
-
-static WmResult os_system_chunk_write(void* context, const void* data, uint32_t size)
+/* The engine's snapshot goes in chunks, through these. */
+static WmResult os_system_engine_write(void* context, const void* data, uint32_t size)
 {
     OsSystemStream* stream = (OsSystemStream*)context;
-    const uint8_t* bytes = (const uint8_t*)data;
-
-    while (size > 0U && os_system_ok(stream))
-    {
-        uint32_t take = OS_SYSTEM_CHUNK - stream->chunk_used;
-        take = take < size ? take : size;
-        memcpy(stream->chunk + stream->chunk_used, bytes, take);
-        stream->chunk_used += take;
-        bytes += take;
-        size -= take;
-        if (stream->chunk_used == OS_SYSTEM_CHUNK)
-        {
-            os_system_chunk_flush(stream);
-        }
-    }
+    os_system_put(stream, data, size);
     return os_system_ok(stream) ? NULL : os_system_stream_failed;
 }
 
-static void os_system_chunk_end(OsSystemStream* stream)
-{
-    os_system_chunk_flush(stream);
-    os_system_put32(stream, 0U);
-}
-
-/* The next chunk's length into chunk_left; at the end, chunk_end. */
-static void os_system_chunk_next(OsSystemStream* stream)
-{
-    uint32_t length = os_system_get_max(stream, OS_SYSTEM_CHUNK);
-    stream->chunk_left = length;
-    stream->chunk_end = length == 0U ? 1U : 0U;
-}
-
-static WmResult os_system_chunk_read(void* context, void* data, uint32_t size)
+static WmResult os_system_engine_read(void* context, void* data, uint32_t size)
 {
     OsSystemStream* stream = (OsSystemStream*)context;
-    uint8_t* bytes = (uint8_t*)data;
-
-    while (size > 0U && os_system_ok(stream))
-    {
-        uint32_t take = 0U;
-        if (stream->chunk_left == 0U)
-        {
-            if (!stream->chunk_end)
-            {
-                os_system_chunk_next(stream);
-            }
-            if (stream->chunk_end)
-            {
-                /* The engine wants more than was written: the stream is broken. */
-                os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
-                break;
-            }
-            continue;
-        }
-        take = stream->chunk_left < size ? stream->chunk_left : size;
-        os_system_get(stream, bytes, take);
-        stream->chunk_left -= take;
-        bytes += take;
-        size -= take;
-    }
+    os_system_get(stream, data, size);
     return os_system_ok(stream) ? NULL : os_system_stream_failed;
 }
 
-/* Past the end of the engine's snapshot; whole means it was all read, as it must be after a load. */
-static void os_system_chunk_finish(OsSystemStream* stream, uint8_t whole)
+/* ---- Devices ------------------------------------------------------------- */
+
+void os_system_device(OsSystemStream* stream, const OsDriver* driver, uint32_t old_id, uint32_t new_id,
+                      const char* reason)
 {
-    while (os_system_ok(stream) && !stream->chunk_end)
+    if (stream->device_count == stream->device_capacity)
     {
-        if (stream->chunk_left > 0U)
+        uint32_t capacity = stream->device_capacity == 0U ? 16U : stream->device_capacity * 2U;
+        OsSystemDevice* devices = (OsSystemDevice*)realloc(stream->devices, capacity * sizeof(OsSystemDevice));
+        if (devices == NULL)
         {
-            if (whole)
-            {
-                os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
-                return;
-            }
-            os_system_skip(stream, stream->chunk_left);
-            stream->chunk_left = 0U;
+            os_system_fail(stream, OS_STATUS_OUT_OF_MEMORY);
+            return;
         }
-        os_system_chunk_next(stream);
-        if (whole && !stream->chunk_end)
+        stream->devices = devices;
+        stream->device_capacity = capacity;
+    }
+    stream->devices[stream->device_count].driver = driver;
+    stream->devices[stream->device_count].old_id = old_id;
+    stream->devices[stream->device_count].new_id = new_id;
+    stream->devices[stream->device_count].reason = new_id != 0U ? NULL
+        : reason != NULL ? reason : "a device it held is gone";
+    ++stream->device_count;
+}
+
+uint32_t os_system_device_id(OsSystemStream* stream, const OsDriver* driver, uint32_t old_id, const char** out_reason)
+{
+    uint32_t index = 0U;
+
+    *out_reason = NULL;
+    if (driver == NULL)
+    {
+        *out_reason = "a device it held is gone";
+        return 0U;
+    }
+    for (index = 0U; index < stream->device_count; ++index)
+    {
+        if (stream->devices[index].driver == driver && stream->devices[index].old_id == old_id)
         {
-            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            *out_reason = stream->devices[index].reason;
+            return stream->devices[index].new_id;
         }
     }
+    /* Not restored by its driver: it was not saved, so the stream is broken. */
+    os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+    return 0U;
 }
 
 /* ---- Saving ----------------------------------------------------------------- */
@@ -484,6 +643,11 @@ static void os_system_save_task(OsSystemStream* stream, OsTaskHandle task)
     os_system_put32(stream, task->wait_queue_has_wasm_output);
     os_system_put32(stream, task->wait_queue_wasm_output_address);
     os_system_put32(stream, task->wait_bits);
+    /* A signal from a device names its driver, whose place among the drivers may differ after the sleep. */
+    if (task->wait_type == OS_TASK_WAIT_SIGNAL && (task->wait_bits >> 24U) >= 0x80U)
+    {
+        os_system_put_text(stream, os_driver_at((task->wait_bits >> 24U) - 0x80U)->interface);
+    }
     os_system_put32(stream, task->wait_clear_on_exit);
     os_system_put32(stream, task->wait_for_all);
     os_system_put32(stream, task->wait_has_timeout);
@@ -497,6 +661,10 @@ static void os_system_save_task(OsSystemStream* stream, OsTaskHandle task)
     {
         os_system_put32(stream, (uint32_t)task->wait_targets[index].type);
         os_system_put32(stream, task->wait_targets[index].id);
+        if (task->wait_targets[index].type == OS_OBJECT_DRIVER)
+        {
+            os_system_put_text(stream, task->wait_targets[index].driver->interface);
+        }
     }
 
     os_system_put32(stream, task->notification_value);
@@ -560,13 +728,44 @@ static void os_system_save_task(OsSystemStream* stream, OsTaskHandle task)
     os_system_put32(stream, task->wasm_started);
     if (task->wasm_started && os_system_ok(stream))
     {
-        WmResult result = wm_snapshot_write(task->wasm_runtime, task->wasm_instance, os_system_chunk_write, stream);
+        WmResult result = NULL;
+        os_system_chunks_begin(stream);
+        result = wm_snapshot_write(task->wasm_runtime, task->wasm_instance, os_system_engine_write, stream);
         if (result != NULL && os_system_ok(stream))
         {
             os_set_last_error(task, "system_save", result, os_wasm_snapshot_result_to_status(result));
             os_system_fail(stream, os_wasm_snapshot_result_to_status(result));
         }
-        os_system_chunk_end(stream);
+        os_system_chunks_end_write(stream);
+    }
+}
+
+/* Each driver that saves writes its part in chunks; gpio first, as other devices take pins. */
+static void os_system_save_drivers(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+    uint32_t pass = 0U;
+
+    for (index = 0U; index < os_driver_count(); ++index)
+    {
+        count += os_driver_at(index)->save != NULL ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (pass = 0U; pass < 2U; ++pass)
+    {
+        for (index = 0U; index < os_driver_count() && os_system_ok(stream); ++index)
+        {
+            const OsDriver* driver = os_driver_at(index);
+            if (driver->save == NULL || (strcmp(driver->interface, "gpio") == 0) != (pass == 0U))
+            {
+                continue;
+            }
+            os_system_put_text(stream, driver->interface);
+            os_system_chunks_begin(stream);
+            driver->save(stream);
+            os_system_chunks_end_write(stream);
+        }
     }
 }
 
@@ -599,15 +798,16 @@ static OsStatus os_system_check(void)
         }
         for (index = 0U; index < task->wait_target_count; ++index)
         {
-            if (task->wait_targets[index].type == OS_OBJECT_DRIVER)
+            if (task->wait_targets[index].type == OS_OBJECT_DRIVER && task->wait_targets[index].driver->save == NULL)
             {
-                os_set_last_error(task, "system_save", "unsupported: it waits for a device", OS_STATUS_UNSUPPORTED);
+                os_set_last_error(task, "system_save", "unsupported: it waits for a device that cannot be saved",
+                                  OS_STATUS_UNSUPPORTED);
                 return OS_STATUS_UNSUPPORTED;
             }
         }
         if (os_abi_task_device(task) != NULL)
         {
-            os_set_last_error(task, "system_save", "unsupported: it holds a device, which cannot be saved yet",
+            os_set_last_error(task, "system_save", "unsupported: it holds a device whose driver cannot save it",
                               OS_STATUS_UNSUPPORTED);
             return OS_STATUS_UNSUPPORTED;
         }
@@ -670,6 +870,7 @@ OsStatus os_system_save(OsSnapshotWrite write, void* context)
     os_system_put32(&stream, os_system_task_id(g_os.last_scheduled_task));
 
     os_system_save_objects(&stream);
+    os_system_save_drivers(&stream);
 
     for (task = g_os.task_list; task != NULL; task = task->next)
     {
@@ -1034,8 +1235,6 @@ static const char* os_system_restore_engine(OsSystemStream* stream, OsTaskHandle
     WmResult result = NULL;
     OsStatus status = OS_STATUS_OK;
 
-    stream->chunk_left = 0U;
-    stream->chunk_end = 0U;
     if (!os_system_ok(stream))
     {
         return NULL;
@@ -1045,6 +1244,10 @@ static const char* os_system_restore_engine(OsSystemStream* stream, OsTaskHandle
         os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
         return NULL;
     }
+    if (started)
+    {
+        os_system_chunks_begin(stream);
+    }
     if (!lost)
     {
         OS_HEAP_ENTER(task);
@@ -1052,14 +1255,14 @@ static const char* os_system_restore_engine(OsSystemStream* stream, OsTaskHandle
                                      task->stack_size);
         if (status == OS_STATUS_OK && started)
         {
-            result = wm_snapshot_read(task->wasm_runtime, task->wasm_instance, os_system_chunk_read, stream);
+            result = wm_snapshot_read(task->wasm_runtime, task->wasm_instance, os_system_engine_read, stream);
             status = result == os_system_stream_failed ? stream->status : os_wasm_snapshot_result_to_status(result);
         }
         OS_HEAP_LEAVE();
     }
     if (started)
     {
-        os_system_chunk_finish(stream, (uint8_t)(!lost && status == OS_STATUS_OK));
+        os_system_chunks_end_read(stream, (uint8_t)(!lost && status == OS_STATUS_OK));
     }
     if (lost || !os_system_ok(stream) || status == OS_STATUS_OK)
     {
@@ -1078,6 +1281,8 @@ static void os_system_restore_task(OsSystemStream* stream, OsTaskHandle task, Os
     uint32_t item_size = 0U;
     char* name = NULL;
     const char* lost = NULL;
+    /* A device it waits for that is gone. */
+    const char* devices_lost = NULL;
 
     task->id = os_system_get32(stream);
     name = os_system_get_text(stream);
@@ -1124,6 +1329,22 @@ static void os_system_restore_task(OsSystemStream* stream, OsTaskHandle task, Os
     task->wait_queue_has_wasm_output = (uint8_t)os_system_get_max(stream, 1U);
     task->wait_queue_wasm_output_address = os_system_get32(stream);
     task->wait_bits = os_system_get32(stream);
+    if (task->wait_type == OS_TASK_WAIT_SIGNAL && (task->wait_bits >> 24U) >= 0x80U && os_system_ok(stream))
+    {
+        char* interface = os_system_get_text(stream);
+        const OsDriver* driver = interface != NULL ? os_driver_find(interface) : NULL;
+        const char* gone = NULL;
+        uint32_t id = os_system_ok(stream) ? os_system_device_id(stream, driver, task->wait_bits & 0x00FFFFFFU, &gone) : 0U;
+        free(interface);
+        if (id != 0U)
+        {
+            task->wait_bits = os_driver_signal_key(driver, id);
+        }
+        else
+        {
+            devices_lost = gone;
+        }
+    }
     task->wait_clear_on_exit = (uint8_t)os_system_get_max(stream, 1U);
     task->wait_for_all = (uint8_t)os_system_get_max(stream, 1U);
     task->wait_has_timeout = (uint8_t)os_system_get_max(stream, 1U);
@@ -1147,12 +1368,30 @@ static void os_system_restore_task(OsSystemStream* stream, OsTaskHandle task, Os
     {
         uint32_t type = os_system_get32(stream);
         task->wait_targets[index].id = os_system_get32(stream);
-        /* Waits for devices are never saved. */
-        if (type < (uint32_t)OS_OBJECT_QUEUE || type > (uint32_t)OS_OBJECT_TASK)
+        if (type < (uint32_t)OS_OBJECT_QUEUE || type > (uint32_t)OS_OBJECT_DRIVER)
         {
             os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
         }
         task->wait_targets[index].type = (OsObjectType)type;
+        if (type == (uint32_t)OS_OBJECT_DRIVER && os_system_ok(stream))
+        {
+            /* A device it waits for, under the id it has now. */
+            char* interface = os_system_get_text(stream);
+            const char* gone = NULL;
+            task->wait_targets[index].driver = interface != NULL ? os_driver_find(interface) : NULL;
+            free(interface);
+            task->wait_targets[index].id = os_system_ok(stream)
+                ? os_system_device_id(stream, task->wait_targets[index].driver, task->wait_targets[index].id, &gone)
+                : 0U;
+            devices_lost = devices_lost != NULL ? devices_lost : gone;
+        }
+    }
+    if (devices_lost != NULL)
+    {
+        /* It waits for a device that is gone: it ends, and nothing may look at that device for it. */
+        free(task->wait_targets);
+        task->wait_targets = NULL;
+        task->wait_target_count = 0U;
     }
 
     task->notification_value = os_system_get32(stream);
@@ -1268,7 +1507,10 @@ static void os_system_restore_task(OsSystemStream* stream, OsTaskHandle task, Os
 
     lost = os_system_restore_module(stream, task, find, find_context);
     *out_lost_status = OS_STATUS_WASM_ERROR;
-    os_abi_restore_task(task, stream);
+    {
+        const char* handles = os_abi_restore_task(task, stream);
+        lost = lost != NULL ? lost : handles != NULL ? handles : devices_lost;
+    }
 #if OS_HAS_FS
     {
         const char* files = os_fs_restore_task(task->id, stream, (uint8_t)(lost == NULL && task->state != OS_TASK_DEAD));
@@ -1290,10 +1532,35 @@ static void os_system_restore_task(OsSystemStream* stream, OsTaskHandle task, Os
     *out_lost = lost;
 }
 
+/* Each driver's part, in the order saved; one the firmware no longer has is skipped, its devices gone. */
+static void os_system_restore_drivers(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, 1024U);
+    uint32_t index = 0U;
+
+    for (index = 0U; index < count && os_system_ok(stream); ++index)
+    {
+        char* interface = os_system_get_text(stream);
+        const OsDriver* driver = interface != NULL ? os_driver_find(interface) : NULL;
+        free(interface);
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        os_system_chunks_begin(stream);
+        if (driver != NULL && driver->restore != NULL)
+        {
+            driver->restore(stream);
+        }
+        os_system_chunks_end_read(stream, (uint8_t)(driver != NULL && driver->restore != NULL));
+    }
+}
+
 /* Everything a restore made goes; the kernel is as the host had it before. */
-static void os_system_clear(uint32_t tick_ms, uint64_t tick_ms_extended)
+static void os_system_clear(OsSystemStream* stream, uint32_t tick_ms, uint64_t tick_ms_extended)
 {
     OsTaskHandle task = g_os.task_list;
+    uint32_t index = 0U;
 
     g_os.last_scheduled_task = NULL;
     /* Out of the list before it goes, as os_shutdown does. */
@@ -1307,6 +1574,14 @@ static void os_system_clear(uint32_t tick_ms, uint64_t tick_ms_extended)
         }
         os_task_free(task);
         task = next;
+    }
+    /* Devices drivers took again for tasks whose handles were never made. */
+    for (index = 0U; index < stream->device_count; ++index)
+    {
+        if (stream->devices[index].new_id != 0U && stream->devices[index].driver->close != NULL)
+        {
+            stream->devices[index].driver->close(stream->devices[index].new_id);
+        }
     }
     os_queue_free_all();
     os_mutex_free_all();
@@ -1425,6 +1700,10 @@ OsStatus os_system_restore(OsSnapshotRead read, void* context, OsModuleFind find
     {
         os_system_restore_objects(&stream, &links);
     }
+    if (os_system_ok(&stream))
+    {
+        os_system_restore_drivers(&stream);
+    }
 
     count = os_system_get32(&stream);
     if (os_system_ok(&stream) && count > 0U)
@@ -1456,12 +1735,13 @@ OsStatus os_system_restore(OsSnapshotRead read, void* context, OsModuleFind find
     if (!os_system_ok(&stream))
     {
         OsStatus status = stream.status;
-        os_system_clear(tick_ms, tick_ms_extended);
+        os_system_clear(&stream, tick_ms, tick_ms_extended);
         os_set_last_error(NULL, "system_restore", "the stream does not fit this system", status);
         free(links.mutex_owners);
         free(links.timer_targets);
         free(links.lost);
         free(links.lost_status);
+        free(stream.devices);
         return status;
     }
 
@@ -1480,6 +1760,7 @@ OsStatus os_system_restore(OsSnapshotRead read, void* context, OsModuleFind find
     free(links.timer_targets);
     free(links.lost);
     free(links.lost_status);
+    free(stream.devices);
     os_recompute_task_priorities();
     os_recalculate_task_counters();
 

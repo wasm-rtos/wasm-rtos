@@ -74,9 +74,10 @@ for (;;)
 - Deep sleep without losing work: the whole system (every program with what
   it waits for, the queues, mutexes, semaphores, events and timers it
   shares, its children and open files) is saved before the device loses its
-  RAM and restored after; programs go on where they were, the clock with the
-  time slept, and need nothing written for it (programs that hold a device
-  cannot be saved yet).
+  RAM and restored after, with the pins, buses, serial ports and other
+  devices programs hold set up again; programs go on where they were, the
+  clock with the time slept, and need nothing written for it. A pin a
+  program waits on wakes the board.
 - Paging: with a page store, programs' memory is a cache in RAM of frames
   (4 KiB by default), so programs may have more memory than the board has RAM, and a
   waiting program can leave RAM altogether and come back when it runs.
@@ -295,6 +296,7 @@ uint8_t os_task_is_swapped(OsTaskHandle task);
 OsStatus os_system_save(OsSnapshotWrite write, void* context);
 OsStatus os_system_restore(OsSnapshotRead read, void* context, OsModuleFind find, void* find_context,
                            uint32_t slept_ms);
+uint32_t os_gpio_wake_pins(OsGpioWake* out, uint32_t max);
 ```
 
 ### Measuring and errors

@@ -496,6 +496,114 @@ void os_input_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: each device a task holds, by name, with the
+ * events it has not read; keys held come back released
+ * ------------------------------------------------------------------------ */
+
+static void os_input_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_INPUT_MAX; ++index)
+    {
+        count += g_input.devices[index] != NULL && g_input.devices[index]->owner != 0U ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_INPUT_MAX; ++index)
+    {
+        const OsInputDevice* device = g_input.devices[index];
+        uint32_t event = 0U;
+
+        if (device == NULL || device->owner == 0U)
+        {
+            continue;
+        }
+        os_system_put32(stream, index + 1U);
+        os_system_put32(stream, device->owner);
+        os_system_put_bytes(stream, device->name, device->name_length);
+        os_system_put32(stream, device->dropped);
+        os_system_put32(stream, device->count);
+        for (event = 0U; event < device->count; ++event)
+        {
+            const OsInputEvent* queued = &device->queue[(device->head + event) % OS_INPUT_QUEUE];
+            os_system_put32(stream, queued->type);
+            os_system_put32(stream, queued->code);
+            os_system_put32(stream, (uint32_t)queued->value);
+            os_system_put32(stream, queued->x);
+            os_system_put32(stream, queued->y);
+            os_system_put32(stream, queued->time_ms);
+        }
+    }
+}
+
+static void os_input_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_INPUT_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        char name[OS_INPUT_NAME_MAX];
+        uint32_t old_id = os_system_get32(stream);
+        uint32_t owner = os_system_get32(stream);
+        uint32_t length = os_system_get_bytes(stream, name, sizeof(name));
+        uint32_t dropped = os_system_get32(stream);
+        uint32_t events = os_system_get_max(stream, OS_INPUT_QUEUE);
+        OsInputDevice* device = NULL;
+        uint32_t id = 0U;
+        uint32_t index = 0U;
+
+        for (index = 0U; index < OS_INPUT_MAX && os_system_ok(stream); ++index)
+        {
+            OsInputDevice* entry = g_input.devices[index];
+            if (device == NULL && entry != NULL && entry->name_length == length && memcmp(entry->name, name, length) == 0)
+            {
+                device = entry;
+                id = index + 1U;
+            }
+        }
+        if (os_system_ok(stream) && device != NULL && (device->owner != 0U || owner == 0U))
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+        }
+        if (os_system_ok(stream) && device != NULL)
+        {
+            device->queue = (OsInputEvent*)calloc(OS_INPUT_QUEUE, sizeof(OsInputEvent));
+            if (device->queue == NULL)
+            {
+                os_system_fail(stream, OS_STATUS_OUT_OF_MEMORY);
+            }
+            else
+            {
+                os_input_clear(device);
+                device->dropped = dropped;
+                device->count = events;
+                device->owner = owner;
+            }
+        }
+        for (index = 0U; index < events && os_system_ok(stream); ++index)
+        {
+            OsInputEvent event;
+            event.type = (uint8_t)os_system_get32(stream);
+            event.code = (uint16_t)os_system_get32(stream);
+            event.value = (int32_t)os_system_get32(stream);
+            event.x = (uint16_t)os_system_get32(stream);
+            event.y = (uint16_t)os_system_get32(stream);
+            event.time_ms = os_system_get32(stream);
+            if (device != NULL && device->queue != NULL)
+            {
+                device->queue[index] = event;
+            }
+        }
+        if (os_system_ok(stream))
+        {
+            os_system_device(stream, &os_input_driver, old_id, device != NULL ? id : 0U, NULL);
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The input interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -601,5 +709,7 @@ const OsDriver os_input_driver =
     .next_deadline_ms = os_input_next_deadline_ms,
     .time = os_input_update_time,
     .shutdown = os_input_shutdown,
+    .save = os_input_save,
+    .restore = os_input_restore,
 };
 

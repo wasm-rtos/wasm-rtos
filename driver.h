@@ -77,7 +77,23 @@ typedef struct OsDriver
     void (*finish_task)(uint32_t task_id);
     /* os_shutdown: release everything. May be NULL. */
     void (*shutdown)(void);
+    /*
+     * Saving the whole system (docs/decisions.md, 7): write every object a
+     * task holds, by name, with how it is set up and what it has kept for
+     * the task. May be NULL: then a task holding one cannot be saved. A
+     * driver that cannot save now fails the stream (os_system_fail).
+     */
+    void (*save)(OsSystemStream* stream);
+    /*
+     * Read what save wrote into the driver as the platform registered it
+     * again, take each object for its task and set the hardware up again;
+     * tell the kernel what became of each (os_system_device).
+     */
+    void (*restore)(OsSystemStream* stream);
 } OsDriver;
+
+/* gpio, whose pins other drivers take (a PWM output, a chip select...). */
+extern const OsDriver os_gpio_driver;
 
 /* Most drivers at once. */
 #ifndef OS_MAX_DRIVERS

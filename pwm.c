@@ -190,6 +190,90 @@ void os_pwm_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Saving the whole system: each output in its slot, on its pin, with its
+ * frequency and duty
+ * ------------------------------------------------------------------------ */
+
+static void os_pwm_save(OsSystemStream* stream)
+{
+    uint32_t count = 0U;
+    uint32_t index = 0U;
+
+    for (index = 0U; index < OS_PWM_MAX; ++index)
+    {
+        count += g_pwm.outputs[index].used ? 1U : 0U;
+    }
+    os_system_put32(stream, count);
+    for (index = 0U; index < OS_PWM_MAX; ++index)
+    {
+        const OsPwmOutput* output = &g_pwm.outputs[index];
+        if (output->used)
+        {
+            os_system_put32(stream, index + 1U);
+            os_system_put32(stream, output->gpio);
+            os_system_put32(stream, output->inverted);
+            os_system_put32(stream, output->frequency_hz);
+            os_system_put32(stream, output->duty);
+        }
+    }
+}
+
+static void os_pwm_restore(OsSystemStream* stream)
+{
+    uint32_t count = os_system_get_max(stream, OS_PWM_MAX);
+    uint32_t read = 0U;
+
+    for (read = 0U; read < count && os_system_ok(stream); ++read)
+    {
+        uint32_t id = os_system_get_max(stream, OS_PWM_MAX);
+        uint32_t old_gpio = os_system_get32(stream);
+        uint8_t inverted = (uint8_t)os_system_get_max(stream, 1U);
+        uint32_t frequency_hz = os_system_get32(stream);
+        uint32_t duty = os_system_get_max(stream, OS_PWM_DUTY_MAX);
+        const char* gone = NULL;
+        uint32_t gpio = 0U;
+        OsPwmOutput* output = NULL;
+
+        if (!os_system_ok(stream))
+        {
+            return;
+        }
+        if (id == 0U || g_pwm.outputs[id - 1U].used || frequency_hz == 0U)
+        {
+            os_system_fail(stream, OS_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+        /* Its pin, which gpio restored first. */
+        gpio = os_system_device_id(stream, &os_gpio_driver, old_gpio, &gone);
+        if (gpio == 0U || !g_pwm.has_port)
+        {
+            os_system_device(stream, &os_pwm_driver, id, 0U, gone);
+            continue;
+        }
+        output = &g_pwm.outputs[id - 1U];
+        memset(output, 0, sizeof(*output));
+        output->gpio = gpio;
+        output->pin = os_gpio_pin_number(gpio);
+        output->inverted = inverted;
+        output->duty = duty;
+        if (g_pwm.port.start(g_pwm.port.context, output->pin, frequency_hz, os_pwm_physical(output, duty),
+                             &output->frequency_hz) != OS_STATUS_OK)
+        {
+            os_gpio_close(gpio);
+            memset(output, 0, sizeof(*output));
+            os_system_device(stream, &os_pwm_driver, id, 0U, "a device it held cannot be set up");
+            continue;
+        }
+        if (output->frequency_hz == 0U)
+        {
+            output->frequency_hz = frequency_hz;
+        }
+        output->used = 1U;
+        os_system_device(stream, &os_pwm_driver, id, id, NULL);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * The pwm interface for programs
  * ------------------------------------------------------------------------ */
 
@@ -286,5 +370,7 @@ const OsDriver os_pwm_driver =
     .call_count = (uint32_t)(sizeof(os_pwm_calls) / sizeof(os_pwm_calls[0])),
     .close = os_pwm_close,
     .shutdown = os_pwm_shutdown,
+    .save = os_pwm_save,
+    .restore = os_pwm_restore,
 };
 

@@ -501,17 +501,47 @@ void os_system_put32(OsSystemStream* stream, uint32_t value);
 void os_system_put64(OsSystemStream* stream, uint64_t value);
 /* A text, or none for NULL. */
 void os_system_put_text(OsSystemStream* stream, const char* text);
+/* Bytes as they are; their count is the reader's to know. */
+void os_system_put(OsSystemStream* stream, const void* data, uint32_t size);
+void os_system_get(OsSystemStream* stream, void* data, uint32_t size);
+void os_system_skip(OsSystemStream* stream, uint32_t size);
+/* A length, then the bytes. */
+void os_system_put_bytes(OsSystemStream* stream, const void* data, uint32_t size);
 uint32_t os_system_get32(OsSystemStream* stream);
 uint64_t os_system_get64(OsSystemStream* stream);
+/* A number at most max; a larger one breaks the stream. */
+uint32_t os_system_get_max(OsSystemStream* stream, uint32_t max);
+/* Bytes put with os_system_put_bytes into out (at most max; more breaks the stream); their count. */
+uint32_t os_system_get_bytes(OsSystemStream* stream, void* out, uint32_t max);
 /* A text in the heap, or NULL for none or a stream that failed. */
 char* os_system_get_text(OsSystemStream* stream);
 void os_system_fail(OsSystemStream* stream, OsStatus status);
+/* A driver cannot save now: why, for the last error. */
+void os_system_refuse(OsSystemStream* stream, OsStatus status, const char* why);
 uint8_t os_system_ok(const OsSystemStream* stream);
 
-/* A task's handles (abi.c). The interface of a device it holds, which cannot be saved yet, or NULL. */
+/*
+ * A driver's restore says what became of each device it saved: the device
+ * saved as old_id is new_id now, or 0 when it is gone or cannot be set up
+ * again (reason, or NULL for "a device it held is gone"). A task holding a
+ * device that is gone is not restored.
+ */
+void os_system_device(OsSystemStream* stream, const struct OsDriver* driver, uint32_t old_id, uint32_t new_id,
+                      const char* reason);
+/* The id a saved device has now; 0 and why when it is gone. */
+uint32_t os_system_device_id(OsSystemStream* stream, const struct OsDriver* driver, uint32_t old_id,
+                             const char** out_reason);
+
+/* The drivers (abi.c): how many, each in the order added, one by its interface. */
+uint32_t os_driver_count(void);
+const struct OsDriver* os_driver_at(uint32_t index);
+const struct OsDriver* os_driver_find(const char* interface);
+
+/* A task's handles (abi.c). The interface of a device it holds whose driver cannot save it, or NULL. */
 const char* os_abi_task_device(OsTaskHandle task);
 void os_abi_save_task(OsTaskHandle task, OsSystemStream* stream);
-void os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream);
+/* Why the task cannot be restored (a device it held is gone), or NULL. */
+const char* os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream);
 #if OS_HAS_FS
 /* A task's open files (fs.c): path and position. */
 void os_fs_save_task(uint32_t task_id, OsSystemStream* stream);
