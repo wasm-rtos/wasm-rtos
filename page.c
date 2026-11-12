@@ -81,6 +81,8 @@ static struct
     uint32_t writes;
     /* A slot whose background read failed: the next read of it is made at once. */
     uint32_t failed_slot;
+    /* The frame pool, when the kernel took it from the heap. */
+    void* pool;
 } g_page;
 
 static const char os_page_store_full[] = "exhaustion: the page store has no free slot";
@@ -499,6 +501,15 @@ void os_page_poll(void)
 
 static WmPager os_pager = {NULL, os_page_reserve, os_page_room, os_page_write, os_page_read, os_page_drop, NULL, NULL, NULL, os_page_block};
 
+uint32_t os_page_ram_bytes(const OsPageStore* store)
+{
+    if (store == NULL || store->ram_frames == 0U)
+    {
+        return 0U;
+    }
+    return (store->ram_frames + (store->write_start != NULL ? OS_PAGE_MAX_WRITES : 0U)) * wm_frame_size();
+}
+
 OsStatus os_page_store_set(const OsPageStore* store)
 {
     uint32_t* used = NULL;
@@ -523,6 +534,21 @@ OsStatus os_page_store_set(const OsPageStore* store)
     os_page_shutdown();
     if (store != NULL)
     {
+        /* The frames in RAM, one region set aside now: they never cut up the heap (vm decision 6). */
+        if (store->ram_frames != 0U && store->ram == NULL)
+        {
+            g_page.pool = malloc(os_page_ram_bytes(store));
+            if (g_page.pool == NULL)
+            {
+                free(used);
+                return OS_STATUS_OUT_OF_MEMORY;
+            }
+        }
+        if (store->ram_frames != 0U)
+        {
+            wm_set_frame_pool(store->ram != NULL ? (uint8_t*)store->ram : (uint8_t*)g_page.pool,
+                              os_page_ram_bytes(store) / wm_frame_size());
+        }
         g_page.store = *store;
         g_page.used = used;
         g_page.on = 1U;
@@ -731,7 +757,9 @@ void os_page_shutdown(void)
     if (g_page.on)
     {
         wm_set_pager(NULL);
+        wm_set_frame_pool(NULL, 0U);
     }
     free(g_page.used);
+    free(g_page.pool);
     memset(&g_page, 0, sizeof(g_page));
 }
