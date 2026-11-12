@@ -718,9 +718,12 @@ OsStatus os_task_get_return_values(
 /*
  * RAM a task uses, in bytes. stack, linear memory and code are measured
  * exactly in every build. interpreter_bytes is everything the interpreter
- * allocated for the task (those three plus module tables, names, types and
+ * allocated for the task (stack, memory, module tables, names, types and
  * the like) and needs OS_HAS_MEMORY_ACCOUNTING=1; otherwise it is 0 and
- * total_bytes leaves that metadata out.
+ * total_bytes leaves that metadata out. Predecoded code is a cache every
+ * task shares: made at a function's first call, dropped when memory is
+ * short; code_bytes is the part of it the task's module holds now, counted
+ * in no task's interpreter_bytes.
  */
 typedef struct OsTaskMemoryUsage
 {
@@ -729,7 +732,7 @@ typedef struct OsTaskMemoryUsage
     uint32_t linear_memory_bytes;    /* the program's linear memory, with spare room from memory.grow */
     uint32_t resident_memory_bytes;  /* the part of it in RAM now: all of it, or the pages touched when paged */
     uint32_t stored_memory_bytes;    /* the part of it only a page store holds */
-    uint32_t code_bytes;             /* compiled code pages */
+    uint32_t code_bytes;             /* its module's predecoded code made so far (a cache tasks share, not in interpreter_bytes) */
     uint32_t interpreter_bytes;      /* all interpreter allocations, see above */
     uint32_t interpreter_peak_bytes; /* the most interpreter_bytes has been */
     uint32_t image_bytes;            /* kernel copy of the module; 0 when it runs in place or the host owns it */
