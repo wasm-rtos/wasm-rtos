@@ -34,8 +34,9 @@ for (;;)
   own memory and reaches the kernel only through checked calls; a program
   that crashes ends alone, and the pins and devices it held come back.
 - **Memory larger than RAM.** With a page store (an SD card, SPI RAM, FRAM,
-  flash) programs' memory is paged in 4 KiB frames, and a waiting program
-  can leave RAM altogether. A 640 KiB program runs on an ESP32 with 250 KiB
+  flash) a program's memory stays in one block while RAM has room and is
+  paged in 4 KiB frames when it has not, and a waiting program can leave RAM
+  altogether. A 640 KiB program runs on an ESP32 with 250 KiB
   free.
 - **Programs stop at any instruction and move.** A program between two
   slices can be saved and continued in a new task, also on another device:

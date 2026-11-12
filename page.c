@@ -105,15 +105,16 @@ static int os_page_reserve(void* context, int32_t frames)
 
 /*
  * Take one frame out of RAM that was not touched since the hand last
- * passed it (CLOCK, over the frames in RAM only): 0 when none may go.
+ * passed it (CLOCK, over the frames in RAM only), going at most rounds
+ * times round: 0 when none may go. One round finds only a frame that was
+ * cold already; two clear every mark, so a third finds one if any may go.
  */
-static int os_page_take_one(void)
+static int os_page_take_one(uint32_t rounds)
 {
     WmMemory* memory = NULL;
     uint32_t index = 0U;
     uint32_t step = 0U;
-    /* Two rounds clear every mark, so a third finds a frame if any may go. */
-    uint32_t steps = 3U * wm_pager_resident();
+    uint32_t steps = rounds * wm_pager_resident();
 
     for (step = 0U; step < steps && wm_pager_hand(&memory, &index); ++step)
     {
@@ -129,7 +130,30 @@ static int os_page_take_one(void)
     return 0;
 }
 
+/*
+ * A memory may stay in one block, reached at full speed, while the RAM
+ * budget has room for all of its frames. When RAM is short later, a block
+ * leaves RAM whole (os_page_block_out_one) and its memory goes on paged.
+ */
+static int os_page_block(void* context, uint32_t frames)
+{
+    (void)context;
+    return g_page.store.ram_frames == 0U ||
+           (uint64_t)wm_pager_resident() - g_page.writes + frames <= g_page.store.ram_frames;
+}
+
 static int os_page_finish_a_write(void);
+
+/*
+ * Room for one frame, the coldest memory first: the block of a task that
+ * waits and will not wake soon, whole (a block keeps no marks of its own
+ * touches, but the kernel knows when the task wakes); then a frame by
+ * CLOCK; then the block of any task between two slices.
+ */
+static int os_page_make_room(void)
+{
+    return os_task_block_out_one(1) || os_page_take_one(3U) || os_task_block_out_one(0);
+}
 
 static int os_page_room(void* context, int again)
 {
@@ -141,7 +165,7 @@ static int os_page_room(void* context, int again)
         {
             return 1;
         }
-        return os_page_take_one() && (g_page.writes == 0U || os_page_finish_a_write());
+        return os_page_make_room() && (g_page.writes == 0U || os_page_finish_a_write());
     }
     /* Pinned frames may keep RAM over its budget for a while; frames being written are on their way out. */
     while (g_page.store.ram_frames != 0U && wm_pager_resident() - g_page.writes >= g_page.store.ram_frames)
@@ -150,7 +174,7 @@ static int os_page_room(void* context, int again)
         {
             (void)os_page_finish_a_write();
         }
-        else if (!os_page_take_one())
+        else if (!os_page_make_room())
         {
             break;
         }
@@ -450,7 +474,7 @@ void os_page_poll(void)
     }
 }
 
-static WmPager os_pager = {NULL, os_page_reserve, os_page_room, os_page_write, os_page_read, os_page_drop, NULL, NULL, NULL};
+static WmPager os_pager = {NULL, os_page_reserve, os_page_room, os_page_write, os_page_read, os_page_drop, NULL, NULL, NULL, os_page_block};
 
 OsStatus os_page_store_set(const OsPageStore* store)
 {

@@ -261,10 +261,14 @@ program may have more memory than the board has RAM. Give the kernel a page
 store before creating tasks: slots of a frame's size (`wm_frame_size()`:
 4096 bytes, or what the interpreter is built with as `WM_FRAME_SIZE`, from
 256 for small external RAM to 64 KiB on a desktop) with `write` and `read`, backed by a file on an SD card, external SPI RAM or FRAM, or a
-flash partition, and how many frames to keep in RAM. Then every program's
-memory is paged: a frame comes into RAM when it is touched, and when RAM is
-full the kernel stores the frame touched least recently and brings it back
-when it is needed. A program sees nothing of this, only time.
+flash partition, and how many frames to keep in RAM. A program whose
+memory fits in what is left of that budget keeps it in one block, reached at
+full speed. The others are paged: a frame comes into RAM when it is touched,
+and when RAM is full the kernel stores a frame not touched lately and brings
+it back when it is needed. When RAM runs short the coldest memory goes
+first: a frame of a program that is not running, then the whole block of a
+program that waits (it goes on paged when it wakes), then the running
+program's own frames. A program sees nothing of this, only time.
 
 A whole task can also leave RAM at once, through the same store:
 `os_task_swap_out(task)` writes its state (stack, calls, globals, tables)

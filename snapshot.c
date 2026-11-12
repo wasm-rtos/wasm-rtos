@@ -280,6 +280,42 @@ uint8_t os_task_is_swapped(OsTaskHandle task)
     return task != NULL && os_task_is_in_list(task) && task->swapped ? 1U : 0U;
 }
 
+/* A waiting task that wakes sooner than this keeps its block when frames will do. */
+#ifndef OS_PAGE_COLD_MS
+#define OS_PAGE_COLD_MS 10U
+#endif
+
+/* Waits, and will not wake within OS_PAGE_COLD_MS. */
+static uint8_t os_task_is_cold(OsTaskHandle task)
+{
+    if (task->state != OS_TASK_WAITING)
+    {
+        return 0U;
+    }
+    return !task->wait_has_timeout ||
+           (!os_time_reached(g_os.tick_ms, task->wake_tick_ms) && task->wake_tick_ms - g_os.tick_ms >= OS_PAGE_COLD_MS);
+}
+
+int os_task_block_out_one(int cold_only)
+{
+    OsTaskHandle task = NULL;
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        WmMemory* memory = task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
+        if (task == g_os.current_task || !task->wasm_started || task->swapped || memory == NULL ||
+            task->wait_type == OS_TASK_WAIT_TRANSFER || wm_memory_block_frames(memory) == 0U ||
+            (cold_only && !os_task_is_cold(task)))
+        {
+            continue;
+        }
+        if (wm_memory_block_out(memory) == NULL)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 OsStatus os_task_swap_out(OsTaskHandle task)
 {
     WmResult result = NULL;
@@ -334,6 +370,15 @@ OsStatus os_task_swap_out(OsTaskHandle task)
     if (task->wasm_started)
     {
         WmMemory* memory = wm_instance_memory(task->wasm_instance);
+        /* A memory in one block leaves RAM whole first; its frames are then stored as any paged ones. */
+        result = memory != NULL ? wm_memory_block_out(memory) : NULL;
+        if (result != NULL)
+        {
+            /* As for a failed write of the state: the task stays in RAM. */
+            status = OS_STATUS_ERROR;
+            os_set_last_error(task, "swap_out", result, status);
+            return status;
+        }
         status = os_page_image_save(&task->swap_image, task->wasm_runtime, task->wasm_instance, &result);
         if (status != OS_STATUS_OK)
         {
