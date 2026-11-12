@@ -252,7 +252,7 @@ OsStatus os_system_restore(OsSnapshotRead read, void* context,
 
 ## 7. Drivers save their devices; a watched pin wakes the board
 
-**Decided and built in the kernel (2026-11-13); boards next.**
+**Decided and built (2026-11-13); checked on an ESP32 and a Black Pill.**
 
 ### Problem
 
@@ -399,7 +399,16 @@ from some pins, arms what it can; the port documents which.
 - The ESP32 wakes by level, not by edge: a wire still touching GND would
   wake it at once for a press already seen. The port does not sleep while
   a wake pin is at the level that wakes it (`docs/porting.md`).
-- Black Pill (next): a reset, the stream in flash.
+- Black Pill, the same two programs, its KEY button (PA0) as the pin:
+  when the kernel had nothing to do for over a second the port erased the
+  last flash sector (128 KiB), saved the system into it, waited as if
+  asleep until the time was up or KEY was pressed, and reset the chip,
+  losing the RAM; at start it restored. 9 starts: 6 ticks with the memory
+  intact 6 times, at 4004, 8009, 12014, 16019, 20025 and 24029 ms, two
+  presses that woke the board delivered (it then slept 2796 and 3692 ms,
+  the time left). Stream 17524 to 17896 bytes, written in 79 to 84 ms
+  after about 1 s of erasing the sector (the chip's clock stands still
+  while flash erases; measured on the host), restored in 40 ms.
 
 ### Work, all of it
 
@@ -410,8 +419,8 @@ from some pins, arms what it can; the port documents which.
 | 3 | `os_gpio_wake_pins`; the display flag | `gpio.c`, `os.h`, `display.c` | done |
 | 4 | Test: programs holding every kind of device, saved and restored, the fake ports set up the same way, results equal; a device gone ends its task; a watched pin listed and its edge delivered | `wasm-rtos-tests` | done |
 | 5 | Each rule broken on purpose: the test fails | | done, 17 rules |
-| 6 | Boards: an ESP32 in deep sleep, woken by its timer and by a button, the stream on the SD card; a Black Pill reset, the stream in flash; size and time measured | `esp32-test` (local) | ESP32 done; Black Pill next |
-| 7 | `docs/porting.md` (the sleep loop with wake pins), this decision with the results, the roadmap | | done but the boards |
+| 6 | Boards: an ESP32 in deep sleep, woken by its timer and by a button, the stream on the SD card; a Black Pill reset, the stream in flash; size and time measured | `esp32-test` (local) | done |
+| 7 | `docs/porting.md` (the sleep loop with wake pins), this decision with the results, the roadmap | | done |
 
 Not in this work: a framebuffer for displays that lose power; dylink.0
 programs; moving one program to another device.
