@@ -1,15 +1,51 @@
 # wasm-rtos
 
-A small real-time kernel that runs WebAssembly programs as tasks and
-processes, the way an operating system runs executables. The same `.wasm`
-file runs on a microcontroller and in the browser simulator at
+**A real-time kernel that runs WebAssembly programs the way an operating
+system runs executables**, on microcontrollers with no MMU. Programs are
+ordinary `.wasm` files built from C, C++ or Arduino sketches; the same file
+runs on an ESP32, an STM32 and in the browser simulator at
 <https://wasm-rtos.github.io>.
 
-Programs are interpreted by [wasm-rtos-vm](https://github.com/wasm-rtos/wasm-rtos-vm)
-(the `vm` submodule), which runs WebAssembly instructions as they are, one
-unit of fuel each. The scheduler preempts programs by counting that fuel, so a
-plain `int main` with an endless loop still shares the processor with other
-programs, and the same program uses the same fuel on every device.
+```c
+os_init();
+os_clock_port_set(&clock);                              /* the board's millisecond clock */
+os_task_create(&blink, blink_wasm, blink_size, NULL, "blink", 0, OS_TASK_PRIORITY_NORMAL);
+os_task_spawn_path(&shell, "/sd/apps/shell.wasm", argv, 2, OS_TASK_PRIORITY_NORMAL, 0);
+for (;;)
+{
+    os_clock_poll();
+    os_schedule();                                      /* runs the programs, a slice at a time */
+}
+```
+
+## What makes it different
+
+- **Preemption without a timer interrupt.** Programs are interpreted by
+  [wasm-rtos-vm](https://github.com/wasm-rtos/wasm-rtos-vm), which counts
+  every WebAssembly instruction (fuel). The scheduler gives each program a
+  slice of instructions, so a plain `int main` with an endless loop still
+  shares the processor, and a program cannot block the others. Programs
+  are not rewritten or instrumented first: the interpreter counts by
+  itself.
+- **The same work costs the same everywhere.** A program uses the same fuel
+  on every device, so `os_task_get_fuel_used` compares programs where time
+  would compare boards.
+- **Isolation without memory protection hardware.** Each program has its
+  own memory and reaches the kernel only through checked calls; a program
+  that crashes ends alone, and the pins and devices it held come back.
+- **Memory larger than RAM.** With a page store (an SD card, SPI RAM, FRAM,
+  flash) programs' memory is paged in 4 KiB frames, and a waiting program
+  can leave RAM altogether. A 640 KiB program runs on an ESP32 with 250 KiB
+  free.
+- **Programs stop at any instruction and move.** A program between two
+  slices can be saved and continued in a new task, also on another device:
+  its position is in the module's terms, not the host's.
+- **Processes as in an OS.** Programs start other programs from memory or a
+  file path with arguments, wait for their exit codes, and can share
+  `dylink.0` libraries.
+- **No platform code in the kernel.** A board gives it a clock and the
+  devices it has, through small ports; a build carries only the drivers its
+  board uses.
 
 ## Features
 
@@ -29,6 +65,9 @@ programs, and the same program uses the same fuel on every device.
   library's data, as with ELF shared objects.
 - GPIO by pin name from the device profile, one owner per pin, edges from
   interrupt handlers delivered to waiting programs.
+- Devices for programs besides pins: displays, input devices, I2C, SPI and
+  1-Wire buses, analog inputs and outputs, PWM, serial ports, pulse trains
+  and counters, each lent to one program at a time.
 - Snapshots: a program between two slices can be saved and continued in a
   new task, also on another device.
 - Paging: with a page store, programs' memory is a cache in RAM of frames
@@ -40,11 +79,15 @@ programs, and the same program uses the same fuel on every device.
 Compile the kernel sources together with the interpreter:
 
 ```sh
+git clone --recurse-submodules https://github.com/wasm-rtos/wasm-rtos
 cc -std=c11 -I. your_main.c *.c vm/source/*.c -lm
 ```
 
-Clone with `--recurse-submodules`, or run `git submodule update --init`, to get
-the interpreter.
+In a clone made without `--recurse-submodules`, run `git submodule update
+--init` to get the interpreter.
+
+Then give the kernel a clock and the board's devices:
+[docs/porting.md](docs/porting.md).
 
 ### Kernel options
 
@@ -63,6 +106,9 @@ the interpreter.
 | `OS_MAX_DRIVERS` | 16 | drivers at once |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
+
+The file system needs 32-bit pointers; build 8-bit targets with
+`OS_HAS_FS=0`.
 
 ### Drivers
 
@@ -88,12 +134,6 @@ calls return `-WR_EUNSUPPORTED`.
 | `uart` | `os_uart_add` | `OS_UART_MAX` / `OS_UART_RX_BUFFER` (4 / 256): ports, and received bytes kept per port |
 | `counter` | `os_counter_add` | `OS_COUNTER_MAX` / `OS_COUNTER_POLL_MS` (4 / 10): counters, and how often the kernel reads watched counters whose hardware cannot watch |
 
-A driver of your own is an `OsDriver`: the calls of its interface
-(`wasm-rtos:kernel/<name>@1.<minor>.0`), and what the kernel asks of it when
-a program's handle closes, for `wait.any`, on every scheduling decision, when
-the clock moves, when a task must be done with the device, and at shutdown.
-Add it with `os_driver_add`.
-
 The `*_MAX` limits are slots: each costs a pointer. A pin, display, input
 device, bus, serial port or analog channel takes memory when the platform
 registers it, an input device's event queue while a program owns it, and a
@@ -101,327 +141,183 @@ serial port's receive buffer from the first time a program opens it (it
 stays, as interrupt handlers write into it). A board with a few devices
 spends a few hundred bytes on them.
 
-The file system needs 32-bit pointers; build 8-bit targets with
-`OS_HAS_FS=0`.
+A driver of your own is an `OsDriver` added with `os_driver_add`: see
+[docs/porting.md](docs/porting.md#drivers-of-your-own).
 
-## Porting
+## API
 
-Time is the kernel's only platform dependency, and the kernel contains no
-platform code. Give it a millisecond clock through a clock port, or drive time
-yourself with `os_tick()` / `os_update_time_ms()`:
+`os.h` documents every call and its status codes. The core of it:
 
-```c
-#include "os.h"
-
-static uint32_t board_now_ms(void* context)
-{
-    (void)context;
-    return board_millis(); /* your monotonic millisecond counter */
-}
-
-int run_program(uint8_t* wasm, uint32_t size)
-{
-    OsClockPort clock = { board_now_ms, NULL, NULL, NULL };
-    OsTaskHandle task = NULL;
-
-    os_init();
-    os_clock_port_set(&clock);
-    if (os_task_create(&task, wasm, size, NULL, "app", 0, OS_TASK_PRIORITY_NORMAL) != OS_STATUS_OK)
-        return -1;
-
-    while (os_task_get_state(task) != OS_TASK_DEAD)
-    {
-        os_clock_poll();
-        os_schedule();
-    }
-    os_shutdown();
-    return 0;
-}
-```
-
-`arm_wakeup` and `cancel_wakeup` in the clock port are optional: supply both
-to let the kernel ask for a wakeup at the next deadline instead of being
-polled (tickless operation).
-
-### GPIO
-
-The kernel lends pins to programs by name and drives them through a GPIO
-port: `configure`, `write` and `read` for one pin number of the chip.
-Register the pins of the device profile once; a program then opens `"led"`
-on every board that has one.
+### Start and run
 
 ```c
-static const OsGpioPort gpio = { NULL, board_configure, board_write, board_read };
-os_gpio_port_set(&gpio);
-os_gpio_add_pin("led", 2, OS_GPIO_CAN_OUTPUT, OS_GPIO_ACTIVE_LOW);
-os_gpio_add_pin("button-a", 0, OS_GPIO_CAN_INPUT | OS_GPIO_CAN_PULL_UP | OS_GPIO_CAN_EDGES, 0);
-
-void IRAM_ATTR button_isr(void) { os_gpio_edge(0, OS_GPIO_EDGE_FALLING); }
+OsStatus os_init(void);
+void os_shutdown(void);
+OsStatus os_output_port_set(const OsOutputPort* port);
+OsStatus os_clock_port_set(const OsClockPort* port);
+void os_clock_port_clear(void);
+OsStatus os_clock_poll(void);
+OsStatus os_clock_wakeup(void);
+uint8_t os_clock_is_tickless(void);
+void os_tick(uint32_t milliseconds);
+OsStatus os_update_time_ms(uint32_t now_ms);
+uint32_t os_get_tick_ms(void);
+uint32_t os_get_next_wakeup_ms(void);
+OsStatus os_schedule(void);
+uint32_t os_get_task_count(void);
+uint32_t os_get_ready_task_count(void);
+uint32_t os_get_waiting_task_count(void);
+uint32_t os_get_timer_count(void);
 ```
 
-`configure` gets the physical mode and the edges to report; the interrupt
-handler only calls `os_gpio_edge`, which counts and is safe there, and the
-next `os_schedule` wakes the program waiting for that pin. A program owns a
-pin until it closes it or ends, even by a trap; the kernel then configures
-it as an input without pulls.
-
-### Display
-
-Register each display of the device profile with its size, shape, pixel
-formats and density, and draw through a display port. The kernel checks
-every call, so `write` only ever gets a whole rectangle inside the display
-in a format it accepts; the pixels are the program's buffer (or the kernel's
-copy of it, when the program's memory is paged) and are valid during the
-call. `fill` and `flush` are optional: without `fill`, or
-when it returns `OS_STATUS_UNSUPPORTED` for a display or format, the kernel
-writes rows, and `flush` is for displays that buffer (e-paper, a frame
-sent whole).
+### Tasks and processes
 
 ```c
-static const OsDisplayPort display = { NULL, lcd_write, lcd_fill, NULL, lcd_backlight };
-static const OsDisplayInfo round_lcd = {
-    .width = 240, .height = 240, .shape = OS_DISPLAY_ROUND, .format = OS_DISPLAY_RGB565, .dpi = 260,
-    .formats = OS_DISPLAY_FORMAT_BIT(OS_DISPLAY_RGB565), .has_brightness = 1, .brightness = 200,
-};
-os_display_port_set(&display);
-os_display_add("main", 0, &round_lcd);
+OsStatus os_task_create(OsTaskHandle* out_task, uint8_t* wasm_bytes, uint32_t wasm_size, const char* entry_function_name, const char* task_name, uint32_t stack_size, uint32_t priority);
+OsStatus os_task_create_with_args(OsTaskHandle* out_task, uint8_t* wasm_bytes, uint32_t wasm_size, const char* entry_function_name, OsValue* entry_args, uint32_t entry_arg_count, const char* task_name, uint32_t stack_size, uint32_t priority);
+OsStatus os_task_delete(OsTaskHandle task);
+OsStatus os_task_spawn(OsTaskHandle* out_task, const uint8_t* wasm_bytes, uint32_t wasm_size, const char* const* argv, uint32_t argc, uint32_t priority, uint32_t stack_size);
+uint32_t os_task_get_parent_id(OsTaskHandle task);
+OsStatus os_task_spawn_path(OsTaskHandle* out_task, const char* path, const char* const* argv, uint32_t argc, uint32_t priority, uint32_t stack_size);
+OsStatus os_task_delay_ms(uint32_t delay_ms);
+OsStatus os_task_delay_until(uint32_t* previous_wake_time_ms, uint32_t period_ms);
+OsStatus os_task_abort_wait(OsTaskHandle task);
+OsStatus os_task_yield(void);
+void os_request_preempt(void);
+OsStatus os_task_suspend(OsTaskHandle task);
+OsStatus os_task_resume(OsTaskHandle task);
+OsStatus os_task_set_priority(OsTaskHandle task, uint32_t priority);
+uint32_t os_task_get_priority(OsTaskHandle task);
+uint32_t os_task_get_base_priority(OsTaskHandle task);
+uint32_t os_task_get_id(OsTaskHandle task);
+OsTaskHandle os_task_find_by_id(uint32_t task_id);
+uint32_t os_task_get_id_list(uint32_t* out_task_ids, uint32_t max_task_ids);
+const char* os_task_get_app_name(OsTaskHandle task);
+OsTaskState os_task_get_state(OsTaskHandle task);
+OsTaskExitReason os_task_get_exit_reason(OsTaskHandle task);
+uint32_t os_task_get_exit_code(OsTaskHandle task);
+OsStatus os_task_get_return_value(OsTaskHandle task, OsValue* out_value);
+uint32_t os_task_get_return_value_count(OsTaskHandle task);
+OsStatus os_task_get_return_values(OsTaskHandle task, OsValue* out_values, uint32_t max_values, uint32_t* out_value_count);
+OsStatus os_task_read_memory(OsTaskHandle task, uint32_t wasm_address, uint8_t* out_buffer, uint32_t byte_count);
+OsStatus os_task_write_memory(OsTaskHandle task, uint32_t wasm_address, const uint8_t* buffer, uint32_t byte_count);
+const char* os_task_get_name(OsTaskHandle task);
+OsTaskHandle os_task_get_current(void);
+OsStatus os_task_get_last_wait_status(OsTaskHandle task);
+uint32_t os_task_get_last_wait_value(OsTaskHandle task);
+uint8_t os_task_is_notification_pending(OsTaskHandle task);
 ```
 
-A port converts to the panel's own order, such as big-endian RGB565 over SPI.
-
-### Input
-
-Register the input devices of the device profile and report what happens;
-the kernel queues events for the program that owns each device and makes
-long presses and key repeat from the timings given, so they feel the same in
-every program. Keys use the Linux input event codes.
+### Queues, mutexes, semaphores, event groups
 
 ```c
-static const OsInputInfo bezel = { .kind = OS_INPUT_ROTARY, .steps_per_turn = 24 };
-static const OsInputInfo buttons = { .kind = OS_INPUT_BUTTONS, .long_press_ms = 600 };
-os_input_add("bezel", 0, &bezel);
-os_input_add("buttons", 1, &buttons);
-
-os_input_rotate(0, 7 /* REL_DIAL */, -1);      /* one detent counter-clockwise */
-os_input_key(1, 158 /* KEY_BACK */, 1);        /* pressed */
+OsStatus os_queue_create(OsQueueHandle* out_queue, uint32_t item_size, uint32_t item_count);
+void os_queue_delete(OsQueueHandle queue);
+uint32_t os_queue_get_id(OsQueueHandle queue);
+OsQueueHandle os_queue_find_by_id(uint32_t queue_id);
+OsStatus os_queue_send(OsQueueHandle queue, const void* item);
+OsStatus os_queue_receive(OsQueueHandle queue, void* out_item);
+OsStatus os_queue_send_wait(OsQueueHandle queue, const void* item, uint32_t timeout_ms);
+OsStatus os_queue_receive_wait(OsQueueHandle queue, void* out_item, uint32_t timeout_ms);
+uint32_t os_queue_get_count(OsQueueHandle queue);
+uint32_t os_queue_get_space(OsQueueHandle queue);
+uint32_t os_queue_get_item_size(OsQueueHandle queue);
+OsStatus os_queue_set_name(OsQueueHandle queue, const char* name);
+OsStatus os_mutex_set_name(OsMutexHandle mutex, const char* name);
+OsStatus os_semaphore_set_name(OsSemaphoreHandle semaphore, const char* name);
+OsStatus os_event_group_set_name(OsEventGroupHandle event_group, const char* name);
+OsStatus os_mutex_create(OsMutexHandle* out_mutex);
+void os_mutex_delete(OsMutexHandle mutex);
+uint32_t os_mutex_get_id(OsMutexHandle mutex);
+OsMutexHandle os_mutex_find_by_id(uint32_t mutex_id);
+OsStatus os_mutex_lock(OsMutexHandle mutex, uint32_t timeout_ms);
+OsStatus os_mutex_unlock(OsMutexHandle mutex);
+OsTaskHandle os_mutex_get_owner(OsMutexHandle mutex);
+OsStatus os_semaphore_create(OsSemaphoreHandle* out_semaphore, uint32_t max_count, uint32_t initial_count);
+void os_semaphore_delete(OsSemaphoreHandle semaphore);
+uint32_t os_semaphore_get_id(OsSemaphoreHandle semaphore);
+OsSemaphoreHandle os_semaphore_find_by_id(uint32_t semaphore_id);
+OsStatus os_semaphore_take(OsSemaphoreHandle semaphore, uint32_t timeout_ms);
+OsStatus os_semaphore_give(OsSemaphoreHandle semaphore);
+uint32_t os_semaphore_get_count(OsSemaphoreHandle semaphore);
+uint32_t os_semaphore_get_max_count(OsSemaphoreHandle semaphore);
+OsStatus os_event_group_create(OsEventGroupHandle* out_event_group);
+void os_event_group_delete(OsEventGroupHandle event_group);
+uint32_t os_event_group_get_id(OsEventGroupHandle event_group);
+OsEventGroupHandle os_event_group_find_by_id(uint32_t event_group_id);
+uint32_t os_event_group_get_bits(OsEventGroupHandle event_group);
+uint32_t os_event_group_set_bits(OsEventGroupHandle event_group, uint32_t bits);
+uint32_t os_event_group_clear_bits(OsEventGroupHandle event_group, uint32_t bits);
+OsStatus os_event_group_wait_bits(OsEventGroupHandle event_group, uint32_t bits_to_wait_for, uint8_t clear_on_exit, uint8_t wait_for_all, uint32_t timeout_ms);
 ```
 
-Report from the context that calls `os_schedule`; an interrupt handler
-should only note what happened (as with `os_gpio_edge`) and let the main
-loop report it.
-
-### Buses
-
-Register the I2C and SPI buses of the device profile with their speed and
-move bytes through a port. The kernel lends devices on them to programs,
-checks every transaction and drives SPI chip selects through the GPIO port,
-so the port gets whole transactions: a list of ops with the program's
-buffers (or the kernel's copies of them, when the program's memory is
-paged), valid until the transaction ends. A trace hook sees every finished
-transaction, for logs and bus analyzers.
+### Notifications and timers
 
 ```c
-static const OsI2cPort i2c = { NULL, board_i2c_transaction, NULL };
-static const OsSpiPort spi = { NULL, board_spi_transaction, NULL };  /* synchronous: no finish */
-os_i2c_port_set(&i2c);
-os_spi_port_set(&spi);
-os_i2c_add_bus("i2c0", 0, 400000);
-os_spi_add_bus("spi0", 2, 40000000);
-os_gpio_add_pin("lcd-cs", 5, OS_GPIO_CAN_OUTPUT, 0);
-os_bus_trace_set(log_transaction, NULL);
+OsStatus os_task_notify(OsTaskHandle task, uint32_t value, OsNotifyAction action);
+OsStatus os_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit, uint32_t timeout_ms);
+OsStatus os_task_notify_take(uint8_t clear_count_on_exit, uint32_t timeout_ms);
+uint32_t os_task_get_notification_value(OsTaskHandle task);
+OsStatus os_timer_create(OsTimerHandle* out_timer, uint32_t period_ms, uint8_t auto_reload, OsTaskHandle target_task, uint32_t notify_value, OsNotifyAction notify_action);
+void os_timer_delete(OsTimerHandle timer);
+uint32_t os_timer_get_id(OsTimerHandle timer);
+OsTimerHandle os_timer_find_by_id(uint32_t timer_id);
+OsStatus os_timer_start(OsTimerHandle timer);
+OsStatus os_timer_stop(OsTimerHandle timer);
+OsStatus os_timer_reset(OsTimerHandle timer);
+OsStatus os_timer_change_period(OsTimerHandle timer, uint32_t period_ms);
+uint8_t os_timer_is_active(OsTimerHandle timer);
+uint32_t os_timer_get_period_ms(OsTimerHandle timer);
 ```
 
-An I2C port returns `OS_STATUS_NACK`, `OS_STATUS_BUS_ERROR` or
-`OS_STATUS_TIMEOUT` as the bus reports them; programs get `-WR_ENACK`,
-`-WR_EBUS` and `-WR_ETIMEOUT`.
-
-A port with DMA starts the transfer and returns `OS_STATUS_PENDING`; only the
-calling program waits, the others run. The interrupt at the end of the
-transfer calls `os_bus_complete(kind, bus, status)`, which only records it;
-the next `os_schedule` raises chip select, traces the transaction and wakes
-the program. Until then the buffers belong to the port: the kernel does not
-swap the program out, and before it pauses, cancels or ends the program it
-calls the port's `finish`, which returns once the transfer is over and
-reported.
+### Snapshots, swapping and paging
 
 ```c
-static OsStatus lcd_spi_transaction(void* context, uint32_t bus, uint32_t mode, uint32_t hz,
-                                    const OsSpiOp* ops, uint32_t count)
-{
-    start_dma(bus, mode, hz, ops, count);    /* the ops and buffers stay valid until the end */
-    return OS_STATUS_PENDING;
-}
-
-void IRAM_ATTR spi_dma_done_isr(void) { os_bus_complete(OS_BUS_SPI, 2, OS_STATUS_OK); }
-static void lcd_spi_finish(void* context, uint32_t bus) { wait_for_dma_done(bus); }
+OsStatus os_task_write_snapshot(OsTaskHandle task, OsSnapshotWrite write, void* context);
+OsStatus os_task_read_snapshot(OsTaskHandle task, OsSnapshotRead read, void* context);
+OsStatus os_task_get_snapshot_size(OsTaskHandle task, uint32_t* out_size);
+OsStatus os_task_save_snapshot(OsTaskHandle task, uint8_t* buffer, uint32_t buffer_size, uint32_t* out_size);
+OsStatus os_task_load_snapshot(OsTaskHandle task, const uint8_t* buffer, uint32_t buffer_size);
+void os_page_read_done(uint32_t slot, OsStatus status);
+void os_page_write_done(uint32_t slot, OsStatus status);
+OsStatus os_page_store_set(const OsPageStore* store);
+OsStatus os_page_get_stats(OsPageStats* out_stats);
+OsStatus os_task_swap_out(OsTaskHandle task);
+OsStatus os_task_swap_in(OsTaskHandle task);
+uint8_t os_task_is_swapped(OsTaskHandle task);
 ```
 
-### Analog inputs, PWM and serial ports
+### Measuring and errors
 
 ```c
-static const OsAdcPort adc = { NULL, board_adc_read, board_adc_read_mv };   /* read_mv may be NULL */
-static const OsAdcInfo pot = { .resolution_bits = 12, .full_scale_mv = 3300 };
-os_adc_port_set(&adc);
-os_adc_add_channel("a0", 6, &pot);
-
-static const OsPwmPort pwm = { NULL, ledc_start, ledc_set_duty, ledc_set_frequency, ledc_stop };
-os_pwm_port_set(&pwm);
-os_gpio_add_pin("led", 2, OS_GPIO_CAN_OUTPUT | OS_GPIO_CAN_PWM, OS_GPIO_ACTIVE_LOW);
-
-static const OsUartPort uart = { NULL, uart_configure, uart_write, uart_close };
-os_uart_port_set(&uart);
-os_uart_add("uart1", 1, 921600);
-void IRAM_ATTR uart1_rx_isr(void) { os_uart_receive(1, fifo, count); }
-void IRAM_ATTR uart1_tx_isr(void) { os_uart_writable(1); }
+OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usage);
+uint32_t os_task_get_run_count(OsTaskHandle task);
+uint64_t os_task_get_fuel_used(OsTaskHandle task);
+const char* os_get_last_error_phase(void);
+const char* os_get_last_error_result(void);
+const char* os_get_last_error_task_name(void);
+const char* os_task_get_error(OsTaskHandle task);
+OsStatus os_get_last_error_status(void);
 ```
 
-A PWM port gets the duty on the pin, 0 to 65535, after the kernel has
-applied the board's and the program's inversion; it scales to its own
-resolution and may round the frequency, reporting what it set. A UART
-port's `write` takes what fits in its send buffer and returns how many
-bytes; when room comes back it calls `os_uart_writable`. Received bytes go
-to `os_uart_receive`, errors to `os_uart_error`; all three are safe in an
-interrupt handler.
-
-### Pulse trains
-
-Pins with `OS_GPIO_CAN_PULSE` can send and capture timed pulse trains
-through a pulse port backed by hardware made for it: the ESP32's RMT, the
-RP2040's PIO, a timer with DMA. Items are a level bit and nanoseconds; the
-port rounds to its tick (`resolution_ns`). `send_bits` encodes bytes bit by
-bit on the fly, as an RMT bytes encoder does, so 300 addressable LEDs take
-900 bytes, not 28 KB of items. Like background bus transfers, the port may
-return `OS_STATUS_PENDING` and report the end with `os_pulse_complete`
-(interrupt-safe); `finish` must end the work at once, and `receive` times
-its own timeout.
+### Host functions and libraries
 
 ```c
-static const OsPulsePort rmt = { NULL, rmt_configure, rmt_send, rmt_send_bits, rmt_receive,
-                                 rmt_finish, rmt_release, 25 /* ns per tick at 40 MHz */ };
-os_pulse_port_set(&rmt);
-os_gpio_add_pin("strip", 18, OS_GPIO_CAN_OUTPUT | OS_GPIO_CAN_PULSE, 0);
-os_gpio_add_pin("ir-in", 19, OS_GPIO_CAN_INPUT | OS_GPIO_CAN_PULSE, 0);
+OsStatus os_host_import_register(const char* module_name, const char* import_name, const char* signature, OsHostImportFunction function);
+void os_host_import_clear_all(void);
+OsStatus os_host_wait_begin(uint32_t* result_slot);
+OsStatus os_wasm_library_register(OsWasmLibraryHandle* out_library, const char* module_name, uint8_t* wasm_bytes, uint32_t wasm_size);
+OsWasmLibraryHandle os_wasm_library_find(const char* module_name);
+uint32_t os_wasm_library_get_id(OsWasmLibraryHandle library);
+const char* os_wasm_library_get_name(OsWasmLibraryHandle library);
+uint32_t os_wasm_library_get_count(void);
 ```
 
-### 1-Wire
-
-A 1-Wire port gets the same whole transactions, with ops for resets, bytes,
-single time slots and the strong pull-up of parasite power: what the
-ESP32's RMT, a UART wired for 1-Wire or a DS2482 bridge can do. For a
-program's device the kernel puts the reset and match ROM in front. Searches
-run in the kernel with the port's `triplet` (one search step: two reads and
-the write chosen, as a DS2482 does it in hardware), or with single time
-slots when the port has none. A port that cannot drive the line high
-returns `OS_STATUS_UNSUPPORTED` for power ops; no presence pulse is
-`OS_STATUS_NACK`.
-
-```c
-static const OsOneWirePort onewire = { NULL, board_onewire_transaction, board_onewire_triplet, NULL };
-os_onewire_port_set(&onewire);
-os_onewire_add_bus("gpio4", 4);  /* Arduino's OneWire(4) finds it by the pin's name */
-```
-
-### Analog outputs
-
-Register each converter output with its resolution and full-scale voltage;
-the port switches it on, writes raw values the kernel has checked and
-switches it off. Register an output under its pin's GPIO name and the
-kernel takes the pin while a program uses the output.
-
-```c
-static const OsDacPort dac = { NULL, board_dac_start, board_dac_write, board_dac_stop };
-static const OsDacInfo esp32_dac = { 8, 3300 };
-os_dac_port_set(&dac);
-os_gpio_add_pin("gpio25", 25, OS_GPIO_CAN_ALL, 0);
-os_dac_add_channel("gpio25", 1, &esp32_dac);
-```
-
-### Counters
-
-Pulse counters and quadrature encoders are hardware units the platform
-registers by name and kind: the ESP32's PCNT, an STM32 timer in encoder
-mode, an RP2040 PIO program. The port starts a unit in a mode with a glitch
-filter, reads and sets the count (extending a 16-bit counter to 32 bits on
-its overflow interrupt) and stops it. With `watch` the port arms the
-hardware's compare or limit events and calls `os_counter_event` from the
-interrupt when the count leaves a program's window; without it the kernel
-reads watched counters every `OS_COUNTER_POLL_MS`.
-
-```c
-static const OsCounterPort pcnt = { NULL, pcnt_start, pcnt_read, pcnt_write, pcnt_watch, pcnt_stop };
-static const OsCounterInfo encoder = { OS_COUNTER_QUADRATURE, 40000000 };
-os_counter_port_set(&pcnt);
-os_counter_add("enc0", 0, &encoder);
-```
-
-### Paging
-
-Paging moves single frames of programs' memory out of RAM and back, so a
-program may have more memory than the board has RAM. Give the kernel a page
-store before creating tasks: slots of a frame's size (`wm_frame_size()`:
-4096 bytes, or what the interpreter is built with as `WM_FRAME_SIZE`, from
-256 for small external RAM to 64 KiB on a desktop) with `write` and `read`, backed by a file on an SD card, external SPI RAM or FRAM, or a
-flash partition, and how many frames to keep in RAM. Then every program's
-memory is paged: a frame comes into RAM when it is touched, and when RAM is
-full the kernel stores the frame touched least recently and brings it back
-when it is needed. A program sees nothing of this, only time.
-
-A whole task can also leave RAM at once, through the same store:
-`os_task_swap_out(task)` writes its state (stack, calls, globals, tables)
-to a few slots, sends its memory's frames to the store as it would one by
-one, and frees everything else, leaving the task control block. The task
-keeps waiting, its timers and handles keep working, and a queue item its
-wait delivers goes straight into its memory. The scheduler brings it back
-before its next slice, from that state and with the same memory, whose
-frames return as they are touched. When and what to swap out is the
-platform's choice; a program playing music should stay, a menu waiting for
-a button can go.
-
-```c
-os_task_swap_out(menu_task);   /* RAM back, until the menu has work to do */
-```
-
-Memory is promised only as far as it can be kept: creating a task or growing
-its memory fails unless every program's frame could have a slot, so a
-program never runs out of memory it was given. Only dirty frames are
-written: a frame keeps its slot once stored, so one that came back and was
-only read leaves RAM again for free, as one never written leaves as zeros.
-A port's buffer stays in RAM while the port works on it.
-
-```c
-static const OsPageStore store = { sd_card, 256, 24, frame_write, frame_read };
-os_page_store_set(&store);     /* 1 MiB on the card, 96 KiB of RAM for frames */
-```
-
-On an ESP32 with about 250 KiB of free heap, a program with 640 KiB of
-memory runs this way from a file on an SD card.
-
-### Program output
-
-What programs write to stdout and stderr goes to the C library's `stdout`
-and `stderr` unless the platform installs an output port. Its `write` gets
-the id of the task that wrote, so the platform can keep a log per program,
-send everything to a UART, or both. Output is a byte stream: a line may
-arrive in several pieces.
-
-```c
-static void uart_output(void* context, uint32_t task_id, uint32_t fd, const void* data, uint32_t size);
-static const OsOutputPort output = { NULL, uart_output };
-os_output_port_set(&output);
-```
-
-`os_task_get_fuel_used` tells how much interpreter work a task has done. It
-counts the same on every device, so it compares programs where time would
-compare devices.
-
-### Snapshots
-
-`os_task_write_snapshot` saves a program that is between two slices and
-neither waiting nor timed; `os_task_read_snapshot` continues it in a new task
-created from the same module. A snapshot names positions by wasm bytecode
-offsets and holds no host addresses, so it moves between devices running the
-same kernel version, whatever their pointer size. Kernel state (waits,
-handles, open files) stays behind.
+Devices are registered by the board through ports (`os_gpio_*`,
+`os_display_*`, `os_input_*`, `os_i2c_*`, `os_spi_*`, `os_onewire_*`,
+`os_adc_*`, `os_dac_*`, `os_pwm_*`, `os_uart_*`, `os_pulse_*`,
+`os_counter_*`): see [docs/porting.md](docs/porting.md). The file system is
+in `fs.h`, drivers of your own in `driver.h`.
 
 ## Guest programs
 
@@ -469,13 +365,13 @@ Isolated tests, one directory per feature, live in
 [wasm-rtos-tests](https://github.com/wasm-rtos/wasm-rtos-tests) and run on
 every change, also under AddressSanitizer and UndefinedBehaviorSanitizer.
 
-## License
-
-The kernel and the interpreter are released into the public domain (see
-`LICENSE`).
-
 ## Arduino
 
 [wasm-rtos-libraries](https://github.com/wasm-rtos/wasm-rtos-libraries) (`arduino/`) builds Arduino sketches and libraries into
 programs: `Arduino.h`, `Serial`, `Wire` and `SPI` on top of the guest ABI.
 It is a library inside the program, not part of the kernel.
+
+## License
+
+The kernel and the interpreter are released into the public domain (see
+`LICENSE`).
