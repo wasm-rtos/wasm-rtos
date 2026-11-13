@@ -398,3 +398,115 @@ from some pins, arms what it can; the port documents which.
 
 Not in this work: a framebuffer for displays that lose power; dylink.0
 programs; moving one program to another device.
+
+## 8. ABI 1.x is frozen at 1.8
+
+**Decided and built (2026-11-13).**
+
+### Problem
+
+Version 1.0 promises that a program built for ABI 1.x keeps working on
+every 1.x kernel (`docs/abi.md`). The promise is only as good as what holds
+it: today nothing stops a change from renaming a call, reordering its
+arguments or changing what it returns. And a review of the 76 calls
+before freezing them found four behaviours that would be hard to live with
+for a whole major version.
+
+The review: every call is the same in `wit/kernel.wit`,
+`include/wasm-rtos.h` and the kernel's tables (name, arguments, the minor
+version that added it); unknown flags give `-WR_EINVAL` and unknown
+properties `-WR_EUNSUPPORTED` everywhere; names are checked as UTF-8. What
+is not right:
+
+1. **A program built with a newer header does not load on an older
+   kernel.** The header names every import `@1.8.0`; a 1.9 header will name
+   them all `@1.9.0`, and a 1.8 kernel refuses those names, so a program
+   that uses only 1.0 calls stops loading on every device not yet updated,
+   just because it was rebuilt.
+2. **Unknown WASI calls fail the load.** A program importing a WASI call
+   the kernel does not answer (a socket call, or a file call on a build
+   without files) does not load at all, against the rule that what a build
+   leaves out returns an error instead.
+3. **A program can start a child above its own priority** (`proc.spawn`
+   passes the priority through), so any program can take the processor
+   from everything else.
+4. **Gaps in the text:** `wait.any` lists only kernel objects, not the
+   devices that can be waited for; `-WR_EBUSY` also means "you already hold
+   this mutex"; the rule on unknown flags is followed but not written; the
+   WASI calls answered are not listed; nothing says what a program sees
+   when the device sleeps (decisions 6 and 7).
+
+### Decision
+
+**What is frozen.** For all of 1.x: every call of 1.8 with its import
+name, arguments, result and meaning; the error codes; the layouts in
+memory (ops, events, search state, items); property numbers and flag bits;
+the metadata keys; the WASI calls the kernel answers. A minor version may
+only add: calls, properties, flags, error codes, metadata keys, WASI calls
+answered. Anything else is 2.0.
+
+**The four fixes, before freezing:**
+
+1. **Newer minor versions load.** The kernel accepts
+   `wasm-rtos:kernel/<interface>@1.N.0` for any N. A call it has answers
+   whatever minor the program names; a call it does not have (added after
+   its version) returns `-WR_EUNSUPPORTED`, as an absent device does. A
+   program checks, as it already does for devices. Metadata stating a newer
+   minor still loads; only another major fails.
+2. **Every WASI preview 1 call links.** The ones the kernel answers are
+   listed in `docs/abi.md`; every other one, and the file calls on a build
+   without files, returns `ENOSYS` (52).
+3. **A child's priority is at most its parent's**: a higher one is lowered
+   to the caller's base priority. The host still creates tasks at any
+   priority.
+4. **The text**: `wait.any` lists every handle that can be waited for;
+   `-WR_EBUSY` gets its second meaning (`mutex-lock` on a mutex the program
+   holds); the rules say unknown flags are `-WR_EINVAL` and unknown
+   properties `-WR_EUNSUPPORTED`, so a later flag or property is detected
+   on an older kernel; the WASI list; a section "When the device sleeps":
+   the clock goes on, what each device keeps and what it loses.
+
+**What holds the promise.** `tools/check-abi.py` in the kernel, run by its
+CI: the three descriptions agree with each other, and every call of the
+frozen list `docs/abi-1.8.txt` (interface, name, arguments, minor) is still
+there unchanged. A later minor version appends to its own list; removing or
+changing a line fails CI.
+
+### Why
+
+- A promise that CI checks survives the next refactoring; one in a
+  document does not.
+- Fix 1 decides how the ecosystem upgrades: the header can move to 1.9
+  without making every rebuilt program fail on devices that have 1.8.
+  Programs already ask before using a device; asking before using a new
+  call is the same.
+- Fix 2 is the existing rule (what a build leaves out returns an error)
+  applied to WASI, where it was missing.
+- Fix 3: a program must not be able to take more than its creator gave
+  it; after the freeze a change here would break programs that rely on it.
+
+### Instead
+
+- **Newer minor fails to load, with a clear message**: simple, but every
+  header update would split devices into "has the newest kernel" and "runs
+  nothing rebuilt".
+- **Freeze without a check**: the next change to a driver's table could
+  break programs silently.
+- **Recursive mutexes** instead of documenting `-WR_EBUSY`: more state in
+  every mutex, and C libraries that need recursion build it themselves.
+
+### Work, all of it
+
+| # | What | Where | Status |
+|---|---|---|---|
+| 1 | Newer minor versions load; calls the kernel does not have return `-WR_EUNSUPPORTED` | `abi.c` | done |
+| 2 | Every WASI preview 1 call links; the rest return `ENOSYS` | `abi.c`, `fs.c` | done |
+| 3 | A child's priority at most its parent's | `abi.c` / `task.c` | done |
+| 4 | `docs/abi.md`: what is frozen, the rules on flags and properties, `wait.any`, `-WR_EBUSY`, the WASI list, when the device sleeps; a dead `#if` in `abi.c` | `docs/abi.md`, `abi.c` | done |
+| 5 | `tools/check-abi.py`, `docs/abi-1.8.txt`, a CI step | kernel | done |
+| 6 | Test `abi_freeze`: a program importing all 76 calls loads on the default build and on the one without files and processes; imports named `@1.0.0` and `@1.9.0` load, a call 1.8 does not have returns `-WR_EUNSUPPORTED`; an unanswered WASI call returns `ENOSYS`; a child asked above its parent runs at the parent's priority | `wasm-rtos-tests` | done |
+| 7 | Each rule broken on purpose: the test or the check fails | | done |
+| 8 | Roadmap, README | `.github`, kernel | with the merge |
+
+Not in this work: boards (nothing here depends on one); new calls (they
+come in later minor versions).

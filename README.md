@@ -369,6 +369,13 @@ and without either the task gets `OS_DEFAULT_STACK_SIZE`. Overflowing the
 stack traps; `os_task_get_memory_usage` reports the most a task has used, so
 the size can be set from a measurement.
 
+ABI 1.x is frozen at 1.8: a program built for any 1.x runs on every 1.x
+kernel, older or newer. A call the kernel does not have yet returns
+`-WR_EUNSUPPORTED` and a WASI call it does not answer returns `ENOSYS`, so
+programs load everywhere and check. A child never runs above the priority
+of the program that started it. CI holds the kernel to the frozen list
+[`docs/abi-1.8.txt`](docs/abi-1.8.txt) (`tools/check-abi.py`).
+
 `os.h` documents every call and its status codes.
 
 ## Tests

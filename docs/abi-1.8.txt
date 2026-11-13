@@ -1,0 +1,231 @@
+# ABI 1.8, frozen for all of 1.x (docs/decisions.md, 8).
+#
+# call <interface> <name> <core signature> <minor that added it>
+# const <name> <value in include/wasm-rtos.h>
+#
+# tools/check-abi.py fails when a line here stops being true. A later minor
+# version lists what it adds in docs/abi-1.<minor>.txt; lines are never
+# changed or removed within 1.x.
+
+call handle close i(i) 0
+call proc kill i(i) 0
+call proc parent i() 0
+call proc self i() 0
+call proc spawn i(iiiiii) 0
+call proc spawn-path i(iiiiii) 0
+call proc wait i(ii) 0
+call sync event-clear i(ii) 0
+call sync event-create i(ii) 0
+call sync event-get i(i) 0
+call sync event-set i(ii) 0
+call sync event-wait i(iiii) 0
+call sync mutex-create i(ii) 0
+call sync mutex-lock i(ii) 0
+call sync mutex-unlock i(i) 0
+call sync queue-create i(iiii) 0
+call sync queue-receive i(iii) 0
+call sync queue-send i(iii) 0
+call sync semaphore-create i(iiii) 0
+call sync semaphore-give i(i) 0
+call sync semaphore-take i(ii) 0
+call timer create i(ii) 0
+call timer read i(i) 0
+call timer set-period i(ii) 0
+call timer start i(i) 0
+call timer stop i(i) 0
+call wait any i(iii) 0
+call gpio events i(i) 1
+call gpio get i(i) 1
+call gpio open i(iii) 1
+call gpio set i(ii) 1
+call gpio set-mode i(ii) 1
+call gpio watch i(ii) 1
+call display fill i(iiiiiii) 2
+call display flush i(i) 2
+call display get i(ii) 2
+call display open i(iii) 2
+call display set-brightness i(ii) 2
+call display write i(iiiiiiii) 2
+call input get i(ii) 2
+call input open i(iii) 2
+call input read i(iii) 2
+call i2c open i(iiii) 3
+call i2c transaction i(iii) 3
+call spi open i(iiiiii) 3
+call spi transaction i(iii) 3
+call adc get i(ii) 4
+call adc open i(iii) 4
+call adc read i(i) 4
+call adc read-mv i(i) 4
+call pwm get i(ii) 4
+call pwm open i(iiii) 4
+call pwm set-duty i(ii) 4
+call pwm set-frequency i(ii) 4
+call uart get i(ii) 4
+call uart open i(iiii) 4
+call uart read i(iii) 4
+call uart wait-writable i(ii) 4
+call uart write i(iii) 4
+call pulse get i(ii) 5
+call pulse open i(iii) 5
+call pulse receive i(iiiii) 5
+call pulse send i(iiii) 5
+call pulse send-bits i(iiiiiii) 5
+call onewire open i(iiIi) 6
+call onewire search i(iiii) 6
+call onewire transaction i(iii) 6
+call counter get i(ii) 7
+call counter open i(iiii) 7
+call counter read i(ii) 7
+call counter set i(ii) 7
+call counter watch i(iii) 7
+call dac get i(ii) 8
+call dac open i(iii) 8
+call dac write i(ii) 8
+call dac write-mv i(ii) 8
+const WR_ABI_VERSION_MAJOR 1
+const WR_EFAULT 1
+const WR_EINVAL 2
+const WR_EBADH 3
+const WR_ENOMEM 4
+const WR_ELIMIT 5
+const WR_ENOTFOUND 6
+const WR_ETIMEOUT 7
+const WR_EABORTED 8
+const WR_EBUSY 9
+const WR_ENOTOWNER 10
+const WR_EFULL 11
+const WR_EEMPTY 12
+const WR_EUNSUPPORTED 13
+const WR_ETOOLONG 14
+const WR_EBADPROGRAM 15
+const WR_EISDIR 16
+const WR_ENOTDIR 17
+const WR_EDEAD 18
+const WR_EMISMATCH 19
+const WR_ETRAPPED 20
+const WR_EKILLED 21
+const WR_EINUSE 22
+const WR_ENACK 23
+const WR_EBUS 24
+const WR_WAIT_FOREVER 0xFFFFFFFFu
+const WR_EVENT_ALL 1u
+const WR_EVENT_CLEAR 2u
+const WR_EVENT_BITS 0x00FFFFFFu
+const WR_TIMER_PERIODIC 1u
+const WR_GPIO_OUTPUT 0x01u
+const WR_GPIO_PULL_UP 0x02u
+const WR_GPIO_PULL_DOWN 0x04u
+const WR_GPIO_OPEN_DRAIN 0x08u
+const WR_GPIO_ACTIVE_LOW 0x10u
+const WR_GPIO_INIT_HIGH 0x20u
+const WR_GPIO_RISING 0x01u
+const WR_GPIO_FALLING 0x02u
+const WR_DISPLAY_WIDTH 1u
+const WR_DISPLAY_HEIGHT 2u
+const WR_DISPLAY_SHAPE 3u
+const WR_DISPLAY_FORMAT 4u
+const WR_DISPLAY_FORMATS 5u
+const WR_DISPLAY_DPI 6u
+const WR_DISPLAY_BRIGHTNESS 7u
+const WR_DISPLAY_RECTANGLE 0u
+const WR_DISPLAY_ROUND 1u
+const WR_PIXEL_MONO1 1u
+const WR_PIXEL_RGB565 2u
+const WR_PIXEL_XRGB8888 3u
+const WR_INPUT_KIND 1u
+const WR_INPUT_WIDTH 2u
+const WR_INPUT_HEIGHT 3u
+const WR_INPUT_STEPS_PER_TURN 4u
+const WR_INPUT_BUTTONS 1u
+const WR_INPUT_ROTARY 2u
+const WR_INPUT_TOUCH 3u
+const WR_INPUT_KEYBOARD 4u
+const WR_EVENT_KEY 1u
+const WR_EVENT_ROTATE 2u
+const WR_EVENT_TOUCH 3u
+const WR_EVENT_TEXT 4u
+const WR_EVENT_DROPPED 5u
+const WR_KEY_RELEASED 0
+const WR_KEY_PRESSED 1
+const WR_KEY_REPEATED 2
+const WR_KEY_LONG_PRESS 3
+const WR_TOUCH_UP 0
+const WR_TOUCH_DOWN 1
+const WR_TOUCH_MOVE 2
+const WR_KEY_ESC 1
+const WR_KEY_BACKSPACE 14
+const WR_KEY_ENTER 28
+const WR_KEY_SPACE 57
+const WR_KEY_HOME 102
+const WR_KEY_UP 103
+const WR_KEY_LEFT 105
+const WR_KEY_RIGHT 106
+const WR_KEY_DOWN 108
+const WR_KEY_POWER 116
+const WR_KEY_MENU 139
+const WR_KEY_BACK 158
+const WR_KEY_SELECT 0x161
+const WR_BTN_0 0x100
+const WR_REL_HWHEEL 6
+const WR_REL_DIAL 7
+const WR_REL_WHEEL 8
+const WR_I2C_WRITE 1u
+const WR_I2C_READ 2u
+const WR_SPI_WRITE 1u
+const WR_SPI_READ 2u
+const WR_SPI_TRANSFER 3u
+const WR_SPI_DELAY_US 4u
+const WR_SPI_CPHA 0x01u
+const WR_SPI_CPOL 0x02u
+const WR_SPI_LSB_FIRST 0x04u
+const WR_SPI_MODE_0 0u
+const WR_SPI_MODE_1 WR_SPI_CPHA
+const WR_SPI_MODE_2 WR_SPI_CPOL
+const WR_SPI_MODE_3 (WR_SPI_CPOL | WR_SPI_CPHA)
+const WR_ADC_RESOLUTION 1u
+const WR_ADC_MAX 2u
+const WR_ADC_FULL_SCALE_MV 3u
+const WR_PWM_DUTY_MAX 65535u
+const WR_PWM_ACTIVE_LOW 0x01u
+const WR_PWM_FREQUENCY 1u
+const WR_PWM_DUTY 2u
+const WR_UART_PARITY_EVEN 0x01u
+const WR_UART_PARITY_ODD 0x02u
+const WR_UART_STOP_2 0x04u
+const WR_UART_DATA_7 0x08u
+const WR_UART_FLOW_RTS_CTS 0x10u
+const WR_UART_BAUD 1u
+const WR_UART_AVAILABLE 2u
+const WR_UART_ERRORS 3u
+const WR_PULSE_HIGH 0x80000000u
+const WR_PULSE_TIME_MASK 0x7FFFFFFFu
+const WR_PULSE_RECEIVE 0x01u
+const WR_PULSE_IDLE_HIGH 0x02u
+const WR_PULSE_RESOLUTION 1u
+const WR_ONEWIRE_WRITE 1u
+const WR_ONEWIRE_READ 2u
+const WR_ONEWIRE_WRITE_BITS 3u
+const WR_ONEWIRE_READ_BITS 4u
+const WR_ONEWIRE_POWER 5u
+const WR_ONEWIRE_RESET 6u
+const WR_ONEWIRE_WHOLE_BUS 0u
+const WR_ONEWIRE_ALARM 0x01u
+const WR_COUNTER_RISING 1u
+const WR_COUNTER_FALLING 2u
+const WR_COUNTER_BOTH 3u
+const WR_COUNTER_X1 4u
+const WR_COUNTER_X2 5u
+const WR_COUNTER_X4 6u
+const WR_COUNTER_KIND 1u
+const WR_COUNTER_MAX_HZ 2u
+const WR_COUNTER_FILTER_NS 3u
+const WR_COUNTER_PULSE 1u
+const WR_COUNTER_QUADRATURE 2u
+const WR_DAC_RESOLUTION 1u
+const WR_DAC_MAX 2u
+const WR_DAC_FULL_SCALE_MV 3u
+const WR_DAC_VALUE 4u
+const WR_NEC_ITEMS 67u
+const WR_NEC_CARRIER_HZ 38000u
+const WR_DS18B20_FAMILY 0x28u

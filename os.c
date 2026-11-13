@@ -847,7 +847,8 @@ static int os_host_import_exists(const char* module_name, const char* import_nam
 /*
  * The host function an import names: the guest ABI first, then the file
  * system's WASI calls, the basic WASI calls, and what the embedder
- * registered. *out stays NULL when nothing answers.
+ * registered; a WASI call none of them answers returns ENOSYS. *out stays
+ * NULL when nothing answers.
  */
 static WmResult os_resolve_host_import(
     const WmModule* program,
@@ -887,7 +888,7 @@ static WmResult os_resolve_host_import(
             return os_host_function(node->signature, node->function, out);
         }
     }
-    return NULL;
+    return os_abi_resolve_absent_wasi(program, module, module_length, name, out);
 }
 
 static WmResult os_resolve_import(
