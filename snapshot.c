@@ -236,6 +236,72 @@ void os_swap_discard(OsTaskHandle task)
     task->swapped_memory = NULL;
 }
 
+/* Every swapped-out task's state, to fn, for a page store that leaves; the first error stops it. */
+OsStatus os_swap_images_each(OsStatus (*fn)(OsPageImage* image, void* context), void* context)
+{
+    OsTaskHandle task = NULL;
+
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        if (task->swap_image.count > 0U)
+        {
+            OsStatus status = fn(&task->swap_image, context);
+            if (status != OS_STATUS_OK)
+            {
+                return status;
+            }
+        }
+    }
+    return OS_STATUS_OK;
+}
+
+static int os_memory_on_slots(WmMemory* memory, uint32_t first, uint32_t count)
+{
+    uint32_t index = 0U;
+    uint32_t frames = memory != NULL ? wm_memory_frames(memory) : 0U;
+
+    for (index = 0U; index < frames; ++index)
+    {
+        if (wm_memory_frame_slot(memory, index) - first < count)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * A page store is gone with slots [first, first + count): every task with a
+ * frame or its swapped-out state there ends as one that traps, with error;
+ * the others go on. Between slices.
+ */
+void os_tasks_end_on_slots(uint32_t first, uint32_t count, const char* error)
+{
+    OsTaskHandle task = NULL;
+
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        uint32_t i = 0U;
+        int on = task->state != OS_TASK_DEAD &&
+                 ((task->wasm_instance != NULL && os_memory_on_slots(wm_instance_memory(task->wasm_instance), first, count)) ||
+                  os_memory_on_slots(task->swapped_memory, first, count));
+        for (i = 0U; !on && task->state != OS_TASK_DEAD && i < task->swap_image.count; ++i)
+        {
+            on = task->swap_image.slots[i] - first < count;
+        }
+        if (!on)
+        {
+            continue;
+        }
+        os_swap_discard(task);
+        os_set_last_error(task, "page store", error, OS_STATUS_ERROR);
+        os_task_record_error(task);
+        os_record_task_exit(task, OS_TASK_EXIT_WASM_ERROR, 1U);
+        os_set_task_dead(task);
+    }
+    os_recalculate_task_counters();
+}
+
 void os_swap_forget_deliveries(OsTaskHandle task)
 {
     task->swap_return_pending = 0U;

@@ -58,6 +58,10 @@ for (;;)
   every function import when the program is loaded, not when it is first
   called.
 - WASI preview 1 for programs, including arguments.
+- Paging to several stores at once (an SD card and a computer on the cable,
+  say), by priority, which may change while programs run; a store leaves
+  with its frames moved elsewhere, or is lost and takes only the programs
+  that had frames on it.
 - Processes: programs start other programs from memory or from a file path,
   wait for them and stop them. Processes of the same program share it: its
   bytes and parsed module are loaded once, found by their contents.
