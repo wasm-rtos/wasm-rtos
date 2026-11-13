@@ -591,3 +591,122 @@ the last process of it is deleted.
 Measured on the ESP32 (no PSRAM, the tour example from the SD card, 40 KB
 with `printf`): without sharing its child got `-WR_ENOMEM` with 12 or 16
 frames of RAM for programs; with it the tour and its child run with 16.
+
+## 10. Several page stores, and one going away
+
+**Decided and built (2026-11-13).**
+
+### Problem
+
+The kernel pages programs' memory to one store (`os_page_store_set`). A
+board often has more than one place for frames: an ESP32 with a card and a
+computer on its cable, a chip with PSRAM and a card. With one store the
+port must pick, and a board whose card is full cannot use the computer.
+And nothing says what happens when a store goes: today a frame that cannot
+be read makes its program trap with "exhaustion: ... could not move a
+frame", which reads like running out of memory.
+
+### Decision
+
+**Stores are added with a priority**, as swap areas are on Linux
+(`swapon -p`):
+
+```c
+OsStatus os_page_store_add(const OsPageStore* store, uint32_t priority);
+OsStatus os_page_store_priority(const OsPageStore* store, uint32_t priority);
+OsStatus os_page_store_remove(const OsPageStore* store);   /* gracefully */
+OsStatus os_page_store_lost(const OsPageStore* store);     /* it is gone */
+```
+
+`os_page_store_set` stays: it sets the RAM budget (the store's
+`ram_frames` and `ram`) and makes that store the only one; stores added
+after it give slots only (their RAM fields must be 0). Up to
+`OS_PAGE_MAX_STORES` (4).
+
+- **One space of slots.** Each store's slots follow the previous one's:
+  the interpreter still sees a frame's slot as one number, and the kernel
+  knows which store it is on. The promise that every frame has a slot
+  counts the slots of all stores.
+- **Where a dirty frame goes:** the store with the highest priority that
+  has a free slot; between stores of equal priority, one after the other
+  (their writes then overlap when they write in the background). Each
+  store keeps writing like a log from its own head.
+- **Priorities change while it runs** (`os_page_store_priority`): frames
+  written from then on follow the new order; frames already stored stay
+  where they are. The port gives the defaults; the person changes them
+  from the page (below) or a script.
+- **Removing a store** (`os_page_store_remove`): every frame on it comes
+  back into RAM and is written to another store when it leaves again, and
+  every swapped-out task's state on it is copied to another; then the store
+  is forgotten. Refused (`OS_STATUS_BUSY`) when the other stores lack the
+  slots, and nothing is moved.
+- **A store that is gone** (`os_page_store_lost`, when the port knows: a
+  card pulled out, a cable unplugged): its frames are lost. Every task with
+  a frame or its state on it ends now, as a trap, with the error
+  `page store gone`; every other task goes on; its slots are forgotten.
+- **A read that fails** ends the task that needed the frame with
+  `page store: a frame could not be read`, not an "exhaustion" (which made
+  the kernel drop the code cache and try again, for nothing).
+- `os_page_get_stats` counts all stores; `os_page_get_store_stats` gives
+  one store's slots, used slots, writes and reads.
+
+**Where the person sets them.** The board port lists its stores to the
+page over the cable (decision 3 of the site) and takes a new priority for
+one; the page's Board section shows each store (name, priority, slots
+used, writes, reads) with its priority to edit. The script does the same
+(`stores`, `priority <store> <n>`). On the page, a chip of one's own may
+have several stores with priorities, so a board with, say, PSRAM and a
+card can be tried before it exists.
+
+The interpreter gains two calls the kernel needs to move frames:
+`wm_memory_frame_slot` (a frame's slot) and `wm_memory_frame_unstore`
+(forget a frame's slot and count it dirty, so it is written to a new one
+when it leaves RAM).
+
+### Why
+
+- A board's places for frames differ in speed and lifetime; the fastest
+  that has room should take the next frame, the others only when it is
+  full, and a store that comes and goes (a computer on a cable) must not
+  take the programs that never used it.
+- One space of slots keeps the interpreter unchanged in how it pages;
+  only the kernel knows there are several stores.
+- Linux's rules (priorities, equal ones taking turns, `swapoff` bringing
+  pages back) are known and have held for decades.
+
+### Instead
+
+- **One store made of several by the port**: every port would write the
+  same code, and the kernel could not tell which programs a lost store
+  takes with it.
+- **Copy every frame to two stores** (a mirror): a lost store then costs
+  nothing, but every write is twice, on chips where writes are what is
+  slow.
+- **A lost store ends every program**: simpler, and wrong for a computer
+  on a cable that only some programs used.
+
+### Work, all of it
+
+| # | What | Where | Status |
+|---|---|---|---|
+| 1 | `wm_memory_frame_slot`, `wm_memory_frame_unstore`; a test | `wasm-rtos-vm` | done |
+| 2 | Stores in a list with priorities and slot ranges; where a frame goes; per-store logs, background work and statistics | `page.c` | done |
+| 3 | `os_page_store_add`, `os_page_store_priority`, `os_page_store_remove` (frames and swapped states moved, or BUSY), `os_page_store_lost` (owners end), `os_page_get_store_stats`; the read-failure error | `page.c`, `snapshot.c`, `os.h` | done |
+| 4 | Test `page_stores`: a full store spills to the next; equal priorities take turns; removing moves frames and states with the bytes intact, and is refused without room; a lost store ends its owners and only them; a save and restore with two stores; each rule broken on purpose | `wasm-rtos-tests` | done |
+| 5 | ESP32 port: the card first, the computer on the cable after it; the cable gone is a lost store; STORES and PRIORITY commands; `board.py stores`, `priority`; measured: a program larger than the card's share | board tests (local) | done |
+| 6 | The page: the board's stores in the Board section with priorities to edit; a chip of one's own with several stores and priorities | `wasm-rtos.github.io` | done |
+| 7 | README, `os.h`; the roadmap | kernel, `.github` | done |
+
+Checked (2026-11-13). Test `page_stores`: 32 checks; ten ways of breaking
+the rules (priority ignored, no turns, no room check, swapped states or
+frames left behind, a leaving store still written to, a lost store ending
+nobody or everybody, a failed read reported as exhaustion, an image not
+moved) each fail it. On the ESP32 with its card (priority 2) and the
+computer on the cable (priority 1), a program walking 256 KB:
+
+| | Result |
+|---|---|
+| card above the computer | 448 frames out, 396 in, all on the card; 21 s |
+| the computer raised to 3 | the same frames on the computer; 68 s over the cable |
+| one program on each, then the cable silent | the computer's ends with `page store gone`, the card's runs to its end |
+| the cable back | the computer's store returns, empty, at the priority last set |

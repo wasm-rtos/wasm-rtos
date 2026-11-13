@@ -685,8 +685,54 @@ typedef struct OsPageStore
 void os_page_read_done(uint32_t slot, OsStatus status);
 void os_page_write_done(uint32_t slot, OsStatus status);
 
-/* NULL turns paging off. OS_STATUS_BUSY while tasks exist. */
+/*
+ * NULL turns paging off. OS_STATUS_BUSY while tasks exist. The store set
+ * gives the RAM budget (ram_frames, ram) and is the only one; more can be
+ * added after it.
+ */
 OsStatus os_page_store_set(const OsPageStore* store);
+
+/*
+ * Several stores (up to OS_PAGE_MAX_STORES, 4), as swap areas are: a dirty
+ * frame goes to the store of the highest priority with a free slot, and
+ * stores of equal priority take turns. Every store is named by the pointer
+ * it was added with. An added store gives slots only (ram_frames 0, ram
+ * NULL). Stores may be added, re-prioritized, removed and lost while tasks
+ * run, between slices.
+ *
+ * os_page_store_priority: frames written from then on follow the new
+ * order; frames already stored stay where they are.
+ *
+ * os_page_store_remove: the store leaves gracefully. Its frames come back
+ * into RAM and go to the other stores when they leave again, and swapped
+ * tasks' states on it are copied to them. OS_STATUS_BUSY, and nothing moved,
+ * when the other stores do not have the slots for every frame promised.
+ *
+ * os_page_store_lost: the store is gone (a card pulled out, a cable
+ * unplugged) and its frames with it. Every task with a frame or its state
+ * on it ends as one that traps, with the error "page store gone"; every
+ * other task goes on.
+ *
+ * A read that fails ends the task that needed the frame with "page store:
+ * a frame could not be read".
+ */
+OsStatus os_page_store_add(const OsPageStore* store, uint32_t priority);
+OsStatus os_page_store_priority(const OsPageStore* store, uint32_t priority);
+OsStatus os_page_store_remove(const OsPageStore* store);
+OsStatus os_page_store_lost(const OsPageStore* store);
+/* A background read or write of an added store ended (os_page_read_done and os_page_write_done are the first store's). */
+void os_page_store_done(const OsPageStore* store, uint32_t slot, OsStatus status);
+
+/* One store: its priority, slots, slots in use, frames written to it and read from it. */
+typedef struct OsPageStoreStats
+{
+    uint32_t priority;
+    uint32_t slots;
+    uint32_t used_slots;
+    uint32_t stores;
+    uint32_t loads;
+} OsPageStoreStats;
+OsStatus os_page_get_store_stats(const OsPageStore* store, OsPageStoreStats* out_stats);
 /*
  * The bytes of the frame pool for a store: ram_frames frames, and a few
  * more for frames on their way out when it writes in the background (they

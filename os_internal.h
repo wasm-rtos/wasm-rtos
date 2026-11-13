@@ -167,6 +167,10 @@ typedef struct OsPageImage
 OsStatus os_page_image_save(OsPageImage* image, WmRuntime* runtime, WmInstance* instance, WmResult* out_result);
 OsStatus os_page_image_load(const OsPageImage* image, WmRuntime* runtime, WmInstance* instance, WmResult* out_result);
 void os_page_image_drop(OsPageImage* image);
+/* Each swapped-out task's state, for a page store that leaves (snapshot.c). */
+OsStatus os_swap_images_each(OsStatus (*fn)(OsPageImage* image, void* context), void* context);
+/* The tasks with a frame or state on slots [first, first + count) end with error (snapshot.c). */
+void os_tasks_end_on_slots(uint32_t first, uint32_t count, const char* error);
 /* Frames the store has read in the background go to their programs, which go on. */
 void os_page_poll(void);
 /* A task waits for a frame read in the background, from the end of its slice; then it goes on. */
