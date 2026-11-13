@@ -133,13 +133,17 @@ void** os_task_abi_state(OsTaskHandle task);
 
 /*
  * The ABI call an import names, or *out NULL when it is not one. With the
- * program given, a kernel interface no driver offers answers unsupported.
+ * program given, a kernel interface no driver offers, and a call newer than
+ * this kernel, answer unsupported.
  */
 WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t module_length, const char* name,
                         uint32_t name_length, WmFunc** out);
 /* A WASI call for what nothing else answers (arguments, exit, random, standard streams), or *out NULL. */
 WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
                              WmFunc** out);
+/* Any other WASI call: it links and returns ENOSYS. *out NULL for other modules. */
+WmResult os_abi_resolve_absent_wasi(const WmModule* program, const char* module, uint32_t module_length,
+                                    const char* name, WmFunc** out);
 void os_abi_release_task(OsTaskHandle task);
 /* Every driver's poll, before a scheduling decision; every driver's shutdown, which also forgets them. */
 void os_drivers_poll(void);

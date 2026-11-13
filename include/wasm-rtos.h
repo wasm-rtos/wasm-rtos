@@ -9,6 +9,10 @@
  * ends. Strings are (pointer, length) in UTF-8; the *_cstr helpers take a
  * NUL-terminated string instead. Time, sleeping and yielding are WASI
  * (clock_gettime, nanosleep/usleep, sched_yield). See docs/abi.md.
+ *
+ * ABI 1.x is frozen at 1.8: what is declared here does not change within
+ * 1.x. A program built with a newer 1.x header still loads on this kernel;
+ * calls this kernel lacks return -WR_EUNSUPPORTED.
  */
 
 #include <stdint.h>

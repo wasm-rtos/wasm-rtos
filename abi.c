@@ -1194,6 +1194,14 @@ static int32_t os_abi_child_handle(OsStatus status, OsTaskHandle child)
     return handle;
 }
 
+/* A program may not start a child above its own base priority; 0 still inherits it. */
+static uint32_t os_abi_child_priority(uint32_t priority)
+{
+    uint32_t own = os_task_get_base_priority(os_task_get_current());
+
+    return priority > own ? own : priority;
+}
+
 static OS_HOST_FUNCTION(os_abi_proc_spawn)
 {
     OS_HOST_RETURNS(int32_t);
@@ -1224,7 +1232,8 @@ static OS_HOST_FUNCTION(os_abi_proc_spawn)
     status = os_guest_buffer_open(&bytes, bytes_address, bytes_length, OS_GUEST_IN);
     if (status == OS_STATUS_OK)
     {
-        status = os_task_spawn(&child, bytes.data, bytes_length, argc > 0U ? args : NULL, argc, priority, stack_size);
+        status = os_task_spawn(&child, bytes.data, bytes_length, argc > 0U ? args : NULL, argc,
+                               os_abi_child_priority(priority), stack_size);
         os_guest_buffer_drop(&bytes);
     }
     else if (status != OS_STATUS_OUT_OF_MEMORY)
@@ -1267,7 +1276,8 @@ static OS_HOST_FUNCTION(os_abi_proc_spawn_path)
     {
         OS_HOST_RETURN(result);
     }
-    status = os_task_spawn_path(&child, path, argc > 0U ? args : NULL, argc, priority, stack_size);
+    status = os_task_spawn_path(&child, path, argc > 0U ? args : NULL, argc, os_abi_child_priority(priority),
+                                stack_size);
     free(storage);
     OS_HOST_RETURN(os_abi_child_handle(status, child));
 }
@@ -1545,9 +1555,7 @@ static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
     (void)os_guest_write(events_address, &written, sizeof(written));
     OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
 }
-#endif
 
-#if defined(OS_ABI_HAS_WASI)
 /* ---------------------------------------------------------------------------
  * WASI basics: arguments, environment, exit, random bytes and the standard
  * streams, for what neither the table below nor the file system answers.
@@ -1784,7 +1792,8 @@ typedef struct OsAbiImport
 /*
  * Kernel interfaces are imported as "wasm-rtos:kernel/<interface>@1.<minor>.0".
  * A program built for 1.N imports 1.N names; this kernel links every minor
- * from the one that added a call up to OS_ABI_VERSION_MINOR.
+ * from the one that added a call, and any newer one: a call added after
+ * OS_ABI_VERSION_MINOR reports itself unsupported (docs/decisions.md, 8).
  */
 #define WR_KERNEL_PREFIX "wasm-rtos:kernel/"
 #define WR_MODULE(interface) WR_KERNEL_PREFIX interface
@@ -1883,7 +1892,7 @@ static int os_abi_kernel_module(const char* module, uint32_t length, uint32_t* o
         minor = minor * 10U + (uint32_t)(module[at++] - '0');
     }
     *out_minor = minor;
-    return length - at == 2U && memcmp(module + at, ".0", 2U) == 0 && minor <= OS_ABI_VERSION_MINOR;
+    return length - at == 2U && memcmp(module + at, ".0", 2U) == 0;
 }
 
 /* A call nothing in this build answers: an i32 result says so, other results stay 0. */
@@ -1894,6 +1903,14 @@ static OS_HOST_FUNCTION(os_abi_absent)
     OS_HOST_RETURN(-WR_EUNSUPPORTED);
 }
 
+/* The same for WASI, whose calls return an errno. */
+static OS_HOST_FUNCTION(os_abi_absent_wasi)
+{
+    OS_HOST_RETURNS(int32_t);
+    OS_ABI_UNUSED();
+    OS_HOST_RETURN(52); /* ENOSYS; wasi.h is not in every build */
+}
+
 static OS_HOST_FUNCTION(os_abi_absent_quiet)
 {
     OS_ABI_UNUSED();
@@ -1901,8 +1918,11 @@ static OS_HOST_FUNCTION(os_abi_absent_quiet)
     return NULL;
 }
 
-/* A function of the type the program declares for the import, that reports the call unsupported. */
-static WmResult os_abi_absent_function(const WmModule* program, const char* name, WmFunc** out)
+/*
+ * A function of the type the program declares for the import, that reports
+ * the call unsupported: -WR_EUNSUPPORTED, or ENOSYS for WASI.
+ */
+static WmResult os_abi_absent_function(const WmModule* program, const char* name, uint8_t wasi, WmFunc** out)
 {
     static const char letters[] = { 'i', 'I', 'f', 'F' };
     const uint8_t* params = NULL;
@@ -1935,15 +1955,19 @@ static WmResult os_abi_absent_function(const WmModule* program, const char* name
     }
     signature[length++] = ')';
     signature[length] = '\0';
-    return os_host_function(signature, result_count == 1U && results[0] == WM_I32 ? os_abi_absent : os_abi_absent_quiet,
-                            out);
+    if (result_count != 1U || results[0] != WM_I32)
+    {
+        return os_host_function(signature, os_abi_absent_quiet, out);
+    }
+    return os_host_function(signature, wasi ? os_abi_absent_wasi : os_abi_absent, out);
 }
 
 /*
  * The ABI call an import names, or *out NULL when it is not one: the
  * kernel's own interfaces, then the drivers'. A kernel interface no driver
- * offers gets calls that report themselves unsupported, made to the type
- * program declares (when program is given).
+ * offers, and a call named with a minor newer than this kernel's that it
+ * does not have, get calls that report themselves unsupported, made to the
+ * type program declares (when program is given).
  */
 WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t module_length, const char* name,
                         uint32_t name_length, WmFunc** out)
@@ -1973,9 +1997,13 @@ WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t mo
             return os_host_function(import->signature, import->function, out);
         }
     }
-    if (!versioned || known)
+    if (!versioned)
     {
         return NULL;
+    }
+    if (known)
+    {
+        return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
     }
     for (index = 0U; index < g_driver_count; ++index)
     {
@@ -1991,7 +2019,24 @@ WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t mo
                 return os_host_function(driver->calls[call].signature, driver->calls[call].function, out);
             }
         }
+        return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
+    }
+    return os_abi_absent_function(program, name, 0U, out);
+}
+
+/*
+ * A WASI call nothing answered (not the kernel, the files nor the
+ * embedder): it links and returns ENOSYS, so a program that only might use
+ * it still loads. *out NULL for any other module.
+ */
+WmResult os_abi_resolve_absent_wasi(const WmModule* program, const char* module, uint32_t module_length,
+                                    const char* name, WmFunc** out)
+{
+    *out = NULL;
+    if (!os_name_is(module, module_length, "wasi_snapshot_preview1") &&
+        !os_name_is(module, module_length, "wasi_unstable"))
+    {
         return NULL;
     }
-    return os_abi_absent_function(program, name, out);
+    return os_abi_absent_function(program, name, 1U, out);
 }

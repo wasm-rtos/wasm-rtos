@@ -5,6 +5,14 @@ built against ABI 1.x keep working on every kernel that supports 1.x; new
 calls arrive in minor versions, and only a new major version may change or
 remove anything here.
 
+**1.x is frozen at 1.8.** For all of 1.x, every call of 1.8 keeps its
+import name, arguments, result and meaning, and so do the error codes, the
+layouts in memory, property numbers, flag bits, metadata keys and the WASI
+calls the kernel answers. A minor version may only add: calls, properties,
+flags, error codes, metadata keys, WASI calls answered. The list
+[`abi-1.8.txt`](abi-1.8.txt) holds every call and constant of 1.8, and the
+kernel's CI fails when one of its lines stops being true.
+
 | Version | Adds |
 |---|---|
 | 1.0 | `handle`, `sync`, `timer`, `wait`, `proc`, WASI, metadata |
@@ -31,7 +39,9 @@ remove anything here.
 - Programs call the kernel; the kernel never calls into a program.
 - Every call of the ABI version is there to import, on every build. What a
   build or device leaves out (processes, files) returns `-WR_EUNSUPPORTED`,
-  so one program runs everywhere and checks instead of failing to load.
+  so one program runs everywhere and checks instead of failing to load. The
+  same holds for calls of a newer minor version (see Interfaces) and for
+  WASI calls the kernel does not answer (`ENOSYS`, see WASI).
 
 ## Rules every call follows
 
@@ -59,6 +69,10 @@ remove anything here.
 - **Ownership.** An object a program creates exists while some program holds
   a handle to it, and is deleted with the last one. Objects the embedder
   creates belong to the embedder.
+- **Flags and properties.** A flag bit a call does not know is
+  `-WR_EINVAL`; a property number it does not know is `-WR_EUNSUPPORTED`. So
+  a program using a flag or property of a later minor version learns on an
+  older kernel that it is not there, instead of having it ignored.
 - **Sharing.** Programs share nothing but kernel objects. A named object
   (`wr_queue_open("sensor", ...)`) is created by the first program that opens
   the name and found by the others; names are per object type. Opening a name
@@ -76,7 +90,7 @@ remove anything here.
 | 6 | `WR_ENOTFOUND` | no such file or name |
 | 7 | `WR_ETIMEOUT` | the timeout ran out |
 | 8 | `WR_EABORTED` | the wait was cancelled |
-| 9 | `WR_EBUSY` | the wait ended because the program was suspended |
+| 9 | `WR_EBUSY` | the wait ended because the program was suspended; `mutex-lock` on a mutex the program already holds (mutexes are not recursive) |
 | 10 | `WR_ENOTOWNER` | the mutex belongs to another program |
 | 11 | `WR_EFULL` | the queue or semaphore is full |
 | 12 | `WR_EEMPTY` | the queue is empty |
@@ -96,11 +110,18 @@ remove anything here.
 ## Interfaces
 
 Each interface is the import module `wasm-rtos:kernel/<name>@1.<minor>.0`,
-with the minor version the program was built for. A kernel of 1.M accepts
-every 1.N with N <= M, so a program built for 1.0 imports `…@1.0.0` and
-still runs on a 1.1 kernel; a call added in 1.1 exists only under 1.1 and
-later names. Functions not listed in an interface may be added by later
-minor versions.
+with the minor version the program was built for. A kernel accepts every
+minor version, older and newer than its own:
+
+- a program built for 1.0 imports `…@1.0.0` and runs on a 1.8 kernel; a
+  call added in 1.1 exists only under 1.1 and later names;
+- a program built for 1.9 imports `…@1.9.0` and still loads on a 1.8
+  kernel. Calls 1.8 has work as always; a call or interface added after
+  1.8 links too and returns `-WR_EUNSUPPORTED`, as an absent device does.
+  A program that uses a new call checks its result, as it does for devices.
+
+Another major version (`@2.0.0`) does not link. Functions not listed in an
+interface may be added by later minor versions.
 
 ### `handle`
 `close(h)`.
@@ -127,17 +148,31 @@ expirations: wait for its handle, then `read(t)` returns and resets the
 count.
 
 ### `wait`
-`any(handles, count, timeout)` returns the index of the first ready handle:
-a queue holding an item, a semaphore that can be taken, an event group with
-a bit set, a timer that has expired, a child that has ended. It does not
-consume anything; take the item, the count or the result afterwards.
-Mutexes cannot be waited for here.
+`any(handles, count, timeout)` returns the index of the first ready handle.
+These handles can be waited for, and are ready when:
+
+| Handle | Ready when |
+|---|---|
+| queue | it holds an item |
+| semaphore | it can be taken |
+| event group | a bit is set |
+| timer | it has expired since the last `read` |
+| child (`proc`) | it has ended |
+| `gpio` pin (1.1) | a watched edge has not been read (`watch`, `events`) |
+| `input` device (1.2) | events are queued |
+| `uart` port (1.4) | received bytes wait to be read |
+| `counter` (1.7) | the count is outside its `watch` window |
+
+It does not consume anything; take the item, the count or the result
+afterwards. Other handles (mutexes, the other devices) give `-WR_EBADH`.
 
 ### `proc`
 - `spawn(module, length, args, argc, priority, stack_size)` and
   `spawn-path(path, length, args, argc, priority, stack_size)` start a child
-  and return its handle. Priority 0 inherits the caller's; stack size 0 lets
-  the child's metadata or the kernel choose.
+  and return its handle. Priority 0 inherits the caller's base priority; a
+  higher priority than the caller's is lowered to it, so a program never
+  takes more of the processor than it was given. Stack size 0 lets the
+  child's metadata or the kernel choose.
 - `wait(child, timeout)` returns the child's exit code (0 to 2^31-1),
   `-WR_ETRAPPED` or `-WR_EKILLED`, and collects it: the handle then refers to
   nothing (`-WR_EBADH`). Close the handle afterwards.
@@ -491,7 +526,13 @@ chip).
 
 Everything WASI preview 1 covers comes from WASI: arguments and environment,
 files (the kernel's file system, see the README), output, exit, random
-numbers. The kernel answers these calls itself:
+numbers. Both `wasi_snapshot_preview1` and the older `wasi_unstable` link.
+
+**Every WASI call links.** One the kernel (or the embedder) does not
+answer, sockets for example, returns `ENOSYS` (52), so a C library that
+imports it only in case does not keep the program from loading.
+
+On every build the kernel answers:
 
 - `clock_time_get`, `clock_res_get`: kernel time, 1 ms resolution, for every
   clock. Until a platform supplies wall time, the realtime clock counts from
@@ -499,6 +540,21 @@ numbers. The kernel answers these calls itself:
 - `poll_oneoff`: sleeps only the calling program until the earliest clock
   subscription (`nanosleep`, `usleep`). File subscriptions are ready at once.
 - `sched_yield`: ends the program's time slice.
+- `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get` (no
+  variables), `proc_exit`, `random_get`.
+- `fd_write` to 1 and 2, `fd_read`, `fd_seek`, `fd_close`, `fd_fdstat_get`
+  on the standard streams; `fd_prestat_get`, `fd_prestat_dir_name` (no
+  directory without files: `EBADF`).
+
+With files, also: `path_open`, `fd_read`, `fd_pread`, `fd_seek`,
+`fd_tell`, `fd_readdir`, `fd_filestat_get`, `path_filestat_get` (preview 1
+only), `fd_prestat_get`, `fd_prestat_dir_name`, `fd_fdstat_get`,
+`fd_close`; `fd_advise`, `fd_datasync`, `fd_sync` succeed and do nothing.
+The file system is read-only: `fd_pwrite`, `fd_allocate`,
+`fd_filestat_set_size`, `fd_filestat_set_times`, `fd_fdstat_set_flags`,
+`path_create_directory`, `path_filestat_set_times`, `path_link`,
+`path_remove_directory`, `path_rename`, `path_symlink`,
+`path_unlink_file` return `EROFS`. Every other WASI call returns `ENOSYS`.
 
 ## Metadata: the `wasm-rtos.app` section
 
@@ -516,10 +572,38 @@ skipped; a section that is not whole records fails the load.
 | 5 | UTF-8 | reserved: file extensions the program opens, `;`-separated |
 | 6 | bytes | reserved: device requirements |
 
-A program for 1.8 states 65544 (1.8); kernels refuse only another major.
+A program for 1.8 states 65544 (1.8); kernels refuse only another major,
+and a newer minor loads like its imports do.
 In C: `WR_APP_ABI_VERSION();`, `WR_APP_STACK_SIZE(4096);`,
 `WR_APP_NAME("Clock");`. In Rust: `#[link_section = "wasm-rtos.app"]` on a
 static byte array.
+
+## When the device sleeps
+
+A device may save the whole system, sleep deeply (losing all RAM) and go on
+where it stopped. To a program this looks like a long pause between two
+instructions:
+
+- **The clock goes on.** After waking, `clock_time_get` and the kernel's
+  time include the sleep; they do not start again from boot. A timeout or
+  delay that fell due during the sleep ends at once, with the result it
+  would have had; one still running keeps its time left.
+- **Kernel objects are kept** as they were: handles, queues and their
+  items, mutexes and their owners, semaphores, event bits, timers, children,
+  open files and their positions.
+- **Devices are set up again** as the program left them, by name: pin
+  modes and output levels, bus devices, serial speed and format, PWM duty,
+  analog outputs, counters and their counts, pulse channels, display
+  brightness. Data waiting to be read (edges, input events, received bytes)
+  is kept.
+- **What happened during the sleep is lost**: edges, key presses, serial
+  bytes and counts that arrived while the device slept, except the edge or
+  press that woke it, which the program sees. Keys held are released. A
+  display that loses power loses its picture; a device that would lose a
+  picture this way does not sleep while a program has it open.
+- **When something is gone after waking** (the program's file changed, a
+  device is no longer there), only the programs that relied on it end, with
+  an error; the others go on.
 
 ## Reserved for later minor versions
 

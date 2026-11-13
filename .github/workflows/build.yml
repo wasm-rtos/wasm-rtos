@@ -24,6 +24,11 @@ jobs:
         with:
           submodules: recursive
 
+      # ABI 1.x is frozen (docs/decisions.md, 8): the wit, the header and the
+      # kernel's tables agree, and docs/abi-1.*.txt still holds line by line.
+      - name: Check the ABI
+        run: python3 tools/check-abi.py
+
       - name: Build every configuration
         run: |
           cat > "$RUNNER_TEMP/main.c" <<'EOF'
