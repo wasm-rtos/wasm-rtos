@@ -358,6 +358,8 @@ if (os_schedule() == OS_STATUS_NO_READY_TASKS && os_get_next_wakeup_ms() > 5000U
 ```
 
 A chip that wakes only by level, or only from some pins, arms what it can.
+One that wakes by level must not sleep while a wake pin is at that level
+(a button still held): it would wake at once, for a press already seen.
 
 At start, the port sets everything up as at a first start (`os_init`, the
 clock, the page store, file systems, its ports and devices under the same
