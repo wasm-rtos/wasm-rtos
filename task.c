@@ -15,7 +15,8 @@ static OsStatus os_task_initialize(
     uint32_t entry_arg_count,
     const char* task_name,
     uint32_t stack_size,
-    uint32_t priority
+    uint32_t priority,
+    OsProgram* program
 );
 static OsStatus os_task_copy_entry_args(OsTaskHandle task, OsValue* entry_args, uint32_t entry_arg_count);
 static void os_task_free_entry_args(OsTaskHandle task);
@@ -43,7 +44,8 @@ OsStatus os_task_create(
         0U,
         task_name,
         stack_size,
-        priority
+        priority,
+        NULL
     );
 }
 
@@ -68,7 +70,8 @@ OsStatus os_task_create_with_args(
         entry_arg_count,
         task_name,
         stack_size,
-        priority
+        priority,
+        NULL
     );
 }
 
@@ -102,6 +105,17 @@ uint32_t os_task_stack_peak(OsTaskHandle task)
     return task->stack_peak_bytes;
 }
 
+/* A process's program, when the task does not take it. */
+static void os_task_drop_program(OsProgram* program)
+{
+#if OS_HAS_PROCESSES
+    os_program_release(program);
+#else
+    (void)program;
+#endif
+}
+
+/* Takes the reference to program (a process's, else NULL) on every path. */
 static OsStatus os_task_initialize(
     OsTaskHandle* out_task,
     uint8_t* wasm_bytes,
@@ -111,7 +125,8 @@ static OsStatus os_task_initialize(
     uint32_t entry_arg_count,
     const char* task_name,
     uint32_t stack_size,
-    uint32_t priority
+    uint32_t priority,
+    OsProgram* program
 )
 {
     OsTaskHandle task = NULL;
@@ -120,6 +135,7 @@ static OsStatus os_task_initialize(
     if (out_task == NULL || wasm_bytes == NULL || wasm_size == 0U ||
         (entry_arg_count > 0U && entry_args == NULL))
     {
+        os_task_drop_program(program);
         return OS_STATUS_INVALID_ARGUMENT;
     }
 
@@ -128,6 +144,7 @@ static OsStatus os_task_initialize(
         status = os_init();
         if (status != OS_STATUS_OK)
         {
+            os_task_drop_program(program);
             return status;
         }
     }
@@ -139,8 +156,12 @@ static OsStatus os_task_initialize(
     task = os_task_allocate();
     if (task == NULL)
     {
+        os_task_drop_program(program);
         return OS_STATUS_OUT_OF_MEMORY;
     }
+#if OS_HAS_PROCESSES
+    task->program = program;
+#endif
 
     task->id = g_os.next_task_id++;
     task->base_priority = priority;
@@ -742,9 +763,8 @@ void os_task_free(OsTaskHandle task)
     free(task->restored_entry_name);
 #if OS_HAS_PROCESSES
     /* The module was parsed in place, so its bytes outlive the runtime. */
-    free(task->owned_wasm_bytes);
+    os_program_release(task->program);
 #if OS_HAS_FS
-    os_fs_image_close(&task->image);
     free(task->image_path);
 #endif
     free(task->argv);
@@ -1008,18 +1028,10 @@ static const char* os_process_name_from_argv(char** argv, uint32_t argc)
     return name[0] != '\0' ? name : "process";
 }
 
-static void os_process_image_release(OsProcessImage* image)
-{
-    free(image->owned_bytes);
-#if OS_HAS_FS
-    os_fs_image_close(&image->file);
-#endif
-}
-
-/* Takes ownership of image and argv on every path. */
+/* Takes the reference to program and ownership of argv on every path. */
 static OsStatus os_task_spawn_owned(
     OsTaskHandle* out_task,
-    OsProcessImage* image,
+    OsProgram* program,
     char** argv,
     uint32_t argc,
     uint32_t priority,
@@ -1032,7 +1044,7 @@ static OsStatus os_task_spawn_owned(
 
     if (g_os.spawned_task_count >= OS_MAX_SPAWNED_TASKS)
     {
-        os_process_image_release(image);
+        os_program_release(program);
         free(argv);
         os_set_last_error(parent, "spawn", "process limit reached", OS_STATUS_LIMIT_REACHED);
         return OS_STATUS_LIMIT_REACHED;
@@ -1043,29 +1055,25 @@ static OsStatus os_task_spawn_owned(
         priority = parent != NULL ? parent->base_priority : (uint32_t)OS_TASK_PRIORITY_NORMAL;
     }
 
-    /* The module is parsed in place and never written. */
+    /* The module is parsed in place and never written; the task holds the program. */
     status = os_task_initialize(
         &task,
-        (uint8_t*)image->bytes,
-        image->size,
+        (uint8_t*)program->bytes,
+        program->size,
         NULL,
         NULL,
         0U,
         os_process_name_from_argv(argv, argc),
         stack_size,
-        priority
+        priority,
+        program
     );
     if (status != OS_STATUS_OK)
     {
-        os_process_image_release(image);
         free(argv);
         return status;
     }
 
-    task->owned_wasm_bytes = image->owned_bytes;
-#if OS_HAS_FS
-    task->image = image->file;
-#endif
     task->argv = argv;
     task->argc = argc;
     task->parent_id = parent != NULL ? parent->id : 0U;
@@ -1089,10 +1097,10 @@ OsStatus os_task_spawn(
     uint32_t stack_size
 )
 {
-    OsProcessImage image;
-    uint8_t* bytes_copy = NULL;
+    OsProgram* program = NULL;
     char** argv_copy = NULL;
     uint32_t index = 0U;
+    OsStatus status = OS_STATUS_OK;
 
     if (out_task == NULL || wasm_bytes == NULL || wasm_size == 0U ||
         (argc > 0U && argv == NULL) || argc > OS_PROC_MAX_ARGS)
@@ -1109,28 +1117,23 @@ OsStatus os_task_spawn(
     }
 
     *out_task = NULL;
-    bytes_copy = (uint8_t*)malloc(wasm_size);
-    if (bytes_copy == NULL)
-    {
-        return OS_STATUS_OUT_OF_MEMORY;
-    }
-    memcpy(bytes_copy, wasm_bytes, wasm_size);
-
     if (argc > 0U)
     {
         argv_copy = os_pack_argv(argv, argc);
         if (argv_copy == NULL)
         {
-            free(bytes_copy);
             return OS_STATUS_OUT_OF_MEMORY;
         }
     }
 
-    memset(&image, 0, sizeof(image));
-    image.bytes = bytes_copy;
-    image.size = wasm_size;
-    image.owned_bytes = bytes_copy;
-    return os_task_spawn_owned(out_task, &image, argv_copy, argc, priority, stack_size);
+    /* The bytes are copied only when no loaded program has them. */
+    status = os_program_from_bytes(wasm_bytes, wasm_size, &program);
+    if (status != OS_STATUS_OK)
+    {
+        free(argv_copy);
+        return status;
+    }
+    return os_task_spawn_owned(out_task, program, argv_copy, argc, priority, stack_size);
 }
 #if OS_HAS_FS
 OsStatus os_task_spawn_path(
@@ -1142,7 +1145,7 @@ OsStatus os_task_spawn_path(
     uint32_t stack_size
 )
 {
-    OsProcessImage image;
+    OsProgram* program = NULL;
     char** argv_copy = NULL;
     char* path_copy = NULL;
     uint32_t index = 0U;
@@ -1178,13 +1181,11 @@ OsStatus os_task_spawn_path(
     }
     memcpy(path_copy, path, strlen(path) + 1U);
 
-    memset(&image, 0, sizeof(image));
-    status = os_fs_image_open(path, &image.file);
+    /* A file of the same contents as a loaded program is that program; it is read whole only if new. */
+    status = os_program_from_path(path, &program);
     if (status == OS_STATUS_OK)
     {
-        image.bytes = image.file.bytes;
-        image.size = image.file.size;
-        status = os_task_spawn_owned(out_task, &image, argv_copy, argc > 0U ? argc : 1U, priority, stack_size);
+        status = os_task_spawn_owned(out_task, program, argv_copy, argc > 0U ? argc : 1U, priority, stack_size);
         argv_copy = NULL;
     }
     if (status != OS_STATUS_OK)

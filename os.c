@@ -595,16 +595,17 @@ OsStatus os_task_get_memory_usage(OsTaskHandle task, OsTaskMemoryUsage* out_usag
     out_usage->interpreter_peak_bytes = (uint32_t)task->memory_account.peak;
 #endif
 #if OS_HAS_PROCESSES
-    if (task->owned_wasm_bytes != NULL)
+    /* The kernel's copy of the program: shared with its other processes, reported for each. */
+    if (task->program != NULL)
     {
-        out_usage->image_bytes = task->wasm_size;
-    }
+        out_usage->image_bytes = task->program->owned_bytes != NULL ? task->program->size : 0U;
 #if OS_HAS_FS
-    if (task->image.copy != NULL)
-    {
-        out_usage->image_bytes = task->image.size;
-    }
+        if (task->program->file.copy != NULL)
+        {
+            out_usage->image_bytes = task->program->size;
+        }
 #endif
+    }
 #endif
     out_usage->swap_bytes = task->swapped ? task->swap_image.bytes : 0U;
     if (task->swapped_memory != NULL)
@@ -937,6 +938,51 @@ static uint8_t os_retry_without_code_cache(WmResult result)
     return 1U;
 }
 
+/*
+ * The task's module: its program's, shared with the program's other
+ * processes, or parsed for it alone (a task the host created, or a
+ * dylink.0 program, which links its libraries into it).
+ */
+static WmResult os_task_load_module(OsTaskHandle task, const uint8_t* wasm_bytes, uint32_t wasm_size)
+{
+#if OS_HAS_PROCESSES
+    if (task->program != NULL)
+    {
+        WmResult result = os_program_module_take(task->program, &task->wasm_module);
+        if (result != NULL)
+        {
+            return result;
+        }
+        task->module_shared = 1U;
+#if OS_HAS_DYLINK
+        if (wm_module_is_dylink(task->wasm_module))
+        {
+            os_program_module_give(task->program);
+            task->module_shared = 0U;
+            return wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+        }
+#endif
+        return NULL;
+    }
+#endif
+    return wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+}
+
+static void os_task_free_module(OsTaskHandle task)
+{
+#if OS_HAS_PROCESSES
+    if (task->module_shared)
+    {
+        os_program_module_give(task->program);
+        task->module_shared = 0U;
+        task->wasm_module = NULL;
+        return;
+    }
+#endif
+    wm_module_free(task->wasm_module);
+    task->wasm_module = NULL;
+}
+
 OsStatus os_task_create_wasm(
     OsTaskHandle task,
     uint8_t* wasm_bytes,
@@ -966,10 +1012,10 @@ OsStatus os_task_create_wasm(
     memset(stack, OS_STACK_PAINT, stack_bytes);
     task->wasm_stack_base = stack;
 
-    result = wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+    result = os_task_load_module(task, wasm_bytes, wasm_size);
     if (os_retry_without_code_cache(result))
     {
-        result = wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+        result = os_task_load_module(task, wasm_bytes, wasm_size);
     }
     if (result != NULL)
     {
@@ -1372,8 +1418,7 @@ void os_task_cleanup_wasm(OsTaskHandle task)
 #endif
     wm_instance_free(task->wasm_instance);
     task->wasm_instance = NULL;
-    wm_module_free(task->wasm_module);
-    task->wasm_module = NULL;
+    os_task_free_module(task);
     if (task->wasm_runtime != NULL)
     {
         (void)os_task_stack_peak(task);

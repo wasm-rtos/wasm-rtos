@@ -614,6 +614,54 @@ void os_fs_image_close(OsFsImage* image)
     memset(image, 0, sizeof(*image));
 }
 
+/*
+ * Whether the file at path holds exactly size bytes equal to bytes, read
+ * in pieces (or through a mapping), never copied whole.
+ */
+uint8_t os_fs_file_matches(const char* path, const uint8_t* bytes, uint32_t size)
+{
+    char normalized[OS_FS_PATH_MAX];
+    const char* relative = NULL;
+    OsFsMount* mount = NULL;
+    OsFsStat stat;
+    void* handle = NULL;
+    const uint8_t* mapped = NULL;
+    uint64_t mapped_size = 0U;
+    uint8_t piece[256];
+    uint32_t done = 0U;
+    uint8_t same = 1U;
+
+    if (path == NULL || bytes == NULL ||
+        os_fs_normalize("/", path, (uint32_t)strlen(path), normalized, sizeof(normalized)) != OS_STATUS_OK ||
+        os_fs_stat_normalized(normalized, &stat) != OS_STATUS_OK || stat.type == OS_FS_TYPE_DIRECTORY ||
+        stat.size != size || (mount = os_fs_find_mount(normalized, &relative)) == NULL ||
+        mount->driver->open(mount->context, relative, &handle) != OS_STATUS_OK)
+    {
+        return 0U;
+    }
+    if (mount->driver->map != NULL)
+    {
+        mapped = mount->driver->map(mount->context, handle, &mapped_size);
+    }
+    if (mapped != NULL && mapped_size == size)
+    {
+        same = memcmp(mapped, bytes, size) == 0;
+    }
+    while (mapped == NULL && same && done < size)
+    {
+        uint32_t want = size - done < (uint32_t)sizeof(piece) ? size - done : (uint32_t)sizeof(piece);
+        uint32_t read = 0U;
+        same = mount->driver->read(mount->context, handle, done, piece, want, &read) == OS_STATUS_OK &&
+               read != 0U && memcmp(piece, bytes + done, read) == 0;
+        done += read;
+    }
+    if (mount->driver->close != NULL)
+    {
+        mount->driver->close(mount->context, handle);
+    }
+    return same;
+}
+
 /* ---------------------------------------------------------------------------
  * Per-process open files
  * ------------------------------------------------------------------------ */

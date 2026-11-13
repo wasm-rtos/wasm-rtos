@@ -18,6 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A program processes share (program.c). */
+typedef struct OsProgram OsProgram;
+
 #define OS_TASK_NAME_MAX 32U
 #define OS_ERROR_DETAIL_MAX 96U
 #if OS_HAS_PROCESSES
@@ -351,10 +354,12 @@ struct OsTask
     uint8_t auto_reap;
     uint8_t exit_collected;
     uint8_t reap_pending;
-    uint8_t* owned_wasm_bytes;
+    /* The program the process runs, shared with its other processes; released with the task. */
+    OsProgram* program;
+    /* The module came from the program (a dylink.0 program parses its own). */
+    uint8_t module_shared;
 #if OS_HAS_FS
-    /* Program started by path, and the path, which a saved system opens again; released with the task. */
-    OsFsImage image;
+    /* The path it was started by, which a saved system opens again. */
     char* image_path;
 #endif
     char** argv;
@@ -440,18 +445,43 @@ typedef struct OsImportLink
 #if OS_HAS_PROCESSES
 
 /*
- * The module a process runs and who owns it: heap bytes from os_task_spawn,
- * or a file system image from os_task_spawn_path.
+ * A program processes run, loaded once and shared by all of them (program.c,
+ * docs/decisions.md 9): its bytes, which the kernel copied or a file system
+ * image holds, and its module, parsed while some process of it has an
+ * instance.
  */
-typedef struct OsProcessImage
+struct OsProgram
 {
+    OsProgram* next;
     const uint8_t* bytes;
     uint32_t size;
     uint8_t* owned_bytes;
 #if OS_HAS_FS
     OsFsImage file;
 #endif
-} OsProcessImage;
+    /* Processes holding the program, and those of them with an instance. */
+    uint32_t references;
+    uint32_t module_users;
+    WmModule* module;
+};
+
+/* The loaded program with these bytes, taking one more reference; else NULL. */
+OsProgram* os_program_find(const uint8_t* bytes, uint32_t size);
+/*
+ * A program for bytes the kernel copies: a loaded one with the same bytes,
+ * or a new one with a copy. One reference for the caller.
+ */
+OsStatus os_program_from_bytes(const uint8_t* bytes, uint32_t size, OsProgram** out_program);
+/* The same for bytes the kernel already owns (malloc): kept for a new program, freed when one is found. */
+OsStatus os_program_adopt(uint8_t* owned_bytes, uint32_t size, OsProgram** out_program);
+#if OS_HAS_FS
+/* The same for a file: compared in pieces with the loaded programs of its size before it is read whole. */
+OsStatus os_program_from_path(const char* path, OsProgram** out_program);
+#endif
+void os_program_release(OsProgram* program);
+/* The program's module for an instance: parsed on first use; give it back when the instance goes. */
+WmResult os_program_module_take(OsProgram* program, WmModule** out_module);
+void os_program_module_give(OsProgram* program);
 #endif
 
 /*

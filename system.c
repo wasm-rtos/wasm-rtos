@@ -1181,10 +1181,11 @@ static const char* os_system_restore_module(OsSystemStream* stream, OsTaskHandle
 #if OS_HAS_PROCESSES && OS_HAS_FS
         task->image_path = path;
         path = NULL;
-        if (os_fs_image_open(task->image_path, &task->image) == OS_STATUS_OK)
+        /* A process restored with others of its program shares it again. */
+        if (os_program_from_path(task->image_path, &task->program) == OS_STATUS_OK)
         {
-            bytes = task->image.bytes;
-            found_size = task->image.size;
+            bytes = task->program->bytes;
+            found_size = task->program->size;
         }
         else
         {
@@ -1197,17 +1198,29 @@ static const char* os_system_restore_module(OsSystemStream* stream, OsTaskHandle
     else
     {
 #if OS_HAS_PROCESSES
-        task->owned_wasm_bytes = (uint8_t*)malloc(size);
-        if (task->owned_wasm_bytes == NULL)
+        uint8_t* copy = (uint8_t*)malloc(size);
+        if (copy == NULL)
         {
             os_system_skip(stream, size);
             reason = "out of memory for its module";
         }
         else
         {
-            os_system_get(stream, task->owned_wasm_bytes, size);
-            bytes = task->owned_wasm_bytes;
-            found_size = size;
+            os_system_get(stream, copy, size);
+            /* The copy becomes the program, or goes if a restored process already has these bytes. */
+            if (!os_system_ok(stream))
+            {
+                free(copy);
+            }
+            else if (os_program_adopt(copy, size, &task->program) != OS_STATUS_OK)
+            {
+                reason = "out of memory for its module";
+            }
+            else
+            {
+                bytes = task->program->bytes;
+                found_size = size;
+            }
         }
 #else
         os_system_fail(stream, OS_STATUS_UNSUPPORTED);

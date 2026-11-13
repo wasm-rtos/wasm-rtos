@@ -105,6 +105,8 @@ typedef struct OsFsImage
 } OsFsImage;
 
 OsStatus os_fs_image_open(const char* path, OsFsImage* out_image);
+/* Whether the file at path holds exactly these bytes: compared in pieces, never copied whole. */
+uint8_t os_fs_file_matches(const char* path, const uint8_t* bytes, uint32_t size);
 void os_fs_image_close(OsFsImage* image);
 
 /* The WASI file call an import names, answered by the virtual file system, or *out NULL. */
