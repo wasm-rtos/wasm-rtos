@@ -510,3 +510,84 @@ changing a line fails CI.
 
 Not in this work: boards (nothing here depends on one); new calls (they
 come in later minor versions).
+
+## 9. Processes of one program share it
+
+**Decided and built (2026-11-13).**
+
+### Problem
+
+Every process carries its own copy of its program: the module's bytes
+(read from the file when the file system cannot map it, as on an SD card)
+and the parsed module with its decoded code. A program that starts itself
+as a child, or a shell that starts the same tool twice, pays for the
+program twice. On an ESP32 without PSRAM a 40 KB program written with
+`printf` takes about 70 KB of heap to start; a second process of it does
+not fit next to the first (measured: the parent starts, its child gets
+`-WR_ENOMEM`), although nothing in the second copy differs from the first.
+
+### Decision
+
+**A program is loaded once and shared.** The kernel keeps the programs
+its processes run: the bytes (a mapping of the file, or the kernel's
+copy) and the parsed module. A process holds a reference to its program; the program goes when
+the last process of it is deleted.
+
+- **The same bytes, not the same name.** A program is found by its size
+  and its contents, compared byte by byte with each loaded program of
+  that size. `spawn-path` compares the file as it reads it, in pieces,
+  before anything is copied: a file of the same contents shares the loaded
+  program, a file that changed since is loaded as a new one (the
+  processes of the old one keep running it). `spawn` from bytes compares
+  them where they are, and copies them only when no loaded program has
+  them. A process restored after a sleep finds its program the same way.
+- **The module is parsed once**, and its decoded code is the code cache's
+  as before, shared by every process of the program. It is freed while no
+  process of the program has an instance (all of them swapped out or
+  ended), and parsed again when one comes back, as now.
+- **What stays per process**: its instance, memory, stack, handles,
+  arguments, everything a process owns today.
+- **Not shared**: programs the host creates from its own bytes
+  (`os_task_create`: the host owns those bytes), and `dylink.0` programs
+  (each process links its libraries).
+- `os_task_get_memory_usage` still reports the program's image and code
+  for each of its processes; new `os_get_program_count` says how many
+  programs are loaded.
+
+### Why
+
+- A program's bytes and parsed module never change while it runs; one
+  copy serves every process of it, as an operating system shares a
+  program's text between processes.
+- Comparing the contents rather than trusting the path keeps the rule
+  that a process runs the program it was started with: replacing the file
+  while it runs changes nothing for it. Comparing bytes rather than a hash
+  cannot mistake two programs, and costs the same: the file is read once
+  either way.
+- On the boards this is the difference between one and two processes of a
+  `printf` program; on every board it makes a second start cheap.
+
+### Instead
+
+- **Share by path**: cheaper to look up, but a file replaced on the card
+  would be mistaken for the running program.
+- **Keep copies, make programs smaller**: every C program that prints
+  would pay twice, and the board would run one of them.
+- **Share only the bytes**: the parsed module and its code are most of
+  the cost.
+
+### Work, all of it
+
+| # | What | Where | Status |
+|---|---|---|---|
+| 1 | Loaded programs: find by size and hash, references, the module parsed while a process has an instance | new `program.c`, `os_kernel.h` | done |
+| 2 | `spawn-path` compares the file in pieces before copying; `spawn` compares the bytes before copying | `task.c`, `fs.c` | done |
+| 3 | Processes use their program's bytes and module; swapping out and snapshots release and take the module; deleting releases the program | `os.c`, `task.c`, `snapshot.c` | done |
+| 4 | A restored process finds its program by size and contents | `system.c` | done |
+| 5 | `os_get_program_count`; docs (`os.h`, README) | `os.h`, README | done |
+| 6 | Test `program_share`: two processes of one file share one program; a changed file is a second program and the first runs on; spawn from bytes shares; all swapped out frees the module and it comes back; restore shares; the count goes to 0; each rule broken on purpose fails the test | `wasm-rtos-tests` | done |
+| 7 | ESP32: the tour with its child from the SD card; heap before and after, with and without sharing | board tests (local) | done |
+
+Measured on the ESP32 (no PSRAM, the tour example from the SD card, 40 KB
+with `printf`): without sharing its child got `-WR_ENOMEM` with 12 or 16
+frames of RAM for programs; with it the tour and its child run with 16.

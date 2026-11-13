@@ -59,7 +59,8 @@ for (;;)
   called.
 - WASI preview 1 for programs, including arguments.
 - Processes: programs start other programs from memory or from a file path,
-  wait for them and stop them.
+  wait for them and stop them. Processes of the same program share it: its
+  bytes and parsed module are loaded once, found by their contents.
 - Virtual file system behind the WASI file calls, with a read-only tar
   driver. Files from memory-mapped storage run without a copy.
 - Optional `dylink.0` shared libraries: every process gets its own copy of a

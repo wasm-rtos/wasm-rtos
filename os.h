@@ -464,6 +464,12 @@ OsStatus os_task_delete(OsTaskHandle task);
  * OS_MAX_SPAWNED_TASKS spawned processes exist at once; further spawns
  * return OS_STATUS_LIMIT_REACHED.
  *
+ * Processes of the same program share it: its bytes and its parsed module
+ * (with the decoded code) are loaded once, and each process has its own
+ * instance, memory and stack. A program is found by its contents, compared
+ * byte by byte, so os_task_spawn copies the bytes only when no loaded
+ * program has them, and the program goes with its last process.
+ *
  * Programs start processes through the guest ABI's proc interface
  * (docs/abi.md), which gives them handles to their children.
  */
@@ -477,12 +483,17 @@ OsStatus os_task_spawn(
     uint32_t stack_size
 );
 uint32_t os_task_get_parent_id(OsTaskHandle task);
+/* Programs loaded for processes, each once however many processes run it. */
+uint32_t os_get_program_count(void);
 #if OS_HAS_FS
 /*
  * Start the program stored at an absolute file system path. A file whose
- * driver maps it into memory (the tar driver does) runs in place without a
- * copy, and its mount stays busy until the process is destroyed; any other
- * file is read into RAM first. With argc 0 the program gets argv = { path }.
+ * contents a running process already has is that process's program: it is
+ * compared in pieces, not read whole, and a file that changed is a new
+ * program. A file whose driver maps it into memory (the tar driver does)
+ * runs in place without a copy, and its mount stays busy until the last
+ * process of it is destroyed; any other file is read into RAM first. With
+ * argc 0 the program gets argv = { path }.
  * Errors: OS_STATUS_FILE_NOT_FOUND, OS_STATUS_IS_A_DIRECTORY,
  * OS_STATUS_NOT_A_DIRECTORY, plus everything os_task_spawn returns.
  */
