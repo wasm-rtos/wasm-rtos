@@ -227,6 +227,11 @@ OsStatus os_schedule(void)
             (void)os_code_store_write_pending();
         }
 #endif
+        /* Or a frame of a sleeping task's memory to the page store, ahead of need (decision 13). */
+        if (os_get_next_wakeup_ms() >= OS_PAGE_CLEAN_QUIET_MS)
+        {
+            (void)os_page_clean_one();
+        }
         return OS_STATUS_NO_READY_TASKS;
     }
 

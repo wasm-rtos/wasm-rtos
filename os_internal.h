@@ -184,6 +184,23 @@ void os_page_wait_end(uint32_t task_id);
  */
 int os_task_block_out_one(int cold_only);
 /*
+ * One frame of the memory of a task that waits with no deadline, or one
+ * OS_PAGE_CLEAN_COLD_MS away or more, written to the store ahead of need
+ * (wm_memory_clean): 1 if one was, 0 when all such have their copies.
+ */
+int os_task_clean_one(void);
+/*
+ * What the scheduler does when nothing is ready and nothing is due within
+ * OS_PAGE_CLEAN_QUIET_MS (decision 13): while RAM for frames is three
+ * quarters full or more, one frame of a sleeping task to the store, so
+ * that when room is needed its memory leaves RAM with no write.
+ */
+int os_page_clean_one(void);
+/* A frame write takes a few milliseconds to an SD card (0.4 ms compressed on an ESP32): not when a task is due sooner. */
+#ifndef OS_PAGE_CLEAN_QUIET_MS
+#define OS_PAGE_CLEAN_QUIET_MS 20U
+#endif
+/*
  * Before a task's slice: its paged memory goes back into one block when RAM
  * has room for all of it (besides the frames of it already there), and at
  * most a quarter of its frames are only in the store (they are read back).

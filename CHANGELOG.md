@@ -19,6 +19,11 @@
   task is ready (`os_code_store_write_pending`), mapped when a program's
   module is parsed, so code needs no RAM and a program starts without
   predecoding. Not built on AVR (`OS_HAS_CODE_STORES`).
+- **Sleeping tasks' memory written ahead** (decision 13): with nothing to
+  run for 20 ms and RAM for frames three quarters full, the scheduler
+  writes one frame of a task that sleeps 1 s or more to the store, kept in
+  RAM; when room is needed its block leaves with no write (26 frames in
+  the test, none after).
 - **A compressed page store** (decision 12): `os_page_store_compressed`
   keeps frames compressed in RAM (WKdm, about half their size) as a page
   store above slower ones; a frame that does not fit there goes to the

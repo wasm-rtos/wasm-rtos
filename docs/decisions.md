@@ -931,3 +931,54 @@ coming back byte for byte (197 fit, 103 refused); a program of 192 KB in
 random words; its result the same; the store empty when it ends and a
 second run the same. The suite's 89 tests pass, also with every memory
 paged.
+
+## 13. Sleeping tasks' memory written ahead, while nothing runs
+
+**Decided and built (2026-11-21).**
+
+### Problem
+
+When a task needs room and RAM is full, the kernel takes the block of a
+task that sleeps out of RAM whole: all its frames written there and then,
+the whole system waiting meanwhile. In the test below, 26 frames: about
+11 ms through the compressed store on an ESP32 (decision 12), several
+times that to an SD card.
+
+### Decision
+
+- When no task is ready and none is due within `OS_PAGE_CLEAN_QUIET_MS`
+  (20 ms), the scheduler writes one frame of the memory of a sleeping task
+  to the store ahead (`wm_memory_clean`, wasm-rtos-vm decision 17), kept in
+  RAM. One frame at a time: a task that wakes waits for one write at most.
+- Only tasks that wait with no deadline or one `OS_PAGE_CLEAN_COLD_MS`
+  (1 s) away or more: a task that runs again soon would make the copies
+  stale, each a write for nothing and wear on a card.
+- Only while RAM for frames is three quarters full or more: with room to
+  spare frames may never need to leave.
+- When room is needed, the sleeper's block then leaves RAM with no write;
+  frames changed since are written then as before.
+
+### Why
+
+As Linux's kswapd and flusher threads clean pages before reclaim needs
+them, and Windows' modified page writer. The kernel knows better than any
+counter of touches which memory will not run for a while: the task's
+wake-up time.
+
+### Instead
+
+- **Background writes (`write_start`) for the copies:** a store that
+  writes with DMA would let the idle loop go on meanwhile; one frame at a
+  time keeps the delay of a waking task to a write already, and no store
+  here writes with DMA yet.
+- **Writing whole blocks out ahead (swap out the sleeper):** frees RAM
+  that may not be needed, and the task reads it all back when it wakes.
+
+### Checks
+
+`wasm-rtos-tests/tests/page_clean`: a task fills 100 KB and sleeps 3 s
+in 40 frames of RAM (80% full); another comes and needs room. With no
+quiet time before, 26 frames are written in its way; after 200 ms of
+quiet, 26 were written ahead and none in its way; the sleeper's memory
+reads back as it was both ways; with RAM to spare nothing is written
+ahead.

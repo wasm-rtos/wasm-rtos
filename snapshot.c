@@ -362,6 +362,33 @@ static uint8_t os_task_is_cold(OsTaskHandle task)
            (!os_time_reached(g_os.tick_ms, task->wake_tick_ms) && task->wake_tick_ms - g_os.tick_ms >= OS_PAGE_COLD_MS);
 }
 
+/* A task left alone long enough for its memory to be written ahead: no deadline, or one this far away. */
+#ifndef OS_PAGE_CLEAN_COLD_MS
+#define OS_PAGE_CLEAN_COLD_MS 1000U
+#endif
+
+int os_task_clean_one(void)
+{
+    OsTaskHandle task = NULL;
+    for (task = g_os.task_list; task != NULL; task = task->next)
+    {
+        WmMemory* memory = task->wasm_instance != NULL ? wm_instance_memory(task->wasm_instance) : NULL;
+        uint32_t written = 0U;
+        if (task == g_os.current_task || !task->wasm_started || task->swapped || memory == NULL ||
+            task->wait_type == OS_TASK_WAIT_TRANSFER || task->state != OS_TASK_WAITING ||
+            (task->wait_has_timeout && (os_time_reached(g_os.tick_ms, task->wake_tick_ms) ||
+                                        task->wake_tick_ms - g_os.tick_ms < OS_PAGE_CLEAN_COLD_MS)))
+        {
+            continue;
+        }
+        if (wm_memory_clean(memory, &written) == NULL && written != 0U)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int os_task_block_out_one(int cold_only)
 {
     OsTaskHandle task = NULL;
