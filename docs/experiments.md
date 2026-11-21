@@ -29,6 +29,12 @@ ESP32 a write took 1122 µs and a read 634 µs, as the compiler, not knowing
 the alignment, loaded and stored byte by byte. By words (frames are
 word-aligned): 421 µs and 417 µs.
 
+The same on a Black Pill (STM32F411, Cortex-M4 at 100 MHz): WKdm
+compresses a frame in 838 µs and decompresses it in 827 µs, LZ4 in
+1272 / 545 µs; the store writes a frame in 812 µs and reads it in 960 µs
+(its reads copy the chain of chunks first, and memcpy of a frame takes
+264 µs here). An SD card over SPI at 20 MHz needs 1.6 ms for the 4 KiB
+alone, before its commands (not measured here), and it wears.
 ## Writing a sleeping task's frames ahead (decision 13), 2026-11-21
 
 `wasm-rtos-tests/tests/page_clean`, a sleeper of 32 frames in RAM of 40,
