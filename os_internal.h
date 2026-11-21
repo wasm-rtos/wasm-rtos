@@ -9,6 +9,42 @@
 #include "os.h"
 #include "hw/hw_driver.h"
 
+/*
+ * The kernel's functions the devices call (hw/hw_host.h) are compiled under
+ * the devices' names: the same function, no second copy, no call between.
+ */
+#define os_guest_begin hw_host_guest_begin
+#define os_guest_end hw_host_guest_end
+#define os_guest_check hw_host_guest_check
+#define os_guest_read hw_host_guest_read
+#define os_guest_write hw_host_guest_write
+#define os_guest_buffer_open hw_host_buffer_open
+#define os_guest_buffer_close hw_host_buffer_close
+#define os_guest_buffer_drop hw_host_buffer_drop
+#define os_guest_buffer_keep hw_host_buffer_keep
+#define os_guest_kept_close hw_host_kept_close
+#define os_signal_wait hw_host_signal_wait
+#define os_signal_wake hw_host_signal_wake
+#define os_wait_any_recheck hw_host_wait_any_recheck
+#define os_transfer_wait_begin hw_host_transfer_wait_begin
+#define os_transfer_wait_end hw_host_transfer_wait_end
+#define os_time_ms64 hw_host_time_ms64
+#define os_system_put32 hw_host_system_put32
+#define os_system_put64 hw_host_system_put64
+#define os_system_put hw_host_system_put
+#define os_system_get hw_host_system_get
+#define os_system_skip hw_host_system_skip
+#define os_system_put_bytes hw_host_system_put_bytes
+#define os_system_get32 hw_host_system_get32
+#define os_system_get64 hw_host_system_get64
+#define os_system_get_max hw_host_system_get_max
+#define os_system_get_bytes hw_host_system_get_bytes
+#define os_system_fail hw_host_system_fail
+#define os_system_refuse hw_host_system_refuse
+#define os_system_ok hw_host_system_ok
+#define os_system_device hw_host_system_device
+#define os_system_device_id hw_host_system_device_id
+
 /* What a call may leave unused (the kernel's names of OS_HOST_FUNCTION). */
 #define OS_ABI_UNUSED() \
     (void)runtime; \

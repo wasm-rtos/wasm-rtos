@@ -146,9 +146,10 @@ def kernel_calls():
     table = re.search(r"g_abi_imports\[\]\s*=\s*\{(.*?)\n\};", abi, flags=re.S).group(1)
     for match in re.finditer(r'\{\s*WR_MODULE\("([\w-]+)"\),\s*"([\w-]+)",\s*"([^"]+)",\s*\w+,\s*(\d+)U?\s*\}', table):
         calls[(match.group(1), match.group(2))] = (match.group(3), int(match.group(4)))
-    for path in sorted(glob.glob(os.path.join(ROOT, "*.c"))):
-        text = strip_c_comments(read(os.path.basename(path)))
-        for table in re.finditer(r"static const OsDriverCall (\w+)\[\]\s*=\s*\{(.*?)\n\};", text, flags=re.S):
+    # The kernel's own calls and the devices' (hw/, a library of their own).
+    for path in sorted(glob.glob(os.path.join(ROOT, "*.c")) + glob.glob(os.path.join(ROOT, "hw", "*.c"))):
+        text = strip_c_comments(read(os.path.relpath(path, ROOT)))
+        for table in re.finditer(r"static const HwDriverCall (\w+)\[\]\s*=\s*\{(.*?)\n\};", text, flags=re.S):
             driver = re.search(r"\.interface\s*=\s*\"([\w-]+)\",(?:(?!\};).)*?\.calls\s*=\s*%s\b" % table.group(1),
                                text, flags=re.S)
             if driver is None:
