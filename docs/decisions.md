@@ -736,3 +736,99 @@ computer on the cable (priority 1), a program walking 256 KB:
 | the computer raised to 3 | the same frames on the computer; 68 s over the cable |
 | one program on each, then the cable silent | the computer's ends with `page store gone`, the card's runs to its end |
 | the cable back | the computer's store returns, empty, at the priority last set |
+
+## 11. Programs' decoded code in stores the processor reads
+
+**Proposed (2026-11-21).**
+
+### Problem
+
+The interpreter can keep a module's decoded code (its records) in storage
+the processor reads as memory, internal flash or PSRAM, as a code image
+(wasm-rtos-vm decision 15): a function without records in RAM runs from
+it, 3% slower on an ESP32, 6% on a Black Pill, instead of two to three
+times slower once the code cache has let it go; and with no RAM for code
+at all a program still runs at nearly full speed. CoreMark's records are
+15 KB of RAM. The kernel does not use it yet: every program's code is in
+the heap, among programs' memory, and a board with more programs than
+RAM runs some of them slowly.
+
+### Decision
+
+**Code stores, added with a priority**, as page stores are (decision 10):
+
+```c
+typedef struct OsCodeStore
+{
+    void* context;
+    const uint8_t* base;   /* where the processor reads it */
+    uint32_t size;         /* bytes */
+    uint32_t erase_size;   /* bytes a write needs erased first (a flash sector); 0 for RAM */
+    OsStatus (*erase)(void* context, uint32_t offset, uint32_t size);   /* NULL for RAM */
+    OsStatus (*write)(void* context, uint32_t offset, const void* data, uint32_t size);
+} OsCodeStore;
+
+OsStatus os_code_store_add(const OsCodeStore* store, uint32_t priority);
+OsStatus os_code_store_priority(const OsCodeStore* store, uint32_t priority);
+OsStatus os_code_store_get_stats(const OsCodeStore* store, OsCodeStoreStats* out);
+```
+
+Up to `OS_CODE_MAX_STORES` (2). The port adds them: on an ESP32 an app
+partition mapped as data (`esp_partition_mmap`) and, where there is one,
+PSRAM; on a Black Pill the last flash sectors.
+
+- **One image a program** (programs as in decision 9: shared by its
+  processes). When a program's module is parsed, the stores are searched
+  for its image, by the program's size and CRC-32, and mapped
+  (`wm_code_image_map`) before its first instance: then nothing is
+  predecoded to start. The interpreter refuses an image of another build
+  or module; the kernel then treats it as missing.
+- **Written once, in the background.** A program without an image is
+  noted; the scheduler writes its image when no task is ready
+  (`wm_code_image_write` through the store's `write`), into the store with
+  the highest priority that has room, and maps it. Writing CoreMark's
+  takes 128 ms on an ESP32: never in a program's slice.
+- **Laid out as a log.** A store holds images one after the other, each
+  after a small header (magic, the program's size and CRC-32, the image's
+  size), aligned to the store's `erase_size`. A full store is compacted
+  when no task is ready: the images of programs loaded now are kept, the
+  rest erased. Images of an older firmware are found by the interpreter's
+  refusal and go at the next compaction.
+- **Not removed while running.** A mapped image is read by the code cache
+  at any call, so stores are only added, at start; internal flash and
+  PSRAM do not go away.
+- **Seen from the page and the script**, as page stores are: each store's
+  name, priority, bytes used, images; `code-stores` and
+  `code-priority <store> <n>`.
+
+### Why
+
+- RAM is what limits programs on these boards, and flash is plentiful (a
+  Black Pill has four times more of it); code read where it lies costs a
+  few percent.
+- Priorities as for page stores: one rule for the person setting up a
+  board, and PSRAM (faster, lost at reset) and flash (slower, kept across
+  resets and deep sleep, so a program starts without predecoding) differ
+  in the same ways page stores do.
+- Writing when nothing is ready keeps programs' timing as it is; a
+  program runs from RAM until its image is there.
+
+### Instead
+
+- **Images in page stores**: page stores are read in slots into RAM, so
+  the records would come back into the heap, which is what this avoids.
+- **Images made on a computer and flashed with the firmware**: only the
+  programs known then, and the build must be the same.
+- **An image per process**: processes of a program share its module and
+  so its records (decision 9).
+
+### Checks
+
+- `wasm-rtos-tests`: a code store in RAM made to look mapped; a program
+  runs from its image with the code cache limited to nothing; its image
+  is found again when the program is loaded anew; an image of another
+  build is rewritten; a full store is compacted, keeping loaded programs'
+  images; two stores by priority.
+- Boards: the kernel's board checks with a code store on the ESP32 (an
+  app partition) and the Black Pill (the last sectors): programs at once,
+  CoreMark in the system with the code cache small.
