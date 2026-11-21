@@ -178,7 +178,7 @@ uint32_t os_get_next_wakeup_ms(void)
 
     {
         /* What drivers poll for, such as counters whose hardware cannot watch. */
-        uint32_t driver_ms = os_drivers_next_deadline_ms();
+        uint32_t driver_ms = hw_drivers_next_deadline_ms();
         if (driver_ms < next_wakeup_ms)
         {
             next_wakeup_ms = driver_ms;
@@ -200,7 +200,7 @@ OsStatus os_schedule(void)
     }
 
     /* What drivers saw in the background, such as edges from interrupt handlers. */
-    os_drivers_poll();
+    hw_drivers_poll();
     os_page_poll();
 
     if (g_os.clock_port.now_ms != NULL)
@@ -436,7 +436,7 @@ void os_complete_task_wait(
     task->last_wait_value = value;
     if (task->wait_return_kind == OS_WAIT_RETURN_ABI)
     {
-        return_value = status == OS_STATUS_OK ? value : (uint32_t)os_abi_error(status);
+        return_value = status == OS_STATUS_OK ? value : (uint32_t)hw_abi_error(status);
     }
     else
     {
@@ -571,7 +571,7 @@ static void os_update_time_events(void)
 {
     g_os.processing_time_events = 1U;
     os_process_timers();
-    os_drivers_time();
+    hw_drivers_time();
     os_update_waiting_tasks();
     g_os.processing_time_events = 0U;
     os_clock_rearm();
@@ -1002,7 +1002,7 @@ void os_page_wait_end(uint32_t task_id)
 
 void os_transfer_finish_task(uint32_t task_id)
 {
-    os_drivers_finish_task(task_id);
+    hw_drivers_finish_task(task_id);
 }
 
 OsStatus os_signal_wait(uint32_t key, uint32_t timeout_ms)

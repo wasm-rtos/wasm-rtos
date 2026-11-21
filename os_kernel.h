@@ -11,7 +11,7 @@
 
 #include "os.h"
 #include "fs.h"
-#include "driver.h"
+#include "os_internal.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -519,9 +519,9 @@ void os_program_module_give(OsProgram* program);
  * A copy of a buffer's bytes, with what writing it back takes; a kept one is
  * in a list. A kept pinned buffer has no bytes, only its range to unpin.
  */
-struct OsGuestKept
+struct HwGuestKept
 {
-    struct OsGuestKept* next;
+    struct HwGuestKept* next;
     uint32_t address;
     uint32_t length;
     uint32_t task_id;

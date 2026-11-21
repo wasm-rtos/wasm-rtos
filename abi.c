@@ -8,7 +8,7 @@
  * when its process ends. docs/abi.md and wit/ describe the interfaces.
  */
 
-#include "driver.h"
+#include "os_internal.h"
 #include "fs.h"
 
 #if OS_HAS_WASI
@@ -34,41 +34,6 @@
 #define WR_SYNC_EVENT_CLEAR 2U
 #define WR_TIMER_PERIODIC 1U
 
-int32_t os_abi_error(OsStatus status)
-{
-    switch (status)
-    {
-        case OS_STATUS_OK: return 0;
-        case OS_STATUS_OUT_OF_MEMORY: return -WR_ENOMEM;
-        case OS_STATUS_WASM_ERROR: return -WR_EBADPROGRAM;
-        case OS_STATUS_TASK_DEAD: return -WR_EDEAD;
-        case OS_STATUS_TASK_NOT_FOUND:
-        case OS_STATUS_QUEUE_NOT_FOUND:
-        case OS_STATUS_MUTEX_NOT_FOUND:
-        case OS_STATUS_SEMAPHORE_NOT_FOUND:
-        case OS_STATUS_EVENT_GROUP_NOT_FOUND:
-        case OS_STATUS_TIMER_NOT_FOUND: return -WR_EBADH;
-        case OS_STATUS_BUFFER_TOO_SMALL: return -WR_ETOOLONG;
-        case OS_STATUS_UNSUPPORTED:
-        case OS_STATUS_READ_ONLY: return -WR_EUNSUPPORTED;
-        case OS_STATUS_OUT_OF_BOUNDS: return -WR_EFAULT;
-        case OS_STATUS_QUEUE_FULL:
-        case OS_STATUS_SEMAPHORE_FULL: return -WR_EFULL;
-        case OS_STATUS_QUEUE_EMPTY: return -WR_EEMPTY;
-        case OS_STATUS_TIMEOUT: return -WR_ETIMEOUT;
-        case OS_STATUS_BUSY: return -WR_EBUSY;
-        case OS_STATUS_NOT_OWNER: return -WR_ENOTOWNER;
-        case OS_STATUS_ABORTED: return -WR_EABORTED;
-        case OS_STATUS_LIMIT_REACHED: return -WR_ELIMIT;
-        case OS_STATUS_FILE_NOT_FOUND:
-        case OS_STATUS_END_OF_DIRECTORY: return -WR_ENOTFOUND;
-        case OS_STATUS_NACK: return -WR_ENACK;
-        case OS_STATUS_BUS_ERROR: return -WR_EBUS;
-        case OS_STATUS_NOT_A_DIRECTORY: return -WR_ENOTDIR;
-        case OS_STATUS_IS_A_DIRECTORY: return -WR_EISDIR;
-        default: return -WR_EINVAL;
-    }
-}
 
 int32_t os_abi_child_result(OsTaskExitReason reason, uint32_t code)
 {
@@ -92,7 +57,7 @@ typedef struct OsAbiHandle
     OsObjectType type;
     uint32_t id;
     /* For OS_OBJECT_DRIVER. */
-    const OsDriver* driver;
+    const HwDriver* driver;
 } OsAbiHandle;
 
 typedef struct OsAbiState
@@ -228,7 +193,7 @@ const char* os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream)
         uint32_t index = os_system_get32(stream);
         uint32_t type = os_system_get32(stream);
         uint32_t id = os_system_get32(stream);
-        const OsDriver* driver = NULL;
+        const HwDriver* driver = NULL;
 
         if (index >= OS_ABI_MAX_HANDLES || state->handles[index].type != OS_OBJECT_NONE ||
             type < (uint32_t)OS_OBJECT_QUEUE || type > (uint32_t)OS_OBJECT_DRIVER || id == 0U)
@@ -241,7 +206,7 @@ const char* os_abi_restore_task(OsTaskHandle task, OsSystemStream* stream)
             /* The device as its driver restored it, under the id it has now. */
             char* interface = os_system_get_text(stream);
             const char* gone = NULL;
-            driver = interface != NULL ? os_driver_find(interface) : NULL;
+            driver = interface != NULL ? hw_driver_find(interface) : NULL;
             free(interface);
             id = os_system_ok(stream) ? os_system_device_id(stream, driver, id, &gone) : 0U;
             if (id == 0U)
@@ -306,7 +271,7 @@ static int32_t os_abi_handle_for_new(OsObjectType type, uint32_t id)
     return handle;
 }
 
-int32_t os_driver_handle_new(const OsDriver* driver, uint32_t id)
+int32_t hw_driver_handle_new(const HwDriver* driver, uint32_t id)
 {
     int32_t handle = os_abi_handle_new(OS_OBJECT_DRIVER, id);
     if (handle > 0)
@@ -316,7 +281,7 @@ int32_t os_driver_handle_new(const OsDriver* driver, uint32_t id)
     return handle;
 }
 
-int os_driver_handle_get(const OsDriver* driver, int32_t handle, uint32_t* out_id)
+int hw_driver_handle_get(const HwDriver* driver, int32_t handle, uint32_t* out_id)
 {
     OsAbiHandle* entry = os_abi_handle_get(handle, OS_OBJECT_DRIVER);
     if (entry == NULL || entry->driver != driver)
@@ -331,228 +296,24 @@ int os_driver_handle_get(const OsDriver* driver, int32_t handle, uint32_t* out_i
  * Drivers
  * ------------------------------------------------------------------------ */
 
-int32_t os_driver_property(OsStatus status, uint32_t value)
-{
-    return status == OS_STATUS_OK ? (int32_t)(value & 0x7FFFFFFFU) : os_abi_error(status);
-}
 
-int32_t os_driver_open(const OsDriver* driver, uint32_t name_address, uint32_t name_length,
-                       OsStatus (*opener)(const char* name, uint32_t length, void* context, uint32_t* out_id),
-                       void* context)
-{
-    const char* name = NULL;
-    char name_storage[OS_ABI_NAME_MAX];
-    uint32_t id = 0U;
-    int32_t handle = os_abi_read_name(name_address, name_length, name_storage, &name);
-    OsStatus status = OS_STATUS_OK;
 
-    if (handle < 0)
-    {
-        return handle;
-    }
-    if (name == NULL)
-    {
-        return -WR_EINVAL;
-    }
-    status = opener(name, name_length, context, &id);
-    if (status != OS_STATUS_OK)
-    {
-        return status == OS_STATUS_BUSY ? -WR_EINUSE : os_abi_error(status);
-    }
-    handle = os_driver_handle_new(driver, id);
-    if (handle < 0 && driver->close != NULL)
-    {
-        driver->close(id);
-    }
-    return handle;
-}
 
-static const OsDriver* g_drivers[OS_MAX_DRIVERS];
-static uint32_t g_driver_count;
 
-OsStatus os_driver_add(const OsDriver* driver)
-{
-    uint32_t index = 0U;
 
-    if (driver == NULL || driver->interface == NULL)
-    {
-        return OS_STATUS_INVALID_ARGUMENT;
-    }
-    for (index = 0U; index < g_driver_count; ++index)
-    {
-        if (g_drivers[index] == driver)
-        {
-            return OS_STATUS_OK;
-        }
-    }
-    if (g_driver_count == OS_MAX_DRIVERS)
-    {
-        return OS_STATUS_LIMIT_REACHED;
-    }
-    g_drivers[g_driver_count++] = driver;
-    return OS_STATUS_OK;
-}
 
-uint32_t os_driver_count(void)
-{
-    return g_driver_count;
-}
 
-const OsDriver* os_driver_at(uint32_t index)
-{
-    return index < g_driver_count ? g_drivers[index] : NULL;
-}
 
-const OsDriver* os_driver_find(const char* interface)
-{
-    uint32_t index = 0U;
 
-    for (index = 0U; index < g_driver_count; ++index)
-    {
-        if (strcmp(g_drivers[index]->interface, interface) == 0)
-        {
-            return g_drivers[index];
-        }
-    }
-    return NULL;
-}
 
-uint32_t os_driver_signal_key(const OsDriver* driver, uint32_t id)
-{
-    uint32_t index = 0U;
 
-    /* Kernel objects use the low type numbers; drivers take theirs from 0x80 up, by place. */
-    while (index < g_driver_count && g_drivers[index] != driver)
-    {
-        ++index;
-    }
-    return OS_SIGNAL_KEY(0x80U + index, id);
-}
 
-void os_drivers_poll(void)
-{
-    uint32_t index = 0U;
-
-    for (index = 0U; index < g_driver_count; ++index)
-    {
-        if (g_drivers[index]->poll != NULL)
-        {
-            g_drivers[index]->poll();
-        }
-    }
-}
-
-uint32_t os_drivers_next_deadline_ms(void)
-{
-    uint32_t next = UINT32_MAX;
-    uint32_t index = 0U;
-
-    for (index = 0U; index < g_driver_count; ++index)
-    {
-        if (g_drivers[index]->next_deadline_ms != NULL)
-        {
-            uint32_t due = g_drivers[index]->next_deadline_ms();
-            if (due < next)
-            {
-                next = due;
-            }
-        }
-    }
-    return next;
-}
-
-void os_drivers_time(void)
-{
-    uint32_t index = 0U;
-
-    for (index = 0U; index < g_driver_count; ++index)
-    {
-        if (g_drivers[index]->time != NULL)
-        {
-            g_drivers[index]->time();
-        }
-    }
-}
-
-void os_drivers_finish_task(uint32_t task_id)
-{
-    uint32_t index = 0U;
-
-    for (index = 0U; index < g_driver_count; ++index)
-    {
-        if (g_drivers[index]->finish_task != NULL)
-        {
-            g_drivers[index]->finish_task(task_id);
-        }
-    }
-}
-
-void os_drivers_shutdown(void)
-{
-    while (g_driver_count > 0U)
-    {
-        const OsDriver* driver = g_drivers[--g_driver_count];
-        if (driver->shutdown != NULL)
-        {
-            driver->shutdown();
-        }
-    }
-}
 
 /* ---------------------------------------------------------------------------
  * Guest memory and strings
  * ------------------------------------------------------------------------ */
 
-static uint8_t os_abi_utf8_valid(const uint8_t* text, uint32_t length)
-{
-    uint32_t index = 0U;
 
-    while (index < length)
-    {
-        uint8_t byte = text[index];
-        uint32_t extra = byte < 0x80U ? 0U : (byte & 0xE0U) == 0xC0U ? 1U
-                       : (byte & 0xF0U) == 0xE0U ? 2U : (byte & 0xF8U) == 0xF0U ? 3U : 4U;
-        uint32_t next = 0U;
-
-        if (extra == 4U || (extra == 1U && byte < 0xC2U) || length - index <= extra)
-        {
-            return 0U;
-        }
-        for (next = 1U; next <= extra; ++next)
-        {
-            if ((text[index + next] & 0xC0U) != 0x80U)
-            {
-                return 0U;
-            }
-        }
-        index += extra + 1U;
-    }
-    return 1U;
-}
-
-/* An optional object name: (0, 0) means none. */
-int32_t os_abi_read_name(uint32_t address, uint32_t length, char* storage, const char** out_name)
-{
-    *out_name = NULL;
-    if (length == 0U)
-    {
-        return 0;
-    }
-    if (length > OS_ABI_NAME_MAX)
-    {
-        return -WR_ETOOLONG;
-    }
-    if (os_guest_read(address, storage, length) != OS_STATUS_OK)
-    {
-        return -WR_EFAULT;
-    }
-    if (!os_abi_utf8_valid((const uint8_t*)storage, length))
-    {
-        return -WR_EINVAL;
-    }
-    *out_name = storage;
-    return 0;
-}
 
 /* ---------------------------------------------------------------------------
  * handle
@@ -595,7 +356,7 @@ static int32_t os_abi_adopt(OsObjectType type, uint32_t id, const char* name, ui
     if (status != OS_STATUS_OK)
     {
         os_object_release(type, id);
-        return os_abi_error(status);
+        return hw_abi_error(status);
     }
     return os_abi_handle_for_new(type, id);
 }
@@ -606,10 +367,10 @@ static OS_HOST_FUNCTION(os_abi_mutex_create)
     OS_HOST_ARG(uint32_t, name_address);
     OS_HOST_ARG(uint32_t, name_length);
     const char* name = NULL;
-    char name_storage[OS_ABI_NAME_MAX];
+    char name_storage[HW_ABI_NAME_MAX];
     OsMutexHandle mutex = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
+    int32_t result = hw_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -629,7 +390,7 @@ static OS_HOST_FUNCTION(os_abi_mutex_create)
     status = os_mutex_create(&mutex);
     if (status != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(os_abi_error(status));
+        OS_HOST_RETURN(hw_abi_error(status));
     }
     OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_MUTEX, os_mutex_get_id(mutex), name, name_length));
 }
@@ -652,7 +413,7 @@ static OS_HOST_FUNCTION(os_abi_mutex_lock)
         OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_mutex_lock(os_mutex_find_by_id(entry->id), timeout_ms);
-    *raw_return = os_abi_error(status);
+    *raw_return = hw_abi_error(status);
     return os_guest_end();
 }
 
@@ -667,7 +428,7 @@ static OS_HOST_FUNCTION(os_abi_mutex_unlock)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    OS_HOST_RETURN(os_abi_error(os_mutex_unlock(os_mutex_find_by_id(entry->id))));
+    OS_HOST_RETURN(hw_abi_error(os_mutex_unlock(os_mutex_find_by_id(entry->id))));
 }
 
 static OS_HOST_FUNCTION(os_abi_semaphore_create)
@@ -678,10 +439,10 @@ static OS_HOST_FUNCTION(os_abi_semaphore_create)
     OS_HOST_ARG(uint32_t, max_count);
     OS_HOST_ARG(uint32_t, initial_count);
     const char* name = NULL;
-    char name_storage[OS_ABI_NAME_MAX];
+    char name_storage[HW_ABI_NAME_MAX];
     OsSemaphoreHandle semaphore = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
+    int32_t result = hw_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -710,7 +471,7 @@ static OS_HOST_FUNCTION(os_abi_semaphore_create)
     status = os_semaphore_create(&semaphore, max_count, initial_count);
     if (status != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(os_abi_error(status));
+        OS_HOST_RETURN(hw_abi_error(status));
     }
     OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_SEMAPHORE, os_semaphore_get_id(semaphore), name, name_length));
 }
@@ -733,7 +494,7 @@ static OS_HOST_FUNCTION(os_abi_semaphore_take)
         OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_semaphore_take(os_semaphore_find_by_id(entry->id), timeout_ms);
-    *raw_return = os_abi_error(status);
+    *raw_return = hw_abi_error(status);
     return os_guest_end();
 }
 
@@ -748,7 +509,7 @@ static OS_HOST_FUNCTION(os_abi_semaphore_give)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    OS_HOST_RETURN(os_abi_error(os_semaphore_give(os_semaphore_find_by_id(entry->id))));
+    OS_HOST_RETURN(hw_abi_error(os_semaphore_give(os_semaphore_find_by_id(entry->id))));
 }
 
 static OS_HOST_FUNCTION(os_abi_event_create)
@@ -757,10 +518,10 @@ static OS_HOST_FUNCTION(os_abi_event_create)
     OS_HOST_ARG(uint32_t, name_address);
     OS_HOST_ARG(uint32_t, name_length);
     const char* name = NULL;
-    char name_storage[OS_ABI_NAME_MAX];
+    char name_storage[HW_ABI_NAME_MAX];
     OsEventGroupHandle event_group = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
+    int32_t result = hw_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -780,7 +541,7 @@ static OS_HOST_FUNCTION(os_abi_event_create)
     status = os_event_group_create(&event_group);
     if (status != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(os_abi_error(status));
+        OS_HOST_RETURN(hw_abi_error(status));
     }
     OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_EVENT_GROUP, os_event_group_get_id(event_group), name, name_length));
 }
@@ -869,7 +630,7 @@ static OS_HOST_FUNCTION(os_abi_event_wait)
     }
     status = os_event_group_wait_bits(event_group, bits, (flags & WR_SYNC_EVENT_CLEAR) != 0U,
                                       (flags & WR_SYNC_EVENT_ALL) != 0U, timeout_ms);
-    *raw_return = status == OS_STATUS_OK ? (int32_t)os_guest_last_wait_value() : os_abi_error(status);
+    *raw_return = status == OS_STATUS_OK ? (int32_t)os_guest_last_wait_value() : hw_abi_error(status);
     return os_guest_end();
 }
 
@@ -881,10 +642,10 @@ static OS_HOST_FUNCTION(os_abi_queue_create)
     OS_HOST_ARG(uint32_t, item_size);
     OS_HOST_ARG(uint32_t, capacity);
     const char* name = NULL;
-    char name_storage[OS_ABI_NAME_MAX];
+    char name_storage[HW_ABI_NAME_MAX];
     OsQueueHandle queue = NULL;
     uint32_t id = 0U;
-    int32_t result = os_abi_read_name(name_address, name_length, name_storage, &name);
+    int32_t result = hw_abi_read_name(name_address, name_length, name_storage, &name);
     OsStatus status = OS_STATUS_OK;
     OS_ABI_UNUSED();
 
@@ -915,7 +676,7 @@ static OS_HOST_FUNCTION(os_abi_queue_create)
     status = os_queue_create(&queue, item_size, capacity);
     if (status != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(os_abi_error(status));
+        OS_HOST_RETURN(hw_abi_error(status));
     }
     OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_QUEUE, os_queue_get_id(queue), name, name_length));
 }
@@ -945,7 +706,7 @@ static int32_t os_abi_queue_transfer(int32_t handle, uint32_t item_address, uint
     }
     if (status != OS_STATUS_OK)
     {
-        return OS_GUEST_BUFFER_ERROR(status);
+        return HW_GUEST_BUFFER_ERROR(status);
     }
     if (os_guest_begin(raw_return) != OS_STATUS_OK)
     {
@@ -966,7 +727,7 @@ static int32_t os_abi_queue_transfer(int32_t handle, uint32_t item_address, uint
     {
         return receive ? -WR_EEMPTY : -WR_EFULL;
     }
-    return os_abi_error(status);
+    return hw_abi_error(status);
 }
 
 static OS_HOST_FUNCTION(os_abi_queue_send)
@@ -1023,7 +784,7 @@ static OS_HOST_FUNCTION(os_abi_timer_create)
     status = os_timer_create_counting(&timer, period_ms, (flags & WR_TIMER_PERIODIC) != 0U);
     if (status != OS_STATUS_OK)
     {
-        OS_HOST_RETURN(os_abi_error(status));
+        OS_HOST_RETURN(hw_abi_error(status));
     }
     OS_HOST_RETURN(os_abi_adopt(OS_OBJECT_TIMER, os_timer_get_id(timer), NULL, 0U));
 }
@@ -1035,7 +796,7 @@ static OS_HOST_FUNCTION(os_abi_timer_start)
     OsTimerHandle timer = os_abi_timer(handle);
     OS_ABI_UNUSED();
 
-    OS_HOST_RETURN(timer != NULL ? os_abi_error(os_timer_start(timer)) : -WR_EBADH);
+    OS_HOST_RETURN(timer != NULL ? hw_abi_error(os_timer_start(timer)) : -WR_EBADH);
 }
 
 static OS_HOST_FUNCTION(os_abi_timer_stop)
@@ -1045,7 +806,7 @@ static OS_HOST_FUNCTION(os_abi_timer_stop)
     OsTimerHandle timer = os_abi_timer(handle);
     OS_ABI_UNUSED();
 
-    OS_HOST_RETURN(timer != NULL ? os_abi_error(os_timer_stop(timer)) : -WR_EBADH);
+    OS_HOST_RETURN(timer != NULL ? hw_abi_error(os_timer_stop(timer)) : -WR_EBADH);
 }
 
 static OS_HOST_FUNCTION(os_abi_timer_set_period)
@@ -1056,7 +817,7 @@ static OS_HOST_FUNCTION(os_abi_timer_set_period)
     OsTimerHandle timer = os_abi_timer(handle);
     OS_ABI_UNUSED();
 
-    OS_HOST_RETURN(timer != NULL ? os_abi_error(os_timer_change_period(timer, period_ms)) : -WR_EBADH);
+    OS_HOST_RETURN(timer != NULL ? hw_abi_error(os_timer_change_period(timer, period_ms)) : -WR_EBADH);
 }
 
 static OS_HOST_FUNCTION(os_abi_timer_read)
@@ -1117,7 +878,7 @@ static OS_HOST_FUNCTION(os_abi_wait_any)
         OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_wait_any(targets, count, timeout_ms, &ready);
-    *raw_return = status == OS_STATUS_OK ? (int32_t)ready : os_abi_error(status);
+    *raw_return = status == OS_STATUS_OK ? (int32_t)ready : hw_abi_error(status);
     return os_guest_end();
 }
 
@@ -1184,7 +945,7 @@ static int32_t os_abi_child_handle(OsStatus status, OsTaskHandle child)
 
     if (status != OS_STATUS_OK)
     {
-        return os_abi_error(status);
+        return hw_abi_error(status);
     }
     handle = os_abi_handle_new(OS_OBJECT_TASK, os_task_get_id(child));
     if (handle < 0)
@@ -1302,7 +1063,7 @@ static OS_HOST_FUNCTION(os_abi_proc_wait)
         OS_HOST_RETURN(-WR_EFAULT);
     }
     status = os_child_wait(entry->id, timeout_ms, &result);
-    *raw_return = status == OS_STATUS_OK ? result : os_abi_error(status);
+    *raw_return = status == OS_STATUS_OK ? result : hw_abi_error(status);
     return os_guest_end();
 }
 
@@ -1317,7 +1078,7 @@ static OS_HOST_FUNCTION(os_abi_proc_kill)
     {
         OS_HOST_RETURN(-WR_EBADH);
     }
-    OS_HOST_RETURN(os_abi_error(os_child_kill(entry->id)));
+    OS_HOST_RETURN(hw_abi_error(os_child_kill(entry->id)));
 }
 
 #endif
@@ -2005,9 +1766,9 @@ WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t mo
     {
         return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
     }
-    for (index = 0U; index < g_driver_count; ++index)
+    for (index = 0U; index < hw_driver_count(); ++index)
     {
-        const OsDriver* driver = g_drivers[index];
+        const HwDriver* driver = hw_driver_at(index);
         if (!os_name_is(interface, interface_length, driver->interface))
         {
             continue;

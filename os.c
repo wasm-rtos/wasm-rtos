@@ -54,7 +54,6 @@ static void* os_vm_code_allocate(void* pointer, size_t size)
 
 static OsHostFunctionNode* g_os_host_functions;
 
-const char os_host_out_of_bounds[] = "trap: out of bounds memory access";
 /* WASI proc_exit ends a program with this trap. */
 const char os_exit_trap[] = "trap: exit";
 
@@ -289,7 +288,7 @@ void os_shutdown(void)
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
-    os_drivers_shutdown();
+    hw_drivers_shutdown();
     os_page_shutdown();
 #if OS_HAS_CODE_STORES
     os_code_shutdown();
