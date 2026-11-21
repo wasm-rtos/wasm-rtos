@@ -171,6 +171,9 @@ WmResult os_program_module_take(OsProgram* program, WmModule** out_module)
             program->module = NULL;
             return result;
         }
+#if OS_HAS_CODE_STORES
+        os_code_module_loaded(program->module, program->bytes, program->size, &program->code);
+#endif
     }
     ++program->module_users;
     *out_module = program->module;
@@ -185,6 +188,13 @@ void os_program_module_give(OsProgram* program)
         program->module = NULL;
     }
 }
+
+#if OS_HAS_CODE_STORES
+OsProgram* os_programs(void)
+{
+    return g_programs;
+}
+#endif
 
 uint32_t os_get_program_count(void)
 {

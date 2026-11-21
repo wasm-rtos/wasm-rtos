@@ -20,6 +20,15 @@
 
 /* A program processes share (program.c). */
 typedef struct OsProgram OsProgram;
+#if OS_HAS_CODE_STORES
+/* A module's code image (decision 11): the CRC-32 of the bytes it was parsed from once known, and the image's state. */
+typedef struct OsCodeImage
+{
+    uint32_t crc;
+    uint8_t crc_known;
+    uint8_t state;
+} OsCodeImage;
+#endif
 
 #define OS_TASK_NAME_MAX 32U
 #define OS_ERROR_DETAIL_MAX 96U
@@ -358,6 +367,10 @@ struct OsTask
     OsProgram* program;
     /* The module came from the program (a dylink.0 program parses its own). */
     uint8_t module_shared;
+#if OS_HAS_CODE_STORES
+    /* The code image of the module it parsed for itself (not shared): decision 11. */
+    OsCodeImage code;
+#endif
 #if OS_HAS_FS
     /* The path it was started by, which a saved system opens again. */
     char* image_path;
@@ -463,7 +476,25 @@ struct OsProgram
     uint32_t references;
     uint32_t module_users;
     WmModule* module;
+#if OS_HAS_CODE_STORES
+    OsCodeImage code;
+#endif
 };
+
+#if OS_HAS_CODE_STORES
+enum
+{
+    OS_CODE_IMAGE_NONE = 0,   /* not looked for yet */
+    OS_CODE_IMAGE_MAPPED = 1, /* its module runs from its image */
+    OS_CODE_IMAGE_WANTED = 2, /* none found: to be written */
+    OS_CODE_IMAGE_NOT = 3     /* none can be: no room, or not predecoded */
+};
+/* The programs loaded now, linked through next. */
+OsProgram* os_programs(void);
+/* A module was just parsed from bytes: map its image from a store, or note it wants one. */
+void os_code_module_loaded(WmModule* module, const uint8_t* bytes, uint32_t size, OsCodeImage* image);
+void os_code_shutdown(void);
+#endif
 
 /* The loaded program with these bytes, taking one more reference; else NULL. */
 OsProgram* os_program_find(const uint8_t* bytes, uint32_t size);

@@ -291,6 +291,9 @@ void os_shutdown(void)
 #endif
     os_drivers_shutdown();
     os_page_shutdown();
+#if OS_HAS_CODE_STORES
+    os_code_shutdown();
+#endif
 
     memset(&g_os, 0, sizeof(g_os));
 }
@@ -985,7 +988,16 @@ static WmResult os_task_load_module(OsTaskHandle task, const uint8_t* wasm_bytes
         return NULL;
     }
 #endif
-    return wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+    {
+        WmResult result = wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
+#if OS_HAS_CODE_STORES
+        if (result == NULL)
+        {
+            os_code_module_loaded(task->wasm_module, wasm_bytes, wasm_size, &task->code);
+        }
+#endif
+        return result;
+    }
 }
 
 static void os_task_free_module(OsTaskHandle task)
