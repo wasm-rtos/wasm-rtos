@@ -1054,6 +1054,16 @@ int os_page_store_on(void)
     return g_page.on;
 }
 
+int os_page_clean_one(void)
+{
+    /* Only under pressure: with RAM to spare, frames may never need to leave, and writes wear a card. */
+    if (!g_page.on || g_page.ram_frames == 0U || (uint64_t)wm_pager_resident() * 4U < (uint64_t)g_page.ram_frames * 3U)
+    {
+        return 0;
+    }
+    return os_task_clean_one();
+}
+
 /* ---- State images: a snapshot in slots, a frame's size at a time ---- */
 
 /* A slot holds a frame: WM_FRAME_SIZE bytes, as the interpreter is built. */

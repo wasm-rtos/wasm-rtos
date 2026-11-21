@@ -28,3 +28,17 @@ The store as first written reached frames through byte pointers with
 ESP32 a write took 1122 µs and a read 634 µs, as the compiler, not knowing
 the alignment, loaded and stored byte by byte. By words (frames are
 word-aligned): 421 µs and 417 µs.
+
+## Writing a sleeping task's frames ahead (decision 13), 2026-11-21
+
+`wasm-rtos-tests/tests/page_clean`, a sleeper of 32 frames in RAM of 40,
+a second task that needs room:
+
+| | frames written in the second task's way |
+|---|---:|
+| it comes at once | 26 |
+| it comes after 200 ms with nothing to run | 0 (26 written ahead) |
+| RAM of 200 frames | nothing written ahead |
+
+At 421 µs a frame through the compressed store on an ESP32, 11 ms of
+pause gone; to an SD card, several times that (not measured here).
