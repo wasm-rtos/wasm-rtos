@@ -739,7 +739,7 @@ computer on the cable (priority 1), a program walking 256 KB:
 
 ## 11. Programs' decoded code in stores the processor reads
 
-**Proposed (2026-11-21).**
+**Decided and built (2026-11-21).**
 
 ### Problem
 
@@ -777,11 +777,13 @@ Up to `OS_CODE_MAX_STORES` (2). The port adds them: on an ESP32 an app
 partition mapped as data (`esp_partition_mmap`) and, where there is one,
 PSRAM; on a Black Pill the last flash sectors.
 
-- **One image a program** (programs as in decision 9: shared by its
-  processes). When a program's module is parsed, the stores are searched
-  for its image, by the program's size and CRC-32, and mapped
-  (`wm_code_image_map`) before its first instance: then nothing is
-  predecoded to start. The interpreter refuses an image of another build
+- **One image a module's bytes**: a program's module, shared by its
+  processes (decision 9), or the module a task the host made from its
+  own bytes parses for itself. When a module is parsed, the stores are
+  searched for an image of its bytes, by their size and CRC-32, and it is
+  mapped (`wm_code_image_map`) before the first instance: then nothing is
+  predecoded to start. Tasks of the same bytes find the same image; it is
+  looked for again just before one is written. The interpreter refuses an image of another build
   or module; the kernel then treats it as missing.
 - **Written once, in the background.** A program without an image is
   noted; the scheduler writes its image when no task is ready
@@ -790,16 +792,23 @@ PSRAM; on a Black Pill the last flash sectors.
   takes 128 ms on an ESP32: never in a program's slice.
 - **Laid out as a log.** A store holds images one after the other, each
   after a small header (magic, the program's size and CRC-32, the image's
-  size), aligned to the store's `erase_size`. A full store is compacted
-  when no task is ready: the images of programs loaded now are kept, the
-  rest erased. Images of an older firmware are found by the interpreter's
-  refusal and go at the next compaction.
+  size), aligned to the store's `erase_size`. A store found more than
+  three quarters full when it is added (at start, when no image is mapped)
+  is erased, and images are written again as programs load: erasing it
+  later would pull mapped records from under the code cache. Images of an
+  older firmware are refused by the interpreter and go with that erase.
+- **When nothing is ready**: the scheduler writes one image each time it
+  finds no task ready; a host whose tasks are never all waiting calls
+  `os_code_store_write_pending()` where a pause suits it.
+- **Only with predecoding.** Code stores are built where the interpreter
+  predecodes (`OS_HAS_CODE_STORES`, off on AVR): the Uno and every build
+  running in place have none of it, not a byte.
 - **Not removed while running.** A mapped image is read by the code cache
   at any call, so stores are only added, at start; internal flash and
   PSRAM do not go away.
-- **Seen from the page and the script**, as page stores are: each store's
-  name, priority, bytes used, images; `code-stores` and
-  `code-priority <store> <n>`.
+- **Seen from the page and the script** later, with the simulator's work,
+  as page stores are: each store's priority, bytes used, images
+  (`os_code_store_get_stats`).
 
 ### Why
 
@@ -824,11 +833,14 @@ PSRAM; on a Black Pill the last flash sectors.
 
 ### Checks
 
-- `wasm-rtos-tests`: a code store in RAM made to look mapped; a program
-  runs from its image with the code cache limited to nothing; its image
-  is found again when the program is loaded anew; an image of another
-  build is rewritten; a full store is compacted, keeping loaded programs'
-  images; two stores by priority.
+- `wasm-rtos-tests/tests/code_store`, stores in RAM made to look like
+  flash (sectors of 4 KiB erased to 0xFF; a write over bytes not erased
+  fails): the image is written while the program sleeps and mapped; found
+  again when the program loads anew and after a restart, so nothing is
+  predecoded to start; an image with one byte changed is refused and a new
+  one written; of two empty stores the one of priority 5 takes it; a store
+  filled to its last sector is erased when it is added again. 19 checks;
+  the suite's 88 tests pass, also with every memory paged.
 - Boards: the kernel's board checks with a code store on the ESP32 (an
   app partition) and the Black Pill (the last sectors): programs at once,
   CoreMark in the system with the code cache small.

@@ -13,6 +13,12 @@
   is refused, and the system starts afresh (decision 6).
 - `os_host_load32` and `os_host_load64` take a memory that is not
   `const`: reading paged memory may bring a frame in.
+- **Code stores** (decision 11): storage the processor reads as memory,
+  internal flash or PSRAM, added with a priority (`os_code_store_add`),
+  where programs' decoded code is kept as code images: written when no
+  task is ready (`os_code_store_write_pending`), mapped when a program's
+  module is parsed, so code needs no RAM and a program starts without
+  predecoding. Not built on AVR (`OS_HAS_CODE_STORES`).
 - **Fixed**: a program whose instantiation failed once its imports were
   linked (a data segment out of bounds, say) left its instance and its
   memory behind; now they are freed, and a memory kept through a swap goes

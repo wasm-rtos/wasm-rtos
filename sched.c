@@ -220,6 +220,10 @@ OsStatus os_schedule(void)
     if (task == NULL)
     {
         g_os.current_task = NULL;
+#if OS_HAS_CODE_STORES
+        /* Nothing to run: time to write a program's code image. */
+        (void)os_code_store_write_pending();
+#endif
         return OS_STATUS_NO_READY_TASKS;
     }
 

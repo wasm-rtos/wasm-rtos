@@ -34,6 +34,14 @@
 #ifndef OS_HAS_MEMORY_ACCOUNTING
 #define OS_HAS_MEMORY_ACCOUNTING 0
 #endif
+/* Code stores (decision 11): images are programs', and only where the interpreter predecodes (not on AVR). */
+#ifndef OS_HAS_CODE_STORES
+#if defined(__AVR__) || !OS_HAS_PROCESSES
+#define OS_HAS_CODE_STORES 0
+#else
+#define OS_HAS_CODE_STORES 1
+#endif
+#endif
 #if OS_HAS_DYLINK
 #include "vm/source/wm_dylink.h"
 #endif
@@ -753,6 +761,54 @@ typedef struct OsPageStats
 } OsPageStats;
 
 OsStatus os_page_get_stats(OsPageStats* out_stats);
+
+#if OS_HAS_CODE_STORES
+/*
+ * Code stores (docs/decisions.md, 11): storage the processor reads as
+ * memory (internal flash mapped as data, PSRAM) where programs' decoded
+ * code is kept as code images, so it needs no RAM: a function without
+ * records in RAM runs from its program's image. Added at start, before
+ * programs load, and never removed. A store found more than three
+ * quarters full is erased then; images are written again as programs
+ * load. base stays valid and readable all the time; erase (NULL for RAM)
+ * sets size bytes at offset, a multiple of erase_size, to be written
+ * again; write writes data at offset, into bytes erased before.
+ */
+typedef struct OsCodeStore
+{
+    void* context;
+    const uint8_t* base;
+    uint32_t size;
+    uint32_t erase_size;
+    OsStatus (*erase)(void* context, uint32_t offset, uint32_t size);
+    OsStatus (*write)(void* context, uint32_t offset, const void* data, uint32_t size);
+} OsCodeStore;
+
+#ifndef OS_CODE_MAX_STORES
+#define OS_CODE_MAX_STORES 2U
+#endif
+
+/* A new image goes to the store with the highest priority that has room. */
+OsStatus os_code_store_add(const OsCodeStore* store, uint32_t priority);
+OsStatus os_code_store_priority(const OsCodeStore* store, uint32_t priority);
+typedef struct OsCodeStoreStats
+{
+    uint32_t priority;
+    uint32_t size;
+    uint32_t used;   /* bytes of images and their headers */
+    uint32_t images; /* images in it, of this firmware or an older one */
+    uint32_t mapped; /* programs mapped from it since the store was added */
+} OsCodeStoreStats;
+OsStatus os_code_store_get_stats(const OsCodeStore* store, OsCodeStoreStats* out_stats);
+/*
+ * Write the image of one loaded program that has none, and map it: what
+ * the scheduler does when no task is ready. Writing takes a while (128 ms
+ * for CoreMark's on an ESP32), so a host whose tasks are never all waiting
+ * calls it where a pause suits it. OS_STATUS_OK: one written;
+ * OS_STATUS_NO_READY_TASKS: none waits for one.
+ */
+OsStatus os_code_store_write_pending(void);
+#endif
 
 /*
  * Where programs' stdout (fd 1) and stderr (fd 2) go. write gets the id of
