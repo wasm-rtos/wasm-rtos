@@ -1085,8 +1085,10 @@ and buses on chosen pins. Each is its own decision.
   79 762 bytes, Xtensa 105 210 → 105 132; static RAM the same (4 880 and
   4 928). A first version with a wrapper for each host call cost 568 bytes
   on Xtensa; the kernel's functions under the devices' names cost none.
-- The browser simulator builds and its checks pass; the ESP32 and Black
-  Pill board checks pass.
+- The browser simulator builds with the devices (Emscripten, no warning);
+  the board firmwares build (ESP32 checks, Black Pill system and deep
+  sleep). The simulator's page checks and the runs on the boards come with
+  the simulator's update and the next board session.
 
 ### Work, all of it
 
