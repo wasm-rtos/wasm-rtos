@@ -127,13 +127,13 @@ static inline void os_host_fault(WmRuntime* runtime, WmResult result)
         (void)wm_trap(runtime, result);
     }
 }
-static inline uint32_t os_host_load32(WmRuntime* runtime, const WmMemory* memory, uint32_t address)
+static inline uint32_t os_host_load32(WmRuntime* runtime, WmMemory* memory, uint32_t address)
 {
     uint32_t value = 0U;
     os_host_fault(runtime, wm_memory_read(memory, address, &value, sizeof(value)));
     return value;
 }
-static inline uint64_t os_host_load64(WmRuntime* runtime, const WmMemory* memory, uint32_t address)
+static inline uint64_t os_host_load64(WmRuntime* runtime, WmMemory* memory, uint32_t address)
 {
     uint64_t value = 0U;
     os_host_fault(runtime, wm_memory_read(memory, address, &value, sizeof(value)));

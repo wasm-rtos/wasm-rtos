@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **The interpreter updated** to wasm-rtos-vm with the register loop
+  (its decisions 7 to 16): programs run about a third faster on an ESP32
+  and a Black Pill (CoreMark in the system 17.5 to 22.6 on an ESP32),
+  with fuel and snapshots exact as before; decoded code can be kept in
+  flash or PSRAM (code images); fuzzed, with snapshots checked as modules
+  are.
+- **Snapshots are format 2**: a system saved for deep sleep or a task
+  swapped out by an older firmware is not read back after the update; it
+  is refused, and the system starts afresh (decision 6).
+- `os_host_load32` and `os_host_load64` take a memory that is not
+  `const`: reading paged memory may bring a frame in.
+
 ## 1.0.0 — 2026-11-13
 
 The first release. **Guest ABI 1.x is frozen at 1.8**: a program built for
