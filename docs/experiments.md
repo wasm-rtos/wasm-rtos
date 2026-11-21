@@ -33,5 +33,5 @@ The same on a Black Pill (STM32F411, Cortex-M4 at 100 MHz): WKdm
 compresses a frame in 838 µs and decompresses it in 827 µs, LZ4 in
 1272 / 545 µs; the store writes a frame in 812 µs and reads it in 960 µs
 (its reads copy the chain of chunks first, and memcpy of a frame takes
-264 µs here). Still about twice as fast as reading a frame from an SD card
-over SPI, and no wear.
+264 µs here). An SD card over SPI at 20 MHz needs 1.6 ms for the 4 KiB
+alone, before its commands (not measured here), and it wears.
