@@ -13,6 +13,10 @@
   is refused, and the system starts afresh (decision 6).
 - `os_host_load32` and `os_host_load64` take a memory that is not
   `const`: reading paged memory may bring a frame in.
+- **Fixed**: a program whose instantiation failed once its imports were
+  linked (a data segment out of bounds, say) left its instance and its
+  memory behind; now they are freed, and a memory kept through a swap goes
+  back to the task.
 
 ## 1.0.0 — 2026-11-13
 
