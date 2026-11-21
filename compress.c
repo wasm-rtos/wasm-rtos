@@ -53,7 +53,7 @@ typedef struct OsBits
     uint32_t n;
 } OsBits;
 
-static int os_bits_put(OsBits* b, uint32_t value, uint32_t count)
+static inline int os_bits_put(OsBits* b, uint32_t value, uint32_t count)
 {
     b->acc |= (uint64_t)value << b->n;
     b->n += count;
@@ -70,7 +70,7 @@ static int os_bits_put(OsBits* b, uint32_t value, uint32_t count)
     return 1;
 }
 
-static uint32_t os_bits_get(OsBits* b, uint32_t count)
+static inline uint32_t os_bits_get(OsBits* b, uint32_t count)
 {
     uint32_t value;
     while (b->n < count)
@@ -84,22 +84,21 @@ static uint32_t os_bits_get(OsBits* b, uint32_t count)
     return value;
 }
 
-static uint32_t os_wk_hash(uint32_t word)
+static inline uint32_t os_wk_hash(uint32_t word)
 {
     return ((word >> 10) * 2654435761U) >> 28;
 }
 
-/* Bytes written to out (at most limit), or 0 when it does not fit. */
-static uint32_t os_wk_compress(const uint8_t* frame, uint32_t words, uint8_t* out, uint32_t limit)
+/* Bytes written to out (at most limit), or 0 when it does not fit. Frames are word-aligned. */
+static uint32_t os_wk_compress(const uint32_t* frame, uint32_t words, uint8_t* out, uint32_t limit)
 {
     uint32_t dict[16] = {0};
     OsBits bits = {out, out + limit, 0U, 0U};
     for (uint32_t i = 0U; i < words; ++i)
     {
-        uint32_t word;
+        uint32_t word = frame[i];
         uint32_t h;
         int ok;
-        memcpy(&word, frame + i * 4U, 4U);
         if (word == 0U)
         {
             ok = os_bits_put(&bits, 0U, 2U);
@@ -134,7 +133,7 @@ static uint32_t os_wk_compress(const uint8_t* frame, uint32_t words, uint8_t* ou
     return (uint32_t)(bits.p - out);
 }
 
-static void os_wk_decompress(const uint8_t* in, uint32_t words, uint8_t* frame)
+static void os_wk_decompress(const uint8_t* in, uint32_t words, uint32_t* frame)
 {
     uint32_t dict[16] = {0};
     OsBits bits = {(uint8_t*)(uintptr_t)in, NULL, 0U, 0U};
@@ -157,7 +156,7 @@ static void os_wk_decompress(const uint8_t* in, uint32_t words, uint8_t* frame)
                 dict[h] = word;
             }
         }
-        memcpy(frame + i * 4U, &word, 4U);
+        frame[i] = word;
     }
 }
 
@@ -221,7 +220,7 @@ static uint32_t os_compress_store_chain(OsCompressState* state, const uint8_t* d
 static OsStatus os_compress_write(void* context, uint32_t slot, const void* frame)
 {
     OsCompressState* state = (OsCompressState*)context;
-    const uint8_t* bytes = (const uint8_t*)frame;
+    const uint32_t* words_in = (const uint32_t*)frame;
     uint32_t words = state->frame / 4U;
     uint32_t first_word;
     uint32_t size;
@@ -232,10 +231,10 @@ static OsStatus os_compress_write(void* context, uint32_t slot, const void* fram
         return OS_STATUS_INVALID_ARGUMENT;
     }
     os_compress_drop(state, slot);
-    memcpy(&first_word, bytes, 4U);
+    first_word = words_in[0];
     for (uint32_t i = 1U; i < words && same; ++i)
     {
-        same = memcmp(bytes + i * 4U, &first_word, 4U) == 0;
+        same = words_in[i] == first_word;
     }
     if (same)
     {
@@ -245,7 +244,7 @@ static OsStatus os_compress_write(void* context, uint32_t slot, const void* fram
     else
     {
         /* Worth keeping only at three quarters or less. */
-        size = os_wk_compress(bytes, words, state->scratch, state->frame / 4U * 3U);
+        size = os_wk_compress(words_in, words, state->scratch, state->frame / 4U * 3U);
         if (size == 0U)
         {
             return OS_STATUS_BUFFER_TOO_SMALL;
@@ -278,7 +277,7 @@ static OsStatus os_compress_read(void* context, uint32_t slot, void* frame)
         memcpy(&word, state->data + (size_t)entry->first * OS_COMPRESS_CHUNK, 4U);
         for (uint32_t i = 0U; i < state->frame / 4U; ++i)
         {
-            memcpy((uint8_t*)frame + i * 4U, &word, 4U);
+            ((uint32_t*)frame)[i] = word;
         }
         return OS_STATUS_OK;
     }
@@ -291,7 +290,7 @@ static OsStatus os_compress_read(void* context, uint32_t slot, void* frame)
     }
     /* The decoder may read a few bytes past the last it needs. */
     memset(state->scratch + at, 0, 8U);
-    os_wk_decompress(state->scratch, state->frame / 4U, (uint8_t*)frame);
+    os_wk_decompress(state->scratch, state->frame / 4U, (uint32_t*)frame);
     return OS_STATUS_OK;
 }
 

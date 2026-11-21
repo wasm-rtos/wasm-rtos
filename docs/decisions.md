@@ -915,6 +915,12 @@ for two compressions a frame.
   fills** (zswap): keeps the hot ones compressed, at the price of a store
   of stores. As built, a full region sends new frames down (zram).
 
+The store itself, on an ESP32 at 240 MHz with the frames gathered: a
+write takes 421 µs and a read 417 µs a frame, chunks and all; one frame of
+16 was refused. Reaching the frame by words, not bytes, mattered: with
+4-byte memcpy through a byte pointer the compiler stored byte by byte and
+a read took 634 µs.
+
 ### Checks
 
 `wasm-rtos-tests/tests/page_compressed`: 300 frames from one word repeated
