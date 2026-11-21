@@ -925,6 +925,26 @@ static WmResult os_resolve_import(
 static OsStatus os_find_entry_function(OsTaskHandle task, const char* entry_function_name);
 
 /*
+ * An instantiation that failed once its imports were linked leaves the
+ * instance (wm.h): its functions might be in tables it imported. Programs
+ * import only functions (os_resolve_import), so none are, and it goes now;
+ * a memory kept apart through a swap goes back to the task first.
+ */
+static void os_drop_failed_instance(OsTaskHandle task, WmMemory* kept)
+{
+    if (task->wasm_instance == NULL)
+    {
+        return;
+    }
+    if (kept != NULL && wm_instance_memory(task->wasm_instance) == kept)
+    {
+        task->swapped_memory = wm_instance_detach_memory(task->wasm_instance);
+    }
+    wm_instance_free(task->wasm_instance);
+    task->wasm_instance = NULL;
+}
+
+/*
  * Out of memory while making a program: the code cache's records (only a
  * speed-up, made again when called) go, and it gets one more try.
  */
@@ -1060,19 +1080,31 @@ OsStatus os_task_create_wasm(
     if (kept != NULL)
     {
         result = wm_instantiate_with_memory(&task->wasm_instance, task->wasm_module, kept, os_resolve_import, &link);
-        if (task->wasm_instance == NULL && os_retry_without_code_cache(result))
-        {
-            result = wm_instantiate_with_memory(&task->wasm_instance, task->wasm_module, kept, os_resolve_import, &link);
-        }
         if (task->wasm_instance != NULL && wm_instance_memory(task->wasm_instance) == kept)
         {
             task->swapped_memory = NULL;
+        }
+        if (result != NULL)
+        {
+            os_drop_failed_instance(task, kept);
+        }
+        if (os_retry_without_code_cache(result))
+        {
+            result = wm_instantiate_with_memory(&task->wasm_instance, task->wasm_module, kept, os_resolve_import, &link);
+            if (task->wasm_instance != NULL && wm_instance_memory(task->wasm_instance) == kept)
+            {
+                task->swapped_memory = NULL;
+            }
         }
     }
     else
     {
         result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
-        if (task->wasm_instance == NULL && os_retry_without_code_cache(result))
+        if (result != NULL)
+        {
+            os_drop_failed_instance(task, NULL);
+        }
+        if (os_retry_without_code_cache(result))
         {
             result = wm_instantiate(&task->wasm_instance, task->wasm_module, NULL, os_resolve_import, &link);
         }
@@ -1080,7 +1112,7 @@ OsStatus os_task_create_wasm(
     if (result != NULL)
     {
         OsStatus status = os_wasm_result_to_status(result);
-        task->wasm_instance = NULL;
+        os_drop_failed_instance(task, kept);
         os_set_last_error(task, "load_module", result, status);
         return status;
     }
