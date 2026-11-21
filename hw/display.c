@@ -1,6 +1,6 @@
 /*
  * Displays: screens the platform registers by name, lent to one program at a
- * time. The kernel knows no panel; the platform's HwDisplayPort draws.
+ * time. The library knows no panel; the platform's HwDisplayPort draws.
  */
 
 #include "hw_driver.h"
@@ -229,7 +229,7 @@ HwStatus hw_display_get(uint32_t id, uint32_t property, uint32_t* out_value)
             *out_value = display->info.brightness;
             return HW_STATUS_OK;
         default:
-            /* A property of a later ABI version: this kernel cannot answer it. */
+            /* A property of a later ABI version: this build cannot answer it. */
             return HW_STATUS_UNSUPPORTED;
     }
 }

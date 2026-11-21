@@ -1,7 +1,7 @@
 /*
  * Input devices: buttons, rotary controls, touch surfaces and keyboards the
  * platform registers by name. Events queue for the program that owns the
- * device; long presses and key repeat come from the kernel's clock, with the
+ * device; long presses and key repeat come from the library's clock, with the
  * timings the platform gave, so every program feels the same.
  */
 
@@ -197,7 +197,7 @@ HwStatus hw_input_key(uint32_t number, uint32_t code, uint8_t down)
     }
     if (held != NULL)
     {
-        /* Already down: the platform's own repeat; the kernel makes repeats itself. */
+        /* Already down: the platform's own repeat; the library makes repeats itself. */
         return HW_STATUS_OK;
     }
     hw_input_push(device, HW_INPUT_EVENT_KEY, code, HW_INPUT_KEY_PRESSED, 0U, 0U);

@@ -47,7 +47,7 @@ enum
 typedef struct HwDriverCall
 {
     const char* name;
-    /* As os_host_function takes it: "i(iii)". */
+    /* "i(iii)": i i32, I i64, f f32, F f64, * an address; v for no result. */
     const char* signature;
     WmHostFunction function;
     /* ABI minor version that added the call. */
@@ -66,16 +66,16 @@ typedef struct HwDriver
     uint8_t (*ready)(uint32_t id);
     /* Called before every scheduling decision: deliver what happened in the background. May be NULL. */
     void (*poll)(void);
-    /* Milliseconds until poll is due even if nothing happens (UINT32_MAX: never), for a sleeping kernel. May be NULL. */
+    /* Milliseconds until poll is due even if nothing happens (UINT32_MAX: never), for a sleeping system. May be NULL. */
     uint32_t (*next_deadline_ms)(void);
-    /* The kernel clock moved: deliver what is due by now (held keys...). May be NULL. */
+    /* The library clock moved: deliver what is due by now (held keys...). May be NULL. */
     void (*time)(void);
     /*
      * End the background work of a task now (it ends, is saved or moves out
      * of RAM): the device must be done with the task's memory. May be NULL.
      */
     void (*finish_task)(uint32_t task_id);
-    /* os_shutdown: release everything. May be NULL. */
+    /* Shutdown (hw_drivers_shutdown): release everything. May be NULL. */
     void (*shutdown)(void);
     /*
      * Saving the whole system (docs/decisions.md, 7): write every object a
@@ -87,7 +87,7 @@ typedef struct HwDriver
     /*
      * Read what save wrote into the driver as the platform registered it
      * again, take each object for its task and set the hardware up again;
-     * tell the kernel what became of each (hw_host_system_device).
+     * tell the library what became of each (hw_host_system_device).
      */
     void (*restore)(HwSystemStream* stream);
 } HwDriver;

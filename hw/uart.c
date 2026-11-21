@@ -1,6 +1,6 @@
 /*
  * Serial ports: the platform's UART port sends; received bytes arrive in a
- * kernel buffer per port. A port's interrupt handler fills that buffer and
+ * buffer per port. A port's interrupt handler fills that buffer and
  * signals room to send; the scheduler wakes the programs waiting for either.
  */
 
@@ -13,7 +13,7 @@
 #error "HW_UART_RX_BUFFER must be a power of two"
 #endif
 
-/* Counters that interrupt handlers bump and the kernel reads. */
+/* Counters that interrupt handlers bump and the library reads. */
 #if defined(__STDC_NO_ATOMICS__)
 typedef volatile uint32_t HwUartCounter;
 #define HW_UART_LOAD(value) (value)
@@ -48,7 +48,7 @@ typedef struct HwUart
     /* Owning task id, 0 when free; bytes are kept only while owned. */
     uint32_t owner;
     /*
-     * Received bytes: the port's handler writes at head, the kernel reads at
+     * Received bytes: the port's handler writes at head, the library reads at
      * tail. Allocated when a program first opens the port and kept until
      * shutdown, so an interrupt handler never writes into freed memory.
      */

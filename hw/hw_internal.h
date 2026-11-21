@@ -126,7 +126,7 @@ void hw_i2c_shutdown(void);
 
 /*
  * A cs of length 0 takes the whole bus: the program drives chip select
- * itself. Otherwise the kernel claims the cs pin and drives it around every
+ * itself. Otherwise the library claims the cs pin and drives it around every
  * transaction, and the bus is shared. HW_STATUS_BUSY when that conflicts.
  */
 HwStatus hw_spi_open(const char* bus_name, uint32_t bus_length, const char* cs, uint32_t cs_length,
@@ -174,9 +174,9 @@ HwStatus hw_counter_write(uint32_t id, int32_t count);
 HwStatus hw_counter_watch(uint32_t id, int32_t low, int32_t high);
 HwStatus hw_counter_get(uint32_t id, uint32_t property, uint32_t* out_value);
 uint8_t hw_counter_ready(uint32_t id);
-/* Events from interrupt handlers, and watched counters read by the kernel. */
+/* Events from interrupt handlers, and watched counters read by the library. */
 void hw_counter_poll(void);
-/* When the kernel next reads a watched counter, in ms from now (HW_WAIT_FOREVER: none). */
+/* When the library next reads a watched counter, in ms from now (HW_WAIT_FOREVER: none). */
 uint32_t hw_counter_next_deadline_ms(void);
 void hw_counter_shutdown(void);
 

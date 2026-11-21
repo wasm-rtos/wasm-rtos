@@ -1,0 +1,37 @@
+name: Build
+
+# The devices build with the interpreter's header and nothing else
+# (hw_host.h is what they need from an operating system), with warnings as
+# errors, by clang and gcc. Their tests run with the kernel in
+# wasm-rtos-tests.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: The interpreter's header
+        run: git clone --depth 1 https://github.com/wasm-rtos/wasm-rtos-vm "$RUNNER_TEMP/vm"
+
+      - name: Build alone
+        run: |
+          for cc in clang gcc; do
+            for file in *.c; do
+              $cc -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -Werror -I"$RUNNER_TEMP/vm/source" \
+                -c "$file" -o "$RUNNER_TEMP/$file.o" || exit 1
+            done
+            echo "ok   $cc"
+          done

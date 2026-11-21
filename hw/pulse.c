@@ -1,7 +1,7 @@
 /*
  * Pulse trains: timed levels on GPIO pins, sent or captured by hardware made
  * for it. The pin is owned as an opened GPIO; the work may run in the
- * background on the program's own buffers, which the kernel then protects
+ * background on the program's own buffers, which the library then protects
  * the same way as for background bus transfers.
  */
 
@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The end of background work, recorded by interrupt handlers and taken by the kernel. */
+/* The end of background work, recorded by interrupt handlers and taken by the library. */
 #if defined(__STDC_NO_ATOMICS__)
 typedef volatile uint8_t HwPulseFlag;
 #define HW_PULSE_FLAG_SET(flag) ((flag) = 1U)

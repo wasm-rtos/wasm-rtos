@@ -1,6 +1,6 @@
 /*
  * GPIO: pins the platform registers by name, lent to one program at a time.
- * The kernel knows no hardware; the platform's HwGpioPort drives the pins.
+ * The library knows no hardware; the platform's HwGpioPort drives the pins.
  */
 
 #include "hw_driver.h"
@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Edge counts are bumped from interrupt handlers and taken by the kernel. */
+/* Edge counts are bumped from interrupt handlers and taken by the library. */
 #if defined(__STDC_NO_ATOMICS__)
 typedef volatile uint32_t HwGpioCounter;
 #define HW_GPIO_COUNT(counter) ((void)++(counter))

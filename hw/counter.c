@@ -2,7 +2,7 @@
  * Counters: pulse counters and quadrature encoders the platform's hardware
  * runs. A program owns a counter, reads and sets its count, and may wait
  * for the count to leave a window: through the hardware's own watch
- * points, or by the kernel reading the count every HW_COUNTER_POLL_MS.
+ * points, or by the library reading the count every HW_COUNTER_POLL_MS.
  */
 
 #include "hw_driver.h"
@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The hardware's watch point fired, recorded by interrupt handlers and taken by the kernel. */
+/* The hardware's watch point fired, recorded by interrupt handlers and taken by the library. */
 #if defined(__STDC_NO_ATOMICS__)
 typedef volatile uint8_t HwCounterFlag;
 #define HW_COUNTER_FLAG_SET(flag) ((flag) = 1U)

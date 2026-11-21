@@ -55,7 +55,7 @@
     hw_host_fault(runtime, wm_memory_read(hw_host_memory, (uint32_t)(ADDRESS), (OUT), (uint32_t)(LENGTH)))
 #define HW_HOST_COPY_TO(ADDRESS, DATA, LENGTH) \
     hw_host_fault(runtime, wm_memory_write(hw_host_memory, (uint32_t)(ADDRESS), (DATA), (uint32_t)(LENGTH)))
-/* Little-endian values in kernel memory (a record copied out of the program). */
+/* Little-endian values in host memory (a record copied out of the program). */
 #define HW_HOST_READ32(POINTER) hw_host_read32(POINTER)
 #define HW_HOST_READ64(POINTER) hw_host_read64(POINTER)
 #define HW_HOST_WRITE8(POINTER, VALUE) (*(uint8_t*)(POINTER) = (uint8_t)(VALUE))

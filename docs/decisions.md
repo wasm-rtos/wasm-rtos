@@ -985,7 +985,7 @@ ahead.
 
 ## 14. Devices in a library of their own, `hw_`
 
-**Proposed (2026-11-22).**
+**Decided and built (2026-11-22).**
 
 ### Problem
 
@@ -1025,11 +1025,17 @@ behaviour, no limit, no ABI changes.
   interpreter's, `os_` the kernel's.
 - **`hw_host.h`: what the devices need from the operating system**, the
   six groups and nothing else; the devices include only it and `hw.h`.
-  The kernel is one implementation of it (`hw_host.c` in the kernel, over
-  today's functions). Another scheduler implements the same functions and
-  gets every device, every port and the ABI of devices as they are.
-- **Status values**: `HwStatus` with the numbers of `OsStatus`, so a port
-  returns the same values it returns today.
+  The kernel is one implementation of it: its own functions compiled under
+  these names (`os_internal.h`), no second copy and no call between, and
+  `hw_host.c` for the two that are public kernel calls. Another scheduler
+  implements the same functions and gets every device, every port and the
+  ABI of devices as they are.
+- **Status values**: `HwStatus` in `hw.h`; `OsStatus` is the same type
+  (`OS_STATUS_OK` is `HW_STATUS_OK`), so a port returns the same values it
+  returns today.
+- **The kernel's own names stay**: `OS_HOST_FUNCTION` and the other
+  `OS_HOST_*` for imports of one's own (`os_host_import_register`), with the
+  parameter names programs' hosts use; the devices use `HW_HOST_*`.
 - **The ABI does not move**: programs still import
   `wasm-rtos:kernel/gpio@1.8.0`; `docs/abi-1.8.txt` and
   `tools/check-abi.py` stay in the kernel and must pass unchanged.
@@ -1068,14 +1074,19 @@ and buses on chosen pins. Each is its own decision.
 
 ### Checks
 
-- The kernel's tests pass unchanged on every configuration in CI, also
-  under the sanitizers; `check-abi.py` passes against
-  `docs/abi-1.8.txt`.
-- The devices build with only `hw.h`, `hw_host.h` and the C library
-  (a CI step that compiles them alone).
+- The kernel's tests: 1729 checks pass, as before the move (the tests only
+  renamed); every configuration of the kernel's CI builds and runs;
+  `check-abi.py` passes against `docs/abi-1.8.txt` (it now reads the
+  devices' tables in `hw/`).
+- The devices build with only the interpreter's header (`-Ivm/source`),
+  by clang and by GCC for Cortex-M4 and Xtensa, warnings as errors: a CI
+  step in the kernel and in wasm-rtos-hw.
+- Size of the kernel and the devices, objects at `-Os`: Cortex-M4 79 804 →
+  79 762 bytes, Xtensa 105 210 → 105 132; static RAM the same (4 880 and
+  4 928). A first version with a wrapper for each host call cost 568 bytes
+  on Xtensa; the kernel's functions under the devices' names cost none.
 - The browser simulator builds and its checks pass; the ESP32 and Black
-  Pill board checks pass (19/19 on ESP32), flash and RAM within a few
-  bytes of today.
+  Pill board checks pass.
 
 ### Work, all of it
 

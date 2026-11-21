@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Devices in a library of their own** (decision 14): pins, buses,
+  displays, input devices, analog inputs and outputs, PWM, serial ports,
+  pulse trains, 1-Wire and counters moved to wasm-rtos-hw, a submodule at
+  `hw/`, with the prefix `hw_` (`os_gpio_add_pin` is `hw_gpio_add_pin`,
+  `OsDriver` is `HwDriver`, `driver.h` is `hw/hw_driver.h`). Nothing they do
+  changed, nor the ABI. Builds add `hw/*.c` and `-Ivm/source`. Ports move
+  to the new names; the old ones are gone.
 - **The interpreter updated** to wasm-rtos-vm with the register loop
   (its decisions 7 to 16): programs run about a third faster on an ESP32
   and a Black Pill (CoreMark in the system 17.5 to 22.6 on an ESP32),

@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* A background transfer's end is recorded by interrupt handlers and taken by the kernel. */
+/* A background transfer's end is recorded by interrupt handlers and taken by the library. */
 #if defined(__STDC_NO_ATOMICS__)
 typedef volatile uint8_t HwBusFlag;
 #define HW_BUS_FLAG_SET(flag) ((flag) = 1U)
@@ -39,7 +39,7 @@ typedef struct HwBus
     uint8_t name_length;
     uint32_t frequency_hz;
 
-    /* A transfer the port runs in the background, with the kernel's copy of its ops. */
+    /* A transfer the port runs in the background, with the library's copy of its ops. */
     uint8_t busy;
     uint32_t task_id;
     uint32_t device;
@@ -51,7 +51,7 @@ typedef struct HwBus
     {
         HwI2cOp i2c[HW_BUS_MAX_OPS];
         HwSpiOp spi[HW_BUS_MAX_OPS];
-        /* The kernel's RESET and match ROM come first. */
+        /* The library's RESET and match ROM come first. */
         HwOneWireOp onewire[HW_BUS_MAX_OPS + 2U];
     } ops;
     HwBusFlag done;
@@ -246,7 +246,7 @@ static void hw_bus_poll_kind(uint8_t kind);
 static void hw_bus_finish_task_kind(uint8_t kind, uint32_t task_id);
 static void hw_bus_finish_all(uint8_t kind);
 
-/* The kernel's copy of a transfer's ops, of the bus's kind. */
+/* The library's copy of a transfer's ops, of the bus's kind. */
 static const void* hw_bus_ops(uint8_t kind, const HwBus* bus)
 {
     if (kind == HW_BUS_ONEWIRE)
@@ -282,7 +282,7 @@ static void hw_bus_deliver(uint8_t kind, HwBus* bus)
 
 /*
  * Start a transaction on a bus: wait out another program's transfer, let
- * the port run it on the kernel's copy of the ops, and either finish here
+ * the port run it on the library's copy of the ops, and either finish here
  * or, when wait allows, leave the calling program waiting
  * (HW_STATUS_PENDING).
  */
@@ -565,7 +565,7 @@ typedef struct HwSpiDevice
     HwBus* bus;
     uint32_t mode;
     uint32_t frequency_hz;
-    /* The kernel's GPIO id of chip select, 0 when the program drives it. */
+    /* The library's GPIO id of chip select, 0 when the program drives it. */
     uint32_t cs;
     uint32_t cs_pin;
     /* Owning task id, 0 when the slot is free. */
@@ -982,7 +982,7 @@ HwStatus hw_onewire_transaction(uint32_t id, const HwOneWireOp* ops, uint32_t co
         uint8_t after_write = index > 0U && (ops[index - 1U].kind == HW_ONEWIRE_WRITE ||
                                              ops[index - 1U].kind == HW_ONEWIRE_WRITE_BITS);
         if (op->kind < HW_ONEWIRE_WRITE || op->kind > HW_ONEWIRE_RESET ||
-            /* A device's transaction starts with the kernel's reset and ROM command. */
+            /* A device's transaction starts with the library's reset and ROM command. */
             (op->kind == HW_ONEWIRE_RESET && device->rom != HW_ONEWIRE_WHOLE_BUS) ||
             (op->kind == HW_ONEWIRE_POWER &&
              (!after_write || op->length > HW_ONEWIRE_MAX_POWER_MS || (op->length == 0U && index + 1U != count))))
@@ -1302,7 +1302,7 @@ static void hw_bus_finish_task_kind(uint8_t kind, uint32_t task_id)
     }
 }
 
-/* Ports must be done with every buffer of a kind before the kernel lets go. */
+/* Ports must be done with every buffer of a kind before the library lets go. */
 static void hw_bus_finish_all(uint8_t kind)
 {
     hw_bus_each(kind, hw_bus_finish_one, 0U);

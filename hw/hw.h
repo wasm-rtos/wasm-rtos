@@ -54,11 +54,11 @@ typedef enum HwStatus
 
 
 /*
- * GPIO. The platform drives the pins through a port; the kernel lends them
+ * GPIO. The platform drives the pins through a port; the library lends them
  * to programs by name. Register every pin a program may use, under the names
  * of the device profile ("led", "button-a", "gpio5"); a pin may have several
  * names. A program owns a pin from open until it closes it or ends; then the
- * kernel configures the pin as an input without pulls.
+ * library configures the pin as an input without pulls.
  *
  * Port flags describe the physical pin: HW_GPIO_INIT_HIGH is the level an
  * output starts at, the edge flags enable edge reports through hw_gpio_edge.
@@ -115,7 +115,8 @@ HwStatus hw_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, 
 /*
  * Report edges on a pin (HW_GPIO_EDGE_RISING and/or HW_GPIO_EDGE_FALLING).
  * Safe to call from an interrupt handler: it only counts them; the next
- * os_schedule delivers them to the program watching the pin.
+ * scheduling decision (hw_drivers_poll) delivers them to the program
+ * watching the pin.
  */
 void hw_gpio_edge(uint32_t pin, uint32_t edges);
 
@@ -139,7 +140,7 @@ uint32_t hw_gpio_wake_pins(HwGpioWake* out, uint32_t max);
 /*
  * Displays. The platform registers each display a program may draw on under
  * the device profile's name ("main" for the primary one) and draws through a
- * port; the kernel lends a display to one program at a time and checks every
+ * port; the library lends a display to one program at a time and checks every
  * write, so the port only ever sees whole rectangles inside the display in a
  * format it accepts.
  *
@@ -182,7 +183,7 @@ typedef struct HwDisplayInfo
  * write puts a rectangle of pixels on the display; pixels is valid only
  * during the call. fill paints a rectangle one color (a pixel value in
  * format); without it, or when it returns HW_STATUS_UNSUPPORTED for that
- * display or format, the kernel writes rows. flush makes everything written
+ * display or format, the library writes rows. flush makes everything written
  * visible: a port that buffers (e-paper, a frame it sends whole) shows it
  * now; one that writes the panel directly may leave it NULL.
  */
@@ -212,13 +213,13 @@ uint32_t hw_display_get_owner(uint32_t display);
  * Input devices: a group of buttons, a rotary control such as a bezel or a
  * knob, a touch surface, a keyboard. The platform registers each under the
  * device profile's name ("buttons", "bezel", "touch", "keyboard") and reports
- * what happens; the kernel queues events for the program that owns the
+ * what happens; the library queues events for the program that owns the
  * device and makes long presses and key repeat from the timings given here,
  * so they feel the same in every program.
  *
  * Keys and buttons use Linux input event codes (KEY_*, BTN_*); rotation is
  * reported for a REL_* code, such as REL_DIAL for a bezel or REL_WHEEL.
- * Report from the context that calls os_schedule, not from an interrupt
+ * Report from the context that schedules (hw_drivers_poll), not from an interrupt
  * handler.
  */
 #define HW_INPUT_BUTTONS  1U
@@ -268,7 +269,7 @@ uint32_t hw_input_get_owner(uint32_t device);
 
 /*
  * Buses. The platform registers each bus under the device profile's name
- * ("i2c0", "spi0", "ow0") and moves the bytes through a port; the kernel lends
+ * ("i2c0", "spi0", "ow0") and moves the bytes through a port; the library lends
  * devices on a bus to programs and checks every transaction, so a port only
  * ever sees whole, valid transactions. Data pointers point into the
  * program's memory and are valid during the call.
@@ -280,8 +281,8 @@ uint32_t hw_input_get_owner(uint32_t device);
  * and returns HW_STATUS_PENDING, and the port reports the end with
  * hw_bus_complete. Only the calling program waits meanwhile; the others
  * run. Until then the ops array and every buffer stay valid and untouched by
- * the kernel: the program is not swapped out, and before it is paused,
- * cancelled or ended the kernel calls finish, which returns only once the
+ * the library: the program is not swapped out, and before it is paused,
+ * cancelled or ended the library calls finish, which returns only once the
  * transfer is over and reported. A port that never returns
  * HW_STATUS_PENDING may leave finish NULL.
  */
@@ -360,7 +361,7 @@ HwStatus hw_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz);
 uint32_t hw_i2c_get_owner(uint32_t bus, uint32_t address);
 
 /*
- * SPI: chip select (when the kernel drives it) goes low before the first op
+ * SPI: chip select (when the library drives it) goes low before the first op
  * and high after the last, also after an error. A read sends zeros; a
  * transfer sends and receives at once, and may read into the bytes it
  * sends. A delay waits length microseconds with chip select held.
@@ -406,12 +407,12 @@ uint32_t hw_spi_get_owner(uint32_t bus, uint32_t cs_pin);
  *               cannot drive the line return HW_STATUS_UNSUPPORTED.
  * A transaction without ops only ends a strong pull-up left on.
  *
- * For a program's device the kernel sends RESET and the ROM command (match
+ * For a program's device the library sends RESET and the ROM command (match
  * ROM with the code) itself before the program's ops. triplet, when the
  * port has it, runs one step of a ROM search: it reads a bit and its
  * complement, writes the bit chosen (that bit when they differ, direction
  * when both are 0) and returns bit 0 = the bit, bit 1 = the complement,
- * bit 2 = the direction written. Without it the kernel searches with bit
+ * bit 2 = the direction written. Without it the library searches with bit
  * ops. A search runs at once: a port returning HW_STATUS_PENDING is
  * finished on the spot.
  */
@@ -450,7 +451,7 @@ uint8_t hw_onewire_crc8(const uint8_t* data, uint32_t length);
  * which bus and device, the ops with the bytes written and read (valid
  * during the call) and the result. device is the I2C address, or the chip
  * select pin (HW_BUS_NO_CS when the program drives it), or for 1-Wire 0:
- * the ROM goes out in the ops (the kernel's RESET and match ROM included).
+ * the ROM goes out in the ops (the library's RESET and match ROM included).
  */
 #define HW_BUS_I2C 1U
 #define HW_BUS_SPI 2U
@@ -477,8 +478,8 @@ void hw_bus_trace_set(HwBusTraceFunction function, void* context);
  * The end of a transfer a port started with HW_STATUS_PENDING, with its
  * result (kind is HW_BUS_I2C, HW_BUS_SPI or HW_BUS_ONEWIRE). Safe to call
  * from an interrupt handler: it only records the result; the next
- * os_schedule (or finish) delivers it to the waiting program. With a tickless clock, wake the
- * kernel afterwards as for hw_gpio_edge.
+ * The next scheduling decision (or finish) delivers it to the waiting program. With a tickless clock, wake the
+ * scheduler afterwards as for hw_gpio_edge.
  */
 void hw_bus_complete(uint32_t kind, uint32_t bus, HwStatus status);
 /* Whether a background transfer is in progress on a bus. */
@@ -489,7 +490,7 @@ uint8_t hw_bus_is_busy(uint32_t kind, uint32_t bus);
  * "battery"). Reading changes nothing, so programs share a channel. read
  * returns the converter's raw value; read_mv, when the port has one, a
  * calibrated voltage. Without it, or when it returns HW_STATUS_UNSUPPORTED
- * for a channel, the kernel scales the raw value.
+ * for a channel, the library scales the raw value.
  */
 #ifndef HW_ADC_MAX
 #define HW_ADC_MAX 8U
@@ -522,7 +523,7 @@ HwStatus hw_adc_add_channel(const char* name, uint32_t channel, const HwAdcInfo*
  *
  * start (may be NULL) switches the channel on; write sets a raw value,
  * 0 .. 2^resolution_bits - 1, already checked; stop switches it off. The
- * output is 0 when a program opens it. Voltages are scaled by the kernel
+ * output is 0 when a program opens it. Voltages are scaled by the library
  * from full_scale_mv, the voltage of the largest raw value.
  */
 #ifndef HW_DAC_MAX
@@ -553,7 +554,7 @@ uint32_t hw_dac_get_owner(uint32_t channel);
 /*
  * Pulse-width outputs on GPIO pins that have HW_GPIO_CAN_PWM. A program owns
  * the pin as it would through gpio; closing gives it back as an input.
- * Duty is 0 (always low) to 65535 (always high) on the pin; the kernel has
+ * Duty is 0 (always low) to 65535 (always high) on the pin; the library has
  * already applied the board's and the program's inversion. A port without a
  * free channel or timer for the pin returns HW_STATUS_LIMIT_REACHED; it may
  * round the frequency and reports the one it set.
@@ -573,16 +574,16 @@ HwStatus hw_pwm_port_set(const HwPwmPort* port);
 
 /*
  * Serial ports, registered under the device profile's names ("uart1",
- * "gps"), one owner each. Received bytes go into a kernel buffer the port
+ * "gps"), one owner each. Received bytes go into a buffer of the library the port
  * fills with hw_uart_receive; sending hands bytes to the port's write,
  * which takes what fits in its own buffer and returns how many. When it
  * has room again it calls hw_uart_writable. Both are safe in interrupt
- * handlers; the next os_schedule wakes the programs waiting for them.
+ * handlers; the next scheduling decision (hw_drivers_poll) wakes the programs waiting for them.
  */
 #ifndef HW_UART_MAX
 #define HW_UART_MAX 4U
 #endif
-/* Bytes the kernel keeps for a program between reads; a power of two. */
+/* Bytes the library keeps for a program between reads; a power of two. */
 #ifndef HW_UART_RX_BUFFER
 #define HW_UART_RX_BUFFER 256U
 #endif
@@ -631,8 +632,8 @@ uint32_t hw_uart_get_owner(uint32_t uart);
  *
  * watch, when the port has it, arms the hardware to call
  * hw_counter_event once the count goes below low or above high (extra
- * calls are harmless: the kernel reads the count again). Without it the
- * kernel reads watched counters every HW_COUNTER_POLL_MS.
+ * calls are harmless: the library reads the count again). Without it the
+ * library reads watched counters every HW_COUNTER_POLL_MS.
  */
 #ifndef HW_COUNTER_MAX
 #define HW_COUNTER_MAX 4U
@@ -694,7 +695,7 @@ uint32_t hw_counter_get_owner(uint32_t unit);
  * program's buffer: it starts at the first edge, ends after idle_ns without
  * one or when the buffer is full, and fails with HW_STATUS_TIMEOUT when no
  * edge comes within timeout_ms (the port times it, so the buffer is never
- * left to it after the kernel has moved on).
+ * left to it after the library has moved on).
  */
 #define HW_PULSE_HIGH       0x80000000U
 #define HW_PULSE_TIME_MASK  0x7FFFFFFFU
@@ -721,7 +722,7 @@ typedef struct HwPulsePort
     HwStatus (*receive)(void* context, uint32_t pin, uint32_t* items, uint32_t max, uint32_t idle_ns,
                         uint32_t timeout_ms, uint32_t* out_count);
     void (*finish)(void* context, uint32_t pin);
-    /* The pin goes back to the kernel: stop and free its channel. */
+    /* The pin goes back to the library: stop and free its channel. */
     void (*release)(void* context, uint32_t pin);
     /* Nanoseconds of one tick of the hardware, for programs that want to know. */
     uint32_t resolution_ns;
