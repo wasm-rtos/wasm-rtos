@@ -11,7 +11,7 @@
  * The region the host gives holds this state, a table of slots, a link per
  * chunk and the chunks: a compressed frame is a chain of chunks of
  * OS_COMPRESS_CHUNK bytes, so the region never needs a free run of any
- * size, and a scratch buffer of a frame and an eighth.
+ * size, and a scratch buffer of three quarters of a frame.
  */
 #include "os_kernel.h"
 
