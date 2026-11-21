@@ -308,7 +308,19 @@ static void os_page_use_slot(uint32_t slot)
 }
 
 /* A slot of a store that is gone is forgotten already. */
-static void os_page_free_slot(uint32_t slot)
+/* A slot freed before, without telling its store: now it may forget what it held. */
+static void os_page_tell_dropped(uint32_t slot)
+{
+    uint32_t local = 0U;
+    OsPageStoreEntry* entry = os_page_entry_of(slot, &local);
+    if (entry != NULL && !os_page_local_used(entry, local) && entry->store.drop != NULL)
+    {
+        entry->store.drop(entry->store.context, local);
+    }
+}
+
+/* The slot is free; tell: and its store may forget what it held (drop), as it is not taken back. */
+static void os_page_release_slot(uint32_t slot, int tell)
 {
     uint32_t local = 0U;
     OsPageStoreEntry* entry = os_page_entry_of(slot, &local);
@@ -318,11 +330,24 @@ static void os_page_free_slot(uint32_t slot)
         entry->used[local / 32U] &= ~(1UL << (local % 32U));
         --entry->used_count;
         --g_page.stored;
+        if (tell && entry->store.drop != NULL)
+        {
+            entry->store.drop(entry->store.context, local);
+        }
     }
 }
 
-/* The store the next frame goes to: the highest priority with a free slot, equal ones in turn. */
-static OsPageStoreEntry* os_page_entry_for_write(void)
+static void os_page_free_slot(uint32_t slot)
+{
+    os_page_release_slot(slot, 1);
+}
+
+/*
+ * The store the next frame goes to: the highest priority with a free slot,
+ * equal ones in turn, leaving out the stores in skip (a bit each), which
+ * said this frame does not fit.
+ */
+static OsPageStoreEntry* os_page_entry_for_write(uint32_t skip)
 {
     OsPageStoreEntry* best = NULL;
     uint32_t best_at = 0U;
@@ -332,7 +357,7 @@ static OsPageStoreEntry* os_page_entry_for_write(void)
     {
         uint32_t i = (g_page.turn + n) % OS_PAGE_MAX_STORES;
         OsPageStoreEntry* entry = &g_page.entries[i];
-        if (entry->present && !entry->leaving && entry->used_count < entry->store.slots &&
+        if (entry->present && !entry->leaving && entry->used_count < entry->store.slots && !(skip & (1U << i)) &&
             (best == NULL || entry->priority > best->priority))
         {
             best = entry;
@@ -351,16 +376,17 @@ static OsPageStoreEntry* os_page_entry_for_write(void)
  * after the last written there, and the slot it had is free from then on.
  * Undone with os_page_slot_back when the write fails.
  */
-static uint32_t os_page_next_slot(uint32_t old)
+static uint32_t os_page_next_slot(uint32_t old, uint32_t skip)
 {
     OsPageStoreEntry* entry = NULL;
     uint32_t index = 0U;
 
+    /* Free for the choice, kept by its store until the new write is done (os_page_place tells it then). */
     if (old != OS_PAGE_NO_SLOT)
     {
-        os_page_free_slot(old);
+        os_page_release_slot(old, 0);
     }
-    entry = os_page_entry_for_write();
+    entry = os_page_entry_for_write(skip);
     if (entry == NULL)
     {
         if (old != OS_PAGE_NO_SLOT)
@@ -381,7 +407,7 @@ static uint32_t os_page_next_slot(uint32_t old)
 
 static void os_page_slot_back(uint32_t old, uint32_t index)
 {
-    os_page_free_slot(index);
+    os_page_release_slot(index, 0);
     if (old != OS_PAGE_NO_SLOT)
     {
         os_page_use_slot(old);
@@ -424,20 +450,53 @@ static WmResult os_page_read_error(uint32_t slot)
     return os_page_entry_of(slot, &local) == NULL ? os_page_store_gone : os_page_read_failed;
 }
 
+/*
+ * Write frame to a new slot, the one it had (old) freed: in the store it
+ * should go to, or the next one when it does not fit there (a compressed
+ * store full, or a frame that compresses badly). The slot, or
+ * OS_PAGE_NO_SLOT with *out_status saying why.
+ */
+static uint32_t os_page_place(uint32_t old, const void* frame, OsStatus* out_status)
+{
+    uint32_t skip = 0U;
+    for (;;)
+    {
+        uint32_t local = 0U;
+        uint32_t index = os_page_next_slot(old, skip);
+        OsPageStoreEntry* entry;
+        if (index == OS_PAGE_NO_SLOT)
+        {
+            *out_status = OS_STATUS_LIMIT_REACHED;
+            return OS_PAGE_NO_SLOT;
+        }
+        entry = os_page_entry_of(index, &local);
+        *out_status = os_page_store_write(index, frame);
+        if (*out_status == OS_STATUS_OK)
+        {
+            /* The copy the frame had is no longer needed: its store may forget it. */
+            if (old != OS_PAGE_NO_SLOT && old != index)
+            {
+                os_page_tell_dropped(old);
+            }
+            return index;
+        }
+        os_page_slot_back(old, index);
+        if (*out_status != OS_STATUS_BUFFER_TOO_SMALL || entry == NULL)
+        {
+            return OS_PAGE_NO_SLOT;
+        }
+        skip |= 1U << (uint32_t)(entry - g_page.entries);
+    }
+}
+
 static WmResult os_page_write(void* context, uint32_t* slot, const uint8_t* frame)
 {
-    uint32_t old = *slot;
-    uint32_t index = os_page_next_slot(old);
+    OsStatus status = OS_STATUS_OK;
+    uint32_t index = os_page_place(*slot, frame, &status);
     (void)context;
-
     if (index == OS_PAGE_NO_SLOT)
     {
-        return os_page_store_full;
-    }
-    if (os_page_store_write(index, frame) != OS_STATUS_OK)
-    {
-        os_page_slot_back(old, index);
-        return os_page_store_failed;
+        return status == OS_STATUS_LIMIT_REACHED ? os_page_store_full : os_page_store_failed;
     }
     *slot = index;
     return NULL;
@@ -596,7 +655,7 @@ static WmResult os_page_write_start(void* context, uint32_t* slot, const uint8_t
     {
         return os_page_write(context, slot, frame);
     }
-    chosen = os_page_next_slot(old);
+    chosen = os_page_next_slot(old, 0U);
     if (chosen == OS_PAGE_NO_SLOT)
     {
         return os_page_store_full;
@@ -605,13 +664,8 @@ static WmResult os_page_write_start(void* context, uint32_t* slot, const uint8_t
     /* A store that writes at once, or no room in the pool for frames on their way out: written now. */
     if (entry->store.write_start == NULL || !g_page.pool_for_writes)
     {
-        if (os_page_store_write(chosen, frame) != OS_STATUS_OK)
-        {
-            os_page_slot_back(old, chosen);
-            return os_page_store_failed;
-        }
-        *slot = chosen;
-        return NULL;
+        os_page_slot_back(old, chosen);
+        return os_page_write(context, slot, frame);
     }
     write->memory = memory;
     write->index = index;
@@ -625,6 +679,11 @@ static WmResult os_page_write_start(void* context, uint32_t* slot, const uint8_t
     {
         ++g_page.writes;
         *slot = chosen;
+        /* The frame in RAM is the one to keep until the write ends: the copy it had is not needed. */
+        if (old != OS_PAGE_NO_SLOT && old != chosen)
+        {
+            os_page_tell_dropped(old);
+        }
         return wm_page_wait;
     }
     OS_PAGE_FLAG_PUT(write->busy, 0U);
@@ -887,16 +946,9 @@ static OsStatus os_page_image_move(OsPageImage* image, void* context)
         {
             break;
         }
-        slot = os_page_next_slot(old);
+        slot = os_page_place(old, buffer, &status);
         if (slot == OS_PAGE_NO_SLOT)
         {
-            status = OS_STATUS_LIMIT_REACHED;
-            break;
-        }
-        status = os_page_store_write(slot, buffer);
-        if (status != OS_STATUS_OK)
-        {
-            os_page_slot_back(old, slot);
             break;
         }
         image->slots[i] = slot;
@@ -1023,6 +1075,7 @@ static OsStatus os_page_image_flush(OsPageImageStream* stream)
     OsPageImage* image = stream->image;
     uint32_t* slots = NULL;
     uint32_t slot = 0U;
+    OsStatus status = OS_STATUS_OK;
 
     if (!os_page_reserve(NULL, 1))
     {
@@ -1035,18 +1088,12 @@ static OsStatus os_page_image_flush(OsPageImageStream* stream)
         return OS_STATUS_OUT_OF_MEMORY;
     }
     image->slots = slots;
-    slot = os_page_next_slot(OS_PAGE_NO_SLOT);
+    memset(stream->buffer + stream->used, 0, OS_PAGE_SLOT_BYTES - stream->used);
+    slot = os_page_place(OS_PAGE_NO_SLOT, stream->buffer, &status);
     if (slot == OS_PAGE_NO_SLOT)
     {
         os_page_reserve(NULL, -1);
-        return OS_STATUS_OUT_OF_MEMORY;
-    }
-    memset(stream->buffer + stream->used, 0, OS_PAGE_SLOT_BYTES - stream->used);
-    if (os_page_store_write(slot, stream->buffer) != OS_STATUS_OK)
-    {
-        os_page_free_slot(slot);
-        os_page_reserve(NULL, -1);
-        return OS_STATUS_ERROR;
+        return status == OS_STATUS_LIMIT_REACHED ? OS_STATUS_OUT_OF_MEMORY : OS_STATUS_ERROR;
     }
     image->slots[image->count++] = slot;
     stream->used = 0U;

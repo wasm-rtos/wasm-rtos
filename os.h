@@ -34,6 +34,14 @@
 #ifndef OS_HAS_MEMORY_ACCOUNTING
 #define OS_HAS_MEMORY_ACCOUNTING 0
 #endif
+/* A page store that keeps frames compressed in RAM (decision 12): not on AVR, which has no paging. */
+#ifndef OS_HAS_COMPRESSED_STORE
+#if defined(__AVR__)
+#define OS_HAS_COMPRESSED_STORE 0
+#else
+#define OS_HAS_COMPRESSED_STORE 1
+#endif
+#endif
 /* Code stores (decision 11): images are programs', and only where the interpreter predecodes (not on AVR). */
 #ifndef OS_HAS_CODE_STORES
 #if defined(__AVR__) || !OS_HAS_PROCESSES
@@ -687,6 +695,13 @@ typedef struct OsPageStore
      * program's memory in one block is its frames in a row there.
      */
     void* ram;
+    /*
+     * Optional: slot holds nothing anyone needs any more (its frame's memory
+     * went, or the frame was written elsewhere), for a store that keeps its
+     * frames in memory of its own (os_page_store_compressed). Not called for
+     * a slot taken again at once.
+     */
+    void (*drop)(void* context, uint32_t slot);
 } OsPageStore;
 
 /* A background read or write the store started has ended. */
@@ -761,6 +776,19 @@ typedef struct OsPageStats
 } OsPageStats;
 
 OsStatus os_page_get_stats(OsPageStats* out_stats);
+
+#if OS_HAS_COMPRESSED_STORE
+/*
+ * A page store that keeps frames compressed in RAM, in region (bytes long,
+ * 4-byte aligned), as zram does (docs/decisions.md, 12): set up into
+ * out_store, to add with os_page_store_add at a priority above slower
+ * stores. A frame that compresses to more than three quarters of itself,
+ * or finds the region full, goes to the next store. A frame takes about
+ * half of itself on average (WKdm); one of a single word repeated, 128
+ * bytes.
+ */
+OsStatus os_page_store_compressed(OsPageStore* out_store, void* region, uint32_t bytes);
+#endif
 
 #if OS_HAS_CODE_STORES
 /*

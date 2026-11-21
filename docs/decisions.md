@@ -851,3 +851,83 @@ PSRAM; on a Black Pill the last flash sectors.
   makes parse their own (decision 9), not code. With images written while
   tasks slept 100 ms, ten such sleeps took 1077 ms: hence
   `OS_CODE_QUIET_MS`.
+
+## 12. Frames compressed in RAM, a page store above slower ones
+
+**Decided and built (2026-11-21).**
+
+### Problem
+
+A program whose memory does not fit in RAM pages to a store, on these
+boards an SD card: a few milliseconds a frame, and the card wears. Much of
+what programs keep compresses well, and RAM holds more of it compressed
+than plain.
+
+### Decision
+
+- **A compressed page store**, as zram is in Linux:
+  `os_page_store_compressed(store, region, bytes)` makes a page store of
+  a region of RAM the host gives, and the host adds it with
+  `os_page_store_add` at a priority above its slower stores (decision 10).
+  Frames go to it first; one that does not fit goes to the next store.
+- **WKdm**, Wilson and Kaplan's algorithm for memory, as macOS uses: each
+  32-bit word is zero, one of 16 recent words, the same but for its low
+  10 bits, or new. A frame of one word repeated is kept as the word.
+- **Not every frame**: one that compresses to more than three quarters of
+  itself is refused (random data; zswap refuses badly compressing pages
+  the same way), and so is one when the region is full. The store says so
+  with `OS_STATUS_BUFFER_TOO_SMALL`, and the kernel gives the frame to the
+  store of the next priority: one rule for "does not fit", whatever the
+  store.
+- **Chunks of 128 bytes**: a compressed frame is a chain of them, so the
+  region never needs a free run of any size and never fragments. A slot
+  takes 4 bytes of the region and a chunk 2 more for its link.
+- **Let go as soon as unneeded**: page stores get an optional `drop`, told
+  when a slot holds nothing anyone needs (the frame's memory went, or the
+  frame was written elsewhere), never for a slot only freed while a new
+  write is chosen. The compressed store frees its chunks then.
+
+### Why
+
+Measured on frames of real program memories (CoreMark at three points of
+its run, a C program with a heap of structs with pointers and strings, a
+table of numbers and text), 4 KiB each:
+
+| | WKdm | LZ4 (table of 2 KB) | zero words only |
+|---|---:|---:|---:|
+| size, dense data | 51% | 57% | 81% |
+| frames to half or less | 22% | 60% | 6% |
+| ESP32, compress a frame | 458 µs | 1297 µs | |
+| ESP32, decompress a frame | 432 µs | 228 µs | |
+| RAM of its own | 64 B | 2 KB | |
+
+WKdm keeps more in the same RAM, compresses three times faster than LZ4
+and needs almost no memory; it decompresses slower, and still ten times
+faster than an SD card reads. The best of the two for each frame was 43%,
+for two compressions a frame.
+
+### Instead
+
+- **LZ4** (zram's default): faster to decompress, but larger results here,
+  three times slower to compress and 2 KB of table. A second algorithm
+  later, if programs with text show it worth it.
+- **Writing compressed frames back to the slow store when the region
+  fills** (zswap): keeps the hot ones compressed, at the price of a store
+  of stores. As built, a full region sends new frames down (zram).
+
+The store itself, on an ESP32 at 240 MHz with the frames gathered: a
+write takes 421 µs and a read 417 µs a frame, chunks and all; one frame of
+16 was refused. Reaching the frame by words, not bytes, mattered: with
+4-byte memcpy through a byte pointer the compiler stored byte by byte and
+a read took 634 µs.
+
+### Checks
+
+`wasm-rtos-tests/tests/page_compressed`: 300 frames from one word repeated
+to random words written and read through the store itself, all that fit
+coming back byte for byte (197 fit, 103 refused); a program of 192 KB in
+32 KB of RAM over a slow store: the slow store wrote 577 frames alone and
+96 under a compressed store of 256 KB, the 96 being exactly its frames of
+random words; its result the same; the store empty when it ends and a
+second run the same. The suite's 89 tests pass, also with every memory
+paged.
