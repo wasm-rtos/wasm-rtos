@@ -787,6 +787,14 @@ typedef struct OsCodeStore
 #ifndef OS_CODE_MAX_STORES
 #define OS_CODE_MAX_STORES 2U
 #endif
+/*
+ * The scheduler writes an image only when no task is ready and none is due
+ * sooner than this: writing one takes a while (128 ms for CoreMark's on an
+ * ESP32), and a task waking meanwhile would wake late.
+ */
+#ifndef OS_CODE_QUIET_MS
+#define OS_CODE_QUIET_MS 500U
+#endif
 
 /* A new image goes to the store with the highest priority that has room. */
 OsStatus os_code_store_add(const OsCodeStore* store, uint32_t priority);
@@ -802,7 +810,8 @@ typedef struct OsCodeStoreStats
 OsStatus os_code_store_get_stats(const OsCodeStore* store, OsCodeStoreStats* out_stats);
 /*
  * Write the image of one loaded program that has none, and map it: what
- * the scheduler does when no task is ready. Writing takes a while (128 ms
+ * the scheduler does when no task is ready and none is due within
+ * OS_CODE_QUIET_MS. Writing takes a while (128 ms
  * for CoreMark's on an ESP32), so a host whose tasks are never all waiting
  * calls it where a pause suits it. OS_STATUS_OK: one written;
  * OS_STATUS_NO_READY_TASKS: none waits for one.

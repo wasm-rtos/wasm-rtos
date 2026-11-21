@@ -797,9 +797,11 @@ PSRAM; on a Black Pill the last flash sectors.
   is erased, and images are written again as programs load: erasing it
   later would pull mapped records from under the code cache. Images of an
   older firmware are refused by the interpreter and go with that erase.
-- **When nothing is ready**: the scheduler writes one image each time it
-  finds no task ready; a host whose tasks are never all waiting calls
-  `os_code_store_write_pending()` where a pause suits it.
+- **When nothing is ready, nor due soon**: the scheduler writes one image
+  each time it finds no task ready and none due within `OS_CODE_QUIET_MS`
+  (500 ms): a first try on the ESP32 wrote while tasks slept 100 ms, and
+  ten sleeps took 1077 ms. A host whose tasks are never quiet that long
+  calls `os_code_store_write_pending()` where a pause suits it.
 - **Only with predecoding.** Code stores are built where the interpreter
   predecodes (`OS_HAS_CODE_STORES`, off on AVR): the Uno and every build
   running in place have none of it, not a byte.
@@ -841,6 +843,11 @@ PSRAM; on a Black Pill the last flash sectors.
   one written; of two empty stores the one of priority 5 takes it; a store
   filled to its last sector is erased when it is added again. 19 checks;
   the suite's 88 tests pass, also with every memory paged.
-- Boards: the kernel's board checks with a code store on the ESP32 (an
-  app partition) and the Black Pill (the last sectors): programs at once,
-  CoreMark in the system with the code cache small.
+- ESP32, the kernel's board checks with a code store of 256 KiB of the
+  second app partition mapped as data: 19 of 19 pass. One image was
+  written (the checks' program, 8 KiB with its header) and mapped 43
+  times: every task of those bytes maps the same image. Programs at once
+  stay 18: what they lack room for is a module each, as tasks the host
+  makes parse their own (decision 9), not code. With images written while
+  tasks slept 100 ms, ten such sleeps took 1077 ms: hence
+  `OS_CODE_QUIET_MS`.

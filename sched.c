@@ -221,8 +221,11 @@ OsStatus os_schedule(void)
     {
         g_os.current_task = NULL;
 #if OS_HAS_CODE_STORES
-        /* Nothing to run: time to write a program's code image. */
-        (void)os_code_store_write_pending();
+        /* Nothing to run, and nothing due for a while: time to write a program's code image. */
+        if (os_get_next_wakeup_ms() >= OS_CODE_QUIET_MS)
+        {
+            (void)os_code_store_write_pending();
+        }
 #endif
         return OS_STATUS_NO_READY_TASKS;
     }
