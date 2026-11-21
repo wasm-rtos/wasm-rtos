@@ -982,3 +982,121 @@ quiet time before, 26 frames are written in its way; after 200 ms of
 quiet, 26 were written ahead and none in its way; the sleeper's memory
 reads back as it was both ways; with RAM to spare nothing is written
 ahead.
+
+## 14. Devices in a library of their own, `hw_`
+
+**Decided and built (2026-11-22).**
+
+### Problem
+
+Pins, buses, displays, input devices, analog inputs and outputs, PWM,
+serial ports, pulse trains, 1-Wire and counters are about half of the
+kernel (`gpio.c`, `bus.c`, `display.c`, `input.c`, `uart.c`, `adc.c`,
+`dac.c`, `pwm.c`, `pulse.c`, `counter.c`, `driver.h`: 7565 lines, and 684
+lines of `os.h`). They are not the operating system: they are the
+peripherals of the machine programs run on, as GPIO and I2C sit next to a
+processor's core on a chip, not inside it. Kept in the kernel:
+
+- someone who embeds the interpreter alone, or writes a small scheduler
+  of their own (an 8-bit board, an operating system written in
+  WebAssembly), cannot have the same devices and the same calls without
+  taking the whole kernel;
+- their API says `os_` (`os_gpio_add_pin`) though nothing in it is about
+  the operating system;
+- nothing marks what the devices need from the operating system. In
+  fact they use about 30 functions of the kernel, in six groups (handles,
+  the calling task, a program's memory, waiting, time, saving the
+  system), but `driver.h` includes `os_internal.h`, so a driver may use
+  anything.
+
+### Decision
+
+**Move them, change nothing they do.** This is a move and a rename; no
+behaviour, no limit, no ABI changes.
+
+- **A library of its own, `wasm-rtos-hw`**, a submodule of the kernel at
+  `hw/` as the interpreter is at `vm/`. In it: the ten device files and
+  the registry of drivers (`hw_driver.h`, today's `driver.h`).
+- **Prefix `hw_`** for everything a port or a driver calls:
+  `os_gpio_add_pin` → `hw_gpio_add_pin`, `os_i2c_port_set` →
+  `hw_i2c_port_set`, `OsGpioPort` → `HwGpioPort`, `OS_GPIO_OUTPUT` →
+  `HW_GPIO_OUTPUT`, `OsDriver` → `HwDriver`, `os_driver_add` →
+  `hw_driver_add`. `wr_` stays the programs' header, `wm_` the
+  interpreter's, `os_` the kernel's.
+- **`hw_host.h`: what the devices need from the operating system**, the
+  six groups and nothing else; the devices include only it and `hw.h`.
+  The kernel is one implementation of it: its own functions compiled under
+  these names (`os_internal.h`), no second copy and no call between, and
+  `hw_host.c` for the two that are public kernel calls. Another scheduler
+  implements the same functions and gets every device, every port and the
+  ABI of devices as they are.
+- **Status values**: `HwStatus` in `hw.h`; `OsStatus` is the same type
+  (`OS_STATUS_OK` is `HW_STATUS_OK`), so a port returns the same values it
+  returns today.
+- **The kernel's own names stay**: `OS_HOST_FUNCTION` and the other
+  `OS_HOST_*` for imports of one's own (`os_host_import_register`), with the
+  parameter names programs' hosts use; the devices use `HW_HOST_*`.
+- **The ABI does not move**: programs still import
+  `wasm-rtos:kernel/gpio@1.8.0`; `docs/abi-1.8.txt` and
+  `tools/check-abi.py` stay in the kernel and must pass unchanged.
+- **Every user renamed at once**, with no old names kept: the kernel's
+  tests, the browser simulator (`os/main.c`), the local ports (ESP32,
+  Black Pill). All of them are ours; after 1.0 a rename like this would
+  be 2.0.
+
+### Why
+
+- The layers then say what they are: interpreter (`wm_`), devices
+  (`hw_`), operating system (`os_`), programs (`wr_`). As Rust's
+  embedded-hal and Embassy keep drivers apart from any executor, and the
+  Arduino libraries from any RTOS.
+- The boundary is written down and the compiler holds it: a device that
+  reaches past `hw_host.h` does not build.
+- Done before 1.0, when every user of these names is ours.
+
+### Instead
+
+- **Inside the interpreter (`wm_`):** the interpreter would have to know
+  owners, waits and sleep; it would grow past the 34.7 KB it takes on an
+  Uno.
+- **A folder in the kernel keeping `os_`:** less work, but the devices
+  still read as part of the operating system and the boundary stays
+  unwritten.
+- **Old names kept as aliases:** nothing outside our repositories uses
+  them yet.
+
+### Not in this
+
+Everything that would change what the devices do: a client API for
+native drivers, named interrupts, one layer for interrupt-safe flags,
+namespaces for drivers of one's own, providers, windows, I2C frequency
+and buses on chosen pins. Each is its own decision.
+
+### Checks
+
+- The kernel's tests: 1729 checks pass, as before the move (the tests only
+  renamed); every configuration of the kernel's CI builds and runs;
+  `check-abi.py` passes against `docs/abi-1.8.txt` (it now reads the
+  devices' tables in `hw/`).
+- The devices build with only the interpreter's header (`-Ivm/source`),
+  by clang and by GCC for Cortex-M4 and Xtensa, warnings as errors: a CI
+  step in the kernel and in wasm-rtos-hw.
+- Size of the kernel and the devices, objects at `-Os`: Cortex-M4 79 804 →
+  79 762 bytes, Xtensa 105 210 → 105 132; static RAM the same (4 880 and
+  4 928). A first version with a wrapper for each host call cost 568 bytes
+  on Xtensa; the kernel's functions under the devices' names cost none.
+- The browser simulator builds with the devices (Emscripten, no warning);
+  the board firmwares build (ESP32 checks, Black Pill system and deep
+  sleep). The simulator's page checks and the runs on the boards come with
+  the simulator's update and the next board session.
+
+### Work, all of it
+
+| # | What | Where |
+|---|---|---|
+| 1 | New repository `wasm-rtos-hw`: the ten device files, `hw_driver.h`, `hw.h`, `hw_host.h`, README, CHANGELOG, CI | new repository |
+| 2 | Kernel: `hw/` submodule, `hw_host.c`, device parts out of `os.h`, builds and CI | kernel |
+| 3 | Rename in the kernel's tests | wasm-rtos-tests |
+| 4 | Rename in the simulator | wasm-rtos.github.io |
+| 5 | Rename in the local ESP32 and Black Pill ports, board checks | local |
+| 6 | `docs/porting.md` → in `wasm-rtos-hw`; README of each repository; org README (repositories, Roadmap) | all |

@@ -29,6 +29,13 @@ jobs:
       - name: Check the ABI
         run: python3 tools/check-abi.py
 
+      # The devices (hw/, decision 14) need nothing of the kernel but
+      # hw/hw_host.h: they build with the interpreter's header alone.
+      - name: Build the devices alone
+        run: |
+          cd hw
+          clang -std=c11 -O1 -Wall -Wextra -Wno-unused-parameter -Werror -I../vm/source -fsyntax-only *.c
+
       - name: Build every configuration
         run: |
           cat > "$RUNNER_TEMP/main.c" <<'EOF'
@@ -44,8 +51,8 @@ jobs:
           EOF
           fail=0
           while read -r flags; do
-            if clang -std=c11 -O1 -Wall -Wextra -Wno-unused-parameter -Werror -I. $flags \
-                 "$RUNNER_TEMP/main.c" *.c vm/source/*.c -lm -o "$RUNNER_TEMP/kernel" &&
+            if clang -std=c11 -O1 -Wall -Wextra -Wno-unused-parameter -Werror -I. -Ivm/source $flags \
+                 "$RUNNER_TEMP/main.c" *.c hw/*.c vm/source/*.c -lm -o "$RUNNER_TEMP/kernel" &&
                "$RUNNER_TEMP/kernel"; then
               echo "ok   [$flags]"
             else

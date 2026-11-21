@@ -44,13 +44,13 @@ enum
 /* What a restore learned from the drivers: a device saved as old_id is new_id now (0: gone, and why). */
 typedef struct OsSystemDevice
 {
-    const OsDriver* driver;
+    const HwDriver* driver;
     uint32_t old_id;
     uint32_t new_id;
     const char* reason;
 } OsSystemDevice;
 
-struct OsSystemStream
+struct HwSystemStream
 {
     OsSnapshotWrite write;
     OsSnapshotRead read;
@@ -399,7 +399,7 @@ static WmResult os_system_engine_read(void* context, void* data, uint32_t size)
 
 /* ---- Devices ------------------------------------------------------------- */
 
-void os_system_device(OsSystemStream* stream, const OsDriver* driver, uint32_t old_id, uint32_t new_id,
+void os_system_device(OsSystemStream* stream, const HwDriver* driver, uint32_t old_id, uint32_t new_id,
                       const char* reason)
 {
     if (stream->device_count == stream->device_capacity)
@@ -422,7 +422,7 @@ void os_system_device(OsSystemStream* stream, const OsDriver* driver, uint32_t o
     ++stream->device_count;
 }
 
-uint32_t os_system_device_id(OsSystemStream* stream, const OsDriver* driver, uint32_t old_id, const char** out_reason)
+uint32_t os_system_device_id(OsSystemStream* stream, const HwDriver* driver, uint32_t old_id, const char** out_reason)
 {
     uint32_t index = 0U;
 
@@ -646,7 +646,7 @@ static void os_system_save_task(OsSystemStream* stream, OsTaskHandle task)
     /* A signal from a device names its driver, whose place among the drivers may differ after the sleep. */
     if (task->wait_type == OS_TASK_WAIT_SIGNAL && (task->wait_bits >> 24U) >= 0x80U)
     {
-        os_system_put_text(stream, os_driver_at((task->wait_bits >> 24U) - 0x80U)->interface);
+        os_system_put_text(stream, hw_driver_at((task->wait_bits >> 24U) - 0x80U)->interface);
     }
     os_system_put32(stream, task->wait_clear_on_exit);
     os_system_put32(stream, task->wait_for_all);
@@ -747,16 +747,16 @@ static void os_system_save_drivers(OsSystemStream* stream)
     uint32_t index = 0U;
     uint32_t pass = 0U;
 
-    for (index = 0U; index < os_driver_count(); ++index)
+    for (index = 0U; index < hw_driver_count(); ++index)
     {
-        count += os_driver_at(index)->save != NULL ? 1U : 0U;
+        count += hw_driver_at(index)->save != NULL ? 1U : 0U;
     }
     os_system_put32(stream, count);
     for (pass = 0U; pass < 2U; ++pass)
     {
-        for (index = 0U; index < os_driver_count() && os_system_ok(stream); ++index)
+        for (index = 0U; index < hw_driver_count() && os_system_ok(stream); ++index)
         {
-            const OsDriver* driver = os_driver_at(index);
+            const HwDriver* driver = hw_driver_at(index);
             if (driver->save == NULL || (strcmp(driver->interface, "gpio") == 0) != (pass == 0U))
             {
                 continue;
@@ -1345,13 +1345,13 @@ static void os_system_restore_task(OsSystemStream* stream, OsTaskHandle task, Os
     if (task->wait_type == OS_TASK_WAIT_SIGNAL && (task->wait_bits >> 24U) >= 0x80U && os_system_ok(stream))
     {
         char* interface = os_system_get_text(stream);
-        const OsDriver* driver = interface != NULL ? os_driver_find(interface) : NULL;
+        const HwDriver* driver = interface != NULL ? hw_driver_find(interface) : NULL;
         const char* gone = NULL;
         uint32_t id = os_system_ok(stream) ? os_system_device_id(stream, driver, task->wait_bits & 0x00FFFFFFU, &gone) : 0U;
         free(interface);
         if (id != 0U)
         {
-            task->wait_bits = os_driver_signal_key(driver, id);
+            task->wait_bits = hw_driver_signal_key(driver, id);
         }
         else
         {
@@ -1391,7 +1391,7 @@ static void os_system_restore_task(OsSystemStream* stream, OsTaskHandle task, Os
             /* A device it waits for, under the id it has now. */
             char* interface = os_system_get_text(stream);
             const char* gone = NULL;
-            task->wait_targets[index].driver = interface != NULL ? os_driver_find(interface) : NULL;
+            task->wait_targets[index].driver = interface != NULL ? hw_driver_find(interface) : NULL;
             free(interface);
             task->wait_targets[index].id = os_system_ok(stream)
                 ? os_system_device_id(stream, task->wait_targets[index].driver, task->wait_targets[index].id, &gone)
@@ -1554,7 +1554,7 @@ static void os_system_restore_drivers(OsSystemStream* stream)
     for (index = 0U; index < count && os_system_ok(stream); ++index)
     {
         char* interface = os_system_get_text(stream);
-        const OsDriver* driver = interface != NULL ? os_driver_find(interface) : NULL;
+        const HwDriver* driver = interface != NULL ? hw_driver_find(interface) : NULL;
         free(interface);
         if (!os_system_ok(stream))
         {

@@ -89,18 +89,19 @@ for (;;)
 
 ## Building
 
-Compile the kernel sources together with the interpreter:
+Compile the kernel sources together with the device library and the
+interpreter:
 
 ```sh
 git clone --recurse-submodules https://github.com/wasm-rtos/wasm-rtos
-cc -std=c11 -I. your_main.c *.c vm/source/*.c -lm
+cc -std=c11 -I. -Ivm/source your_main.c *.c hw/*.c vm/source/*.c -lm
 ```
 
 In a clone made without `--recurse-submodules`, run `git submodule update
---init` to get the interpreter.
+--init` to get the interpreter and the devices.
 
-Then give the kernel a clock and the board's devices:
-[docs/porting.md](docs/porting.md).
+Then give the kernel a clock ([docs/porting.md](docs/porting.md)) and the
+board's devices (`hw/docs/porting.md`).
 
 ### Kernel options
 
@@ -116,46 +117,23 @@ Then give the kernel a clock and the board's devices:
 | `OS_HAS_MEMORY_ACCOUNTING` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
 | `OS_MAX_SPAWNED_TASKS` | 16 | processes alive at once |
 | `OS_ABI_MAX_HANDLES` | 32 | handles one program may hold |
-| `OS_MAX_DRIVERS` | 16 | drivers at once |
+| `HW_MAX_DRIVERS` | 16 | drivers at once |
 | `OS_TASK_SLICE_FUEL` | 10000 | interpreter work per scheduler slice |
 | `OS_DEFAULT_STACK_SIZE` | 8 KiB | interpreter stack when neither creator nor program picks one |
 
 The file system needs 32-bit pointers; build 8-bit targets with
 `OS_HAS_FS=0`.
 
-### Drivers
+### Devices
 
-Pins, buses, displays and the rest are drivers (`driver.h`). The kernel
-knows none of them by name: a driver joins when the platform registers its
-first device, so a build carries exactly the drivers its platform uses.
-A program that imports an interface no driver offers still loads, and those
-calls return `-WR_EUNSUPPORTED`.
-
-| Interface | Joins with | Limits (default) |
-|---|---|---|
-| `gpio` | `os_gpio_add_pin` | `OS_GPIO_MAX_PINS` / `OS_GPIO_MAX_NAMES` (32 / 64): pins and pin names |
-| `display` | `os_display_add` | `OS_DISPLAY_MAX` (2) |
-| `input` | `os_input_add` | `OS_INPUT_MAX` / `OS_INPUT_QUEUE` / `OS_INPUT_MAX_HELD` (8 / 32 / 4): devices, events queued per device (16 bytes each), keys tracked for long press and repeat |
-| `i2c` | `os_i2c_add_bus` | `OS_I2C_MAX_BUSES` / `OS_I2C_MAX_DEVICES` (2 / 16): buses, and addresses programs hold open at once |
-| `spi` | `os_spi_add_bus` | `OS_SPI_MAX_BUSES` / `OS_SPI_MAX_DEVICES` (2 / 8) |
-| `onewire` | `os_onewire_add_bus` | `OS_ONEWIRE_MAX_BUSES` / `OS_ONEWIRE_MAX_DEVICES` (2 / 8) |
-| | | `OS_BUS_MAX_OPS` (16): ops in one bus transaction |
-| `adc` | `os_adc_add_channel` | `OS_ADC_MAX` (8) |
-| `dac` | `os_dac_add_channel` | `OS_DAC_MAX` (4) |
-| `pwm` | `os_pwm_port_set` | `OS_PWM_MAX` (8): outputs at once, on GPIO pins with `OS_GPIO_CAN_PWM` |
-| `pulse` | `os_pulse_port_set` | `OS_PULSE_MAX` (4): channels at once, on GPIO pins with `OS_GPIO_CAN_PULSE` |
-| `uart` | `os_uart_add` | `OS_UART_MAX` / `OS_UART_RX_BUFFER` (4 / 256): ports, and received bytes kept per port |
-| `counter` | `os_counter_add` | `OS_COUNTER_MAX` / `OS_COUNTER_POLL_MS` (4 / 10): counters, and how often the kernel reads watched counters whose hardware cannot watch |
-
-The `*_MAX` limits are slots: each costs a pointer. A pin, display, input
-device, bus, serial port or analog channel takes memory when the platform
-registers it, an input device's event queue while a program owns it, and a
-serial port's receive buffer from the first time a program opens it (it
-stays, as interrupt handlers write into it). A board with a few devices
-spends a few hundred bytes on them.
-
-A driver of your own is an `OsDriver` added with `os_driver_add`: see
-[docs/porting.md](docs/porting.md#drivers-of-your-own).
+Pins, buses, displays and the rest are the device library,
+[wasm-rtos-hw](https://github.com/wasm-rtos/wasm-rtos-hw), in `hw/` (a
+submodule, like the interpreter in `vm/`). A board registers what it has
+(`hw_gpio_add_pin`, `hw_display_add`, `hw_i2c_add_bus`...), so a build
+carries exactly the drivers its board uses; a program that imports an
+interface no driver offers still loads, and those calls return
+`-WR_EUNSUPPORTED`. The limits of each device and drivers of your own are in
+its README and `hw/docs/porting.md`.
 
 ## API
 
@@ -301,7 +279,7 @@ uint8_t os_task_is_swapped(OsTaskHandle task);
 OsStatus os_system_save(OsSnapshotWrite write, void* context);
 OsStatus os_system_restore(OsSnapshotRead read, void* context, OsModuleFind find, void* find_context,
                            uint32_t slept_ms);
-uint32_t os_gpio_wake_pins(OsGpioWake* out, uint32_t max);
+uint32_t hw_gpio_wake_pins(HwGpioWake* out, uint32_t max);
 ```
 
 ### Measuring and errors
@@ -330,11 +308,11 @@ const char* os_wasm_library_get_name(OsWasmLibraryHandle library);
 uint32_t os_wasm_library_get_count(void);
 ```
 
-Devices are registered by the board through ports (`os_gpio_*`,
-`os_display_*`, `os_input_*`, `os_i2c_*`, `os_spi_*`, `os_onewire_*`,
-`os_adc_*`, `os_dac_*`, `os_pwm_*`, `os_uart_*`, `os_pulse_*`,
-`os_counter_*`): see [docs/porting.md](docs/porting.md). The file system is
-in `fs.h`, drivers of your own in `driver.h`.
+Devices are registered by the board through the ports of the device
+library (`hw_gpio_*`, `hw_display_*`, `hw_input_*`, `hw_i2c_*`, `hw_spi_*`,
+`hw_onewire_*`, `hw_adc_*`, `hw_dac_*`, `hw_pwm_*`, `hw_uart_*`,
+`hw_pulse_*`, `hw_counter_*`): see `hw/docs/porting.md`. The file system is
+in `fs.h`.
 
 ## Guest programs
 
