@@ -6,6 +6,23 @@ the build options; `os.h` documents every call. The devices of a board
 (pins, buses, displays and the rest) are registered through the device
 library: `hw/docs/porting.md`.
 
+## C stack
+
+The kernel, the devices and the interpreter run on the C stack of whatever
+calls `os_schedule`. Programs' own calls do not use it (they live in the
+interpreter's stack, `OS_DEFAULT_STACK_SIZE`), but the kernel's work for
+them does: a program that starts another from a file whose code is decoded
+on the way is the deepest, about 2.5 KiB on a Cortex-M4 at `-O2` by GCC's
+call graph (`-fcallgraph-info=su`). Host functions of your own add their
+frames on top. Give it 4 KiB or more.
+
+A heap that grows towards the stack must leave that much free: STM32duino's
+`_sbrk` keeps only `_Min_Stack_Size` (1 KiB in its linker scripts) between
+them, so with the heap nearly full the kernel's stack runs into it. Raise
+`_Min_Stack_Size` in the board's linker script. An ESP32's task with 8 KiB
+of stack is enough. No function of the interpreter keeps more than 1 KiB on
+the stack (its CI checks it).
+
 ## Clock
 
 Time is the kernel's only platform dependency, and the kernel contains no
