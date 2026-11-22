@@ -1623,37 +1623,12 @@ static const OsAbiImport g_abi_imports[] =
  * Whether module is "wasm-rtos:kernel/<interface>@1.<minor>.0": then 1, the
  * interface's length and the minor.
  */
+/* Whether module is "wasm-rtos:kernel/<interface>@1.<minor>.0" (the devices' library reads these names). */
 static int os_abi_kernel_module(const char* module, uint32_t length, uint32_t* out_interface_length,
                                 uint32_t* out_minor)
 {
-    const uint32_t prefix_length = (uint32_t)(sizeof(WR_KERNEL_PREFIX) - 1U);
-    uint32_t at = prefix_length;
-    uint32_t minor = 0U;
-
-    if (length <= prefix_length || memcmp(module, WR_KERNEL_PREFIX, prefix_length) != 0)
-    {
-        return 0;
-    }
-    while (at < length && module[at] != '@')
-    {
-        ++at;
-    }
-    *out_interface_length = at - prefix_length;
-    if (*out_interface_length == 0U || length < at + 6U || memcmp(module + at, "@1.", 3U) != 0)
-    {
-        return 0;
-    }
-    at += 3U;
-    if (module[at] < '0' || module[at] > '9' || (module[at] == '0' && module[at + 1U] != '.'))
-    {
-        return 0;
-    }
-    while (at < length && module[at] >= '0' && module[at] <= '9' && minor < 1000U)
-    {
-        minor = minor * 10U + (uint32_t)(module[at++] - '0');
-    }
-    *out_minor = minor;
-    return length - at == 2U && memcmp(module + at, ".0", 2U) == 0;
+    const char* interface = NULL;
+    return hw_abi_module(module, length, &interface, out_interface_length, out_minor);
 }
 
 /* A call nothing in this build answers: an i32 result says so, other results stay 0. */
@@ -1766,21 +1741,18 @@ WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t mo
     {
         return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
     }
-    for (index = 0U; index < hw_driver_count(); ++index)
+    /* The devices' interfaces: their library finds the call. */
     {
-        const HwDriver* driver = hw_driver_at(index);
-        if (!os_name_is(interface, interface_length, driver->interface))
+        int offered = 0;
+        const HwDriverCall* call = hw_driver_find_call(interface, interface_length, name, name_length, minor, &offered);
+        if (call != NULL)
         {
-            continue;
+            return os_host_function(call->signature, call->function, out);
         }
-        for (uint32_t call = 0U; call < driver->call_count; ++call)
+        if (offered)
         {
-            if (os_name_is(name, name_length, driver->calls[call].name) && minor >= driver->calls[call].since)
-            {
-                return os_host_function(driver->calls[call].signature, driver->calls[call].function, out);
-            }
+            return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
         }
-        return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
     }
     return os_abi_absent_function(program, name, 0U, out);
 }

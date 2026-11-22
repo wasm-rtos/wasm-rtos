@@ -62,18 +62,6 @@ int os_name_is(const char* text, uint32_t length, const char* name)
     return strlen(name) == length && memcmp(text, name, length) == 0;
 }
 
-static uint8_t os_signature_type(char letter)
-{
-    switch (letter)
-    {
-        case 'i': case '*': return WM_I32;
-        case 'I': return WM_I64;
-        case 'f': return WM_F32;
-        case 'F': return WM_F64;
-        default: return 0U;
-    }
-}
-
 WmResult os_host_function(const char* signature, OsHostImportFunction function, WmFunc** out)
 {
     OsHostFunctionNode* node = NULL;
@@ -81,8 +69,6 @@ WmResult os_host_function(const char* signature, OsHostImportFunction function, 
     uint8_t results[1];
     uint32_t param_count = 0U;
     uint32_t result_count = 0U;
-    const char* at = signature;
-
     *out = NULL;
     for (node = g_os_host_functions; node != NULL; node = node->next)
     {
@@ -93,27 +79,10 @@ WmResult os_host_function(const char* signature, OsHostImportFunction function, 
         }
     }
 
-    /* "r(ppp)": one result letter or v, then the parameters. */
-    if (*at != 'v')
-    {
-        results[0] = os_signature_type(*at);
-        if (results[0] == 0U)
-        {
-            return "invalid host function signature";
-        }
-        result_count = 1U;
-    }
-    if (*++at != '(')
+    /* "r(ppp)": one result letter or v, then the parameters (read by the devices' library). */
+    if (hw_signature(signature, params, &param_count, results, &result_count) != 0)
     {
         return "invalid host function signature";
-    }
-    for (++at; *at != ')'; ++at)
-    {
-        if (param_count == sizeof(params) || os_signature_type(*at) == 0U)
-        {
-            return "invalid host function signature";
-        }
-        params[param_count++] = os_signature_type(*at);
     }
 
     node = (OsHostFunctionNode*)calloc(1U, sizeof(OsHostFunctionNode));
