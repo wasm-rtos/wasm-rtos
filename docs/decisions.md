@@ -1100,3 +1100,123 @@ and buses on chosen pins. Each is its own decision.
 | 4 | Rename in the simulator | wasm-rtos.github.io |
 | 5 | Rename in the local ESP32 and Black Pill ports, board checks | local |
 | 6 | `docs/porting.md` → in `wasm-rtos-hw`; README of each repository; org README (repositories, Roadmap) | all |
+
+## 15. Each layer holds what is its own: vm, devices, operating system
+
+**Proposed (2026-11-22).**
+
+### Problem
+
+After decision 14 the interpreter and the devices are libraries of their
+own, but the line between them and the kernel is not where it should be,
+so neither can be taken without the kernel for a small host of one's own
+(a mini OS for an 8-bit board, a scheduler in WebAssembly):
+
+1. **WASI is welded to the kernel**: about 400 lines of calls in `abi.c`
+   (clocks, sleep, output, arguments, exit, random, the `ENOSYS` stubs)
+   and 700 in `fs.c` (files) read the program's memory, lay out WASI's
+   structures and map errors, all of which is WebAssembly's standard and
+   nothing of this kernel's. Other engines keep WASI as a module of their
+   own next to the engine (wasmtime-wasi, WAMR's libc-wasi, wasm3's
+   `m3_api_wasi.c`, wasmer-wasix).
+2. **Binding device imports to drivers** (`wasm-rtos:kernel/gpio` → a
+   driver's call) is a loop over the drivers in `abi.c`: a host without
+   the kernel cannot bind them.
+3. **The devices' calls for programs** (`wr_gpio_open`...) are in the
+   kernel's `include/wasm-rtos.h`.
+4. **`hw_host.h` is all or nothing**: a host must give the 30 functions,
+   saving the whole system for deep sleep included.
+5. **The kernel's public API carries an RTOS for the host's own code**
+   nobody outside uses (semaphores, event groups, mutexes, timers and task
+   notifications for native code: 53 functions used by their own tests
+   only, 11 by nothing at all), and would freeze it at 1.0.
+6. **Only the ABI is frozen**: `wm.h`, `hw.h` and `os.h`, which ports and
+   hosts are written against, have no rule.
+
+Nothing in the interpreter is the kernel's, and the kernel uses only the
+interpreter's public headers (`wm.h`, `wm_dylink.h`): that line holds.
+
+### Decision
+
+Move, change no behaviour, keep the ABI.
+
+1. **WASI, a module of the interpreter** (`wm_wasi.c`, `wm_wasi.h`;
+   wasm-rtos-vm decision 19): what WASI preview 1 says about memory,
+   layouts and error numbers, and every call linking (`ENOSYS` for those
+   the host does not answer). Below it a host interface, `WmWasiHost`:
+   clocks, sleeping the calling program, yielding, the standard streams,
+   arguments and environment, random bytes, exit; files an optional group
+   (open, read, positioned read, seek, tell, close, status, directory
+   entries, preopened directories). The kernel implements it over its
+   scheduler, output port and file system; the WASI calls 1.8 answers stay
+   the same, byte for byte.
+2. **Binding device imports in the devices**: `hw_driver_resolve(module,
+   name, ...)`, which the kernel calls for device interfaces and a host of
+   its own passes to `wm_instantiate`.
+3. **The devices' calls for programs** move to `hw/include/wasm-rtos-hw.h`;
+   the kernel's `include/wasm-rtos.h` includes it, so programs build as
+   before. Import names do not change (`wasm-rtos:kernel/gpio` is frozen).
+4. **`hw_host.h` in groups**: saving the whole system is optional
+   (`HW_HAS_SYSTEM`); without it drivers do not save, and a task holding
+   one of their devices cannot be. **A simple host** in the devices,
+   `hw_host_single.c`: one program, no scheduler, waits that poll the
+   ports; a mini OS is the interpreter, the devices and that file.
+5. **The host's RTOS out of `os.h`**: semaphores, event groups, mutexes,
+   software timers and task notifications for native code, and five
+   helpers of queues, two task snapshots, `os_task_delay_until`,
+   `os_update_time_ms`, `os_page_store_done` and
+   `os_code_store_write_pending`, into the kernel's internal header. The
+   mechanisms stay (programs use them through the ABI). Named queues stay
+   public: the host's way to talk to programs. `os_code_store_priority`
+   stays and gets the test it lacks.
+6. **The APIs frozen like the ABI**: in 1.x `wm.h`, `wm_wasi.h`, `hw.h`,
+   `hw_driver.h`, `hw_host.h` and `os.h` only gain. A list of each
+   header's declarations (`docs/api-1.0.txt` in each repository) and a CI
+   step that fails when a line goes or changes, as `check-abi.py` does.
+
+### Why
+
+- Each layer then holds what is its own: the interpreter what WebAssembly
+  and WASI say, the devices what a board has and how programs reach it,
+  the kernel who runs, when and with what memory. A smaller host takes the
+  layers it needs and writes the rest.
+- WASI as a module with a host below is how mature engines keep it; the
+  kernel keeps what only it can answer (time, sleeping one program, files).
+- The public API promised at 1.0 is what ports and hosts use; what only
+  tests use is no promise.
+
+### Instead
+
+- **WASI in the kernel, as now**: a mini OS would write WASI again.
+- **WASI with its own file system in the interpreter**: files are the
+  kernel's (its tar driver, files from mapped flash, snapshots of open
+  files); the interpreter would carry what a board may not want.
+- **Deleting the host's RTOS**: no risk to take before a release; hidden,
+  it can still go later.
+
+### Checks
+
+- The kernel's tests pass unchanged in what they check (tests that used a
+  hidden function include the internal header); `check-abi.py` passes.
+- WASI: the same calls answer as before on every build (with files,
+  without files, without WASI); a test of `wm_wasi` alone with a host of
+  its own (clock, output, arguments, exit, a file of memory).
+- The mini OS (`hw/examples/mini`): the interpreter, the devices, the
+  simple host and WASI, a program printing and blinking; built in the
+  devices' CI for the host and for an ATmega328P, its size reported.
+- The API lists: every header checked in CI; changing a line fails.
+- Boards: ESP32 and Black Pill system checks as before; the simulator
+  builds and its checks pass.
+
+### Work, all of it
+
+| # | What | Where |
+|---|---|---|
+| 1 | `wm_wasi.c/.h`, `WmWasiHost`, decision 19, test | vm |
+| 2 | Kernel implements `WmWasiHost`; WASI out of `abi.c`/`fs.c` | kernel |
+| 3 | `hw_driver_resolve`; kernel uses it | hw, kernel |
+| 4 | `wasm-rtos-hw.h`; kernel header includes it | hw, kernel |
+| 5 | `HW_HAS_SYSTEM`, `hw_host_single.c`, the mini OS example and its CI | hw |
+| 6 | The host's RTOS into the internal header; test of `os_code_store_priority` | kernel, tests |
+| 7 | API lists and CI checks | vm, hw, kernel |
+| 8 | Tests, simulator, local ports, READMEs, `porting.md`, CHANGELOGs, org README | all |
