@@ -1114,429 +1114,6 @@ static OS_HOST_FUNCTION(os_abi_unsupported)
 #endif
 
 /* ---------------------------------------------------------------------------
- * WASI calls the kernel answers itself: time is kernel time, and sleeping or
- * yielding blocks only the calling task.
- * ------------------------------------------------------------------------ */
-
-#if defined(OS_ABI_HAS_WASI)
-static OS_HOST_FUNCTION(os_abi_wasi_clock_res_get)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, clock_id);
-    OS_HOST_ARG(uint32_t, resolution_address);
-    uint64_t resolution = 1000000U;
-    OS_ABI_UNUSED();
-
-    if (clock_id > OS_WASI_CLOCKID_THREAD_CPUTIME_ID)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
-    }
-    if (os_guest_write(resolution_address, &resolution, sizeof(resolution)) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
-    }
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-static OS_HOST_FUNCTION(os_abi_wasi_clock_time_get)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, clock_id);
-    OS_HOST_ARG(uint64_t, precision);
-    OS_HOST_ARG(uint32_t, time_address);
-    uint64_t time_ns = os_time_ms64() * 1000000U;
-    (void)precision;
-    OS_ABI_UNUSED();
-
-    /* Every clock reads kernel time until a platform supplies wall time. */
-    if (clock_id > OS_WASI_CLOCKID_THREAD_CPUTIME_ID)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
-    }
-    if (os_guest_write(time_address, &time_ns, sizeof(time_ns)) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
-    }
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-static OS_HOST_FUNCTION(os_abi_wasi_sched_yield)
-{
-    OS_HOST_RETURNS(uint32_t);
-    (void)os_host_slot;
-    OS_ABI_UNUSED();
-
-    *raw_return = OS_WASI_ERRNO_SUCCESS;
-    if (os_task_yield() != OS_STATUS_OK)
-    {
-        return NULL;
-    }
-    return NULL;
-}
-
-/*
- * fd_write: stdout and stderr go to the output port with the writer's task
- * id; files are read only.
- */
-static OS_HOST_FUNCTION(os_abi_wasi_fd_write)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, fd);
-    OS_HOST_ARG(uint32_t, iovs_address);
-    OS_HOST_ARG(uint32_t, iovs_count);
-    OS_HOST_ARG(uint32_t, written_address);
-    uint32_t total = 0U;
-    uint32_t index = 0U;
-    OS_ABI_UNUSED();
-
-    if (iovs_count > UINT32_MAX / 8U ||
-        os_guest_check(iovs_address, iovs_count * 8U) != OS_STATUS_OK ||
-        os_guest_check(written_address, 4U) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
-    }
-    if (fd != 1U && fd != 2U)
-    {
-#if OS_HAS_FS
-        OS_HOST_RETURN(os_fs_write_error(fd));
-#else
-        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
-#endif
-    }
-
-    /* Check every buffer first, so a bad one writes nothing. */
-    for (index = 0U; index < iovs_count; ++index)
-    {
-        uint8_t iov[8];
-        uint32_t length = 0U;
-        (void)os_guest_read(iovs_address + index * 8U, iov, sizeof(iov));
-        length = OS_HOST_READ32(iov + 4U);
-        if (os_guest_check(OS_HOST_READ32(iov), length) != OS_STATUS_OK || length > UINT32_MAX - total)
-        {
-            OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
-        }
-        total += length;
-    }
-    for (index = 0U; index < iovs_count; ++index)
-    {
-        uint8_t iov[8];
-        OsGuestBuffer data;
-        (void)os_guest_read(iovs_address + index * 8U, iov, sizeof(iov));
-        if (os_guest_buffer_open(&data, OS_HOST_READ32(iov), OS_HOST_READ32(iov + 4U), OS_GUEST_IN) == OS_STATUS_OK)
-        {
-            os_output_write(fd, data.data, data.length);
-            os_guest_buffer_drop(&data);
-        }
-    }
-
-    (void)os_guest_write(written_address, &total, sizeof(total));
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-/*
- * poll_oneoff: file subscriptions are always ready (files and stdio never
- * block); otherwise the task sleeps until the earliest clock subscription.
- */
-static OS_HOST_FUNCTION(os_abi_wasi_poll_oneoff)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, in_address);
-    OS_HOST_ARG(uint32_t, out_address);
-    OS_HOST_ARG(uint32_t, count);
-    OS_HOST_ARG(uint32_t, events_address);
-    uint8_t subscription[48];
-    uint8_t event[32];
-    uint64_t now_ns = os_time_ms64() * 1000000U;
-    uint64_t soonest_ns = UINT64_MAX;
-    uint32_t soonest = 0U;
-    uint32_t written = 0U;
-    uint32_t index = 0U;
-    OS_ABI_UNUSED();
-
-    if (count == 0U)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_INVAL);
-    }
-    if (count > 0xFFFFFFFFU / 48U ||
-        os_guest_check(in_address, count * 48U) != OS_STATUS_OK ||
-        os_guest_check(out_address, count * 32U) != OS_STATUS_OK ||
-        os_guest_check(events_address, 4U) != OS_STATUS_OK)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_FAULT);
-    }
-
-    for (index = 0U; index < count; ++index)
-    {
-        uint8_t tag = 0U;
-
-        (void)os_guest_read(in_address + index * 48U, subscription, sizeof(subscription));
-        tag = subscription[8];
-        if (tag == OS_WASI_EVENTTYPE_CLOCK)
-        {
-            uint64_t timeout = OS_HOST_READ64(subscription + 24U);
-            uint16_t flags = (uint16_t)(subscription[40] | (subscription[41] << 8U));
-            uint64_t due = (flags & OS_WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME) != 0U
-                ? timeout : now_ns + timeout;
-            if (due < soonest_ns)
-            {
-                soonest_ns = due;
-                soonest = index;
-            }
-        }
-        else
-        {
-            memset(event, 0, sizeof(event));
-            memcpy(event, subscription, 8U);
-            event[10] = tag;
-            (void)os_guest_write(out_address + written * 32U, event, sizeof(event));
-            ++written;
-        }
-    }
-
-    if (written == 0U)
-    {
-        uint64_t wait_ns = soonest_ns > now_ns ? soonest_ns - now_ns : 0U;
-        uint64_t wait_ms = (wait_ns + 999999U) / 1000000U;
-
-        (void)os_guest_read(in_address + soonest * 48U, subscription, sizeof(subscription));
-        memset(event, 0, sizeof(event));
-        memcpy(event, subscription, 8U);
-        event[10] = OS_WASI_EVENTTYPE_CLOCK;
-        (void)os_guest_write(out_address, event, sizeof(event));
-        written = 1U;
-        (void)os_guest_write(events_address, &written, sizeof(written));
-        *raw_return = OS_WASI_ERRNO_SUCCESS;
-        if (wait_ms > 0U && os_task_delay_ms(wait_ms > 0x7FFFFFFFU ? 0x7FFFFFFFU : (uint32_t)wait_ms) == OS_STATUS_OK)
-        {
-            return NULL;
-        }
-        return NULL;
-    }
-
-    (void)os_guest_write(events_address, &written, sizeof(written));
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-/* ---------------------------------------------------------------------------
- * WASI basics: arguments, environment, exit, random bytes and the standard
- * streams, for what neither the table below nor the file system answers.
- * ------------------------------------------------------------------------ */
-
-static OS_HOST_FUNCTION(os_wasi_args_sizes_get)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, count_address);
-    OS_HOST_ARG(uint32_t, size_address);
-    const char* const* argv = NULL;
-    uint32_t argc = os_guest_args(&argv);
-    uint32_t bytes = 0U;
-    uint32_t index = 0U;
-    OS_ABI_UNUSED();
-
-    OS_HOST_CHECK_ADDR(count_address, 4U);
-    OS_HOST_CHECK_ADDR(size_address, 4U);
-    for (index = 0U; index < argc; ++index)
-    {
-        bytes += (uint32_t)strlen(argv[index]) + 1U;
-    }
-    OS_HOST_STORE32(count_address, argc);
-    OS_HOST_STORE32(size_address, bytes);
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-static OS_HOST_FUNCTION(os_wasi_args_get)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, pointers_address);
-    OS_HOST_ARG(uint32_t, buffer_address);
-    const char* const* argv = NULL;
-    uint32_t argc = os_guest_args(&argv);
-    uint32_t index = 0U;
-    OS_ABI_UNUSED();
-
-    for (index = 0U; index < argc; ++index)
-    {
-        uint32_t length = (uint32_t)strlen(argv[index]) + 1U;
-        OS_HOST_CHECK_ADDR(pointers_address + index * 4U, 4U);
-        OS_HOST_CHECK_ADDR(buffer_address, length);
-        OS_HOST_STORE32(pointers_address + index * 4U, buffer_address);
-        OS_HOST_COPY_TO(buffer_address, argv[index], length);
-        buffer_address += length;
-    }
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-/* No environment variables. */
-static OS_HOST_FUNCTION(os_wasi_environ_sizes_get)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, count_address);
-    OS_HOST_ARG(uint32_t, size_address);
-    OS_ABI_UNUSED();
-
-    OS_HOST_CHECK_ADDR(count_address, 4U);
-    OS_HOST_CHECK_ADDR(size_address, 4U);
-    OS_HOST_STORE32(count_address, 0U);
-    OS_HOST_STORE32(size_address, 0U);
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-static OS_HOST_FUNCTION(os_wasi_environ_get)
-{
-    OS_HOST_RETURNS(uint32_t);
-    (void)os_host_slot;
-    OS_ABI_UNUSED();
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-static OS_HOST_FUNCTION(os_wasi_proc_exit)
-{
-    OS_HOST_ARG(uint32_t, code);
-    OS_ABI_UNUSED();
-    return os_guest_exit(code);
-}
-
-static OS_HOST_FUNCTION(os_wasi_random_get)
-{
-    static uint32_t state = 0x2545F491U;
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, buffer_address);
-    OS_HOST_ARG(uint32_t, length);
-    uint8_t chunk[32];
-    OS_ABI_UNUSED();
-
-    OS_HOST_CHECK_ADDR(buffer_address, length);
-    while (length > 0U)
-    {
-        uint32_t n = length < sizeof(chunk) ? length : (uint32_t)sizeof(chunk);
-        uint32_t index = 0U;
-        for (index = 0U; index < n; ++index)
-        {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            chunk[index] = (uint8_t)state;
-        }
-        OS_HOST_COPY_TO(buffer_address, chunk, n);
-        buffer_address += n;
-        length -= n;
-    }
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-/* The standard streams are character devices; without a file system nothing else is open. */
-static OS_HOST_FUNCTION(os_wasi_fd_fdstat_get)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, fd);
-    OS_HOST_ARG(uint32_t, stat_address);
-    uint8_t stat[24];
-    OS_ABI_UNUSED();
-
-    if (fd > 2U)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
-    }
-    OS_HOST_CHECK_ADDR(stat_address, sizeof(stat));
-    memset(stat, 0, sizeof(stat));
-    stat[0] = OS_WASI_FILETYPE_CHARACTER_DEVICE;
-    memset(stat + 8, 0xFF, 16U);
-    OS_HOST_COPY_TO(stat_address, stat, sizeof(stat));
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-static OS_HOST_FUNCTION(os_wasi_fd_close)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, fd);
-    OS_ABI_UNUSED();
-    OS_HOST_RETURN(fd <= 2U ? OS_WASI_ERRNO_SUCCESS : OS_WASI_ERRNO_BADF);
-}
-
-static OS_HOST_FUNCTION(os_wasi_fd_seek)
-{
-    OS_HOST_RETURNS(uint32_t);
-    (void)os_host_slot;
-    OS_ABI_UNUSED();
-    OS_HOST_RETURN(OS_WASI_ERRNO_SPIPE);
-}
-
-static OS_HOST_FUNCTION(os_wasi_badf)
-{
-    OS_HOST_RETURNS(uint32_t);
-    (void)os_host_slot;
-    OS_ABI_UNUSED();
-    OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
-}
-
-/* Standard input has nothing to read. */
-static OS_HOST_FUNCTION(os_wasi_fd_read)
-{
-    OS_HOST_RETURNS(uint32_t);
-    OS_HOST_ARG(uint32_t, fd);
-    OS_HOST_ARG(uint32_t, iovs);
-    OS_HOST_ARG(uint32_t, count);
-    OS_HOST_ARG(uint32_t, nread_address);
-    OS_ABI_UNUSED();
-    (void)iovs;
-    (void)count;
-
-    if (fd != 0U)
-    {
-        OS_HOST_RETURN(OS_WASI_ERRNO_BADF);
-    }
-    OS_HOST_CHECK_ADDR(nread_address, 4U);
-    OS_HOST_STORE32(nread_address, 0U);
-    OS_HOST_RETURN(OS_WASI_ERRNO_SUCCESS);
-}
-
-typedef struct OsWasiImport
-{
-    const char* name;
-    const char* signature;
-    OsHostImportFunction function;
-} OsWasiImport;
-
-static const OsWasiImport g_wasi_basics[] =
-{
-    { "args_sizes_get", "i(**)", os_wasi_args_sizes_get },
-    { "args_get", "i(**)", os_wasi_args_get },
-    { "environ_sizes_get", "i(**)", os_wasi_environ_sizes_get },
-    { "environ_get", "i(**)", os_wasi_environ_get },
-    { "proc_exit", "v(i)", os_wasi_proc_exit },
-    { "random_get", "i(*i)", os_wasi_random_get },
-    { "fd_fdstat_get", "i(i*)", os_wasi_fd_fdstat_get },
-    { "fd_close", "i(i)", os_wasi_fd_close },
-    { "fd_seek", "i(iIi*)", os_wasi_fd_seek },
-    { "fd_read", "i(i*i*)", os_wasi_fd_read },
-    { "fd_prestat_get", "i(i*)", os_wasi_badf },
-    { "fd_prestat_dir_name", "i(i*i)", os_wasi_badf },
-};
-
-/* A WASI basic call, in either WASI namespace, or *out NULL. */
-WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
-                             WmFunc** out)
-{
-    uint32_t index = 0U;
-
-    *out = NULL;
-    if (!os_name_is(module, module_length, "wasi_unstable") &&
-        !os_name_is(module, module_length, "wasi_snapshot_preview1"))
-    {
-        return NULL;
-    }
-    for (index = 0U; index < (uint32_t)(sizeof(g_wasi_basics) / sizeof(g_wasi_basics[0])); ++index)
-    {
-        if (os_name_is(name, name_length, g_wasi_basics[index].name))
-        {
-            return os_host_function(g_wasi_basics[index].signature, g_wasi_basics[index].function, out);
-        }
-    }
-    return NULL;
-}
-#endif
-
-/* ---------------------------------------------------------------------------
  * Linking
  * ------------------------------------------------------------------------ */
 
@@ -1604,56 +1181,18 @@ static const OsAbiImport g_abi_imports[] =
 #endif
     { WR_MODULE("proc"), "self", "i()", os_abi_proc_self, 0U },
     { WR_MODULE("proc"), "parent", "i()", os_abi_proc_parent, 0U },
-
-#if defined(OS_ABI_HAS_WASI)
-    { "wasi_snapshot_preview1", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get, 0U },
-    { "wasi_snapshot_preview1", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get, 0U },
-    { "wasi_snapshot_preview1", "sched_yield", "i()", os_abi_wasi_sched_yield, 0U },
-    { "wasi_snapshot_preview1", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff, 0U },
-    { "wasi_snapshot_preview1", "fd_write", "i(iiii)", os_abi_wasi_fd_write, 0U },
-    { "wasi_unstable", "clock_res_get", "i(ii)", os_abi_wasi_clock_res_get, 0U },
-    { "wasi_unstable", "clock_time_get", "i(iIi)", os_abi_wasi_clock_time_get, 0U },
-    { "wasi_unstable", "sched_yield", "i()", os_abi_wasi_sched_yield, 0U },
-    { "wasi_unstable", "poll_oneoff", "i(iiii)", os_abi_wasi_poll_oneoff, 0U },
-    { "wasi_unstable", "fd_write", "i(iiii)", os_abi_wasi_fd_write, 0U },
-#endif
 };
 
 /*
  * Whether module is "wasm-rtos:kernel/<interface>@1.<minor>.0": then 1, the
  * interface's length and the minor.
  */
+/* Whether module is "wasm-rtos:kernel/<interface>@1.<minor>.0" (the devices' library reads these names). */
 static int os_abi_kernel_module(const char* module, uint32_t length, uint32_t* out_interface_length,
                                 uint32_t* out_minor)
 {
-    const uint32_t prefix_length = (uint32_t)(sizeof(WR_KERNEL_PREFIX) - 1U);
-    uint32_t at = prefix_length;
-    uint32_t minor = 0U;
-
-    if (length <= prefix_length || memcmp(module, WR_KERNEL_PREFIX, prefix_length) != 0)
-    {
-        return 0;
-    }
-    while (at < length && module[at] != '@')
-    {
-        ++at;
-    }
-    *out_interface_length = at - prefix_length;
-    if (*out_interface_length == 0U || length < at + 6U || memcmp(module + at, "@1.", 3U) != 0)
-    {
-        return 0;
-    }
-    at += 3U;
-    if (module[at] < '0' || module[at] > '9' || (module[at] == '0' && module[at + 1U] != '.'))
-    {
-        return 0;
-    }
-    while (at < length && module[at] >= '0' && module[at] <= '9' && minor < 1000U)
-    {
-        minor = minor * 10U + (uint32_t)(module[at++] - '0');
-    }
-    *out_minor = minor;
-    return length - at == 2U && memcmp(module + at, ".0", 2U) == 0;
+    const char* interface = NULL;
+    return hw_abi_module(module, length, &interface, out_interface_length, out_minor);
 }
 
 /* A call nothing in this build answers: an i32 result says so, other results stay 0. */
@@ -1662,14 +1201,6 @@ static OS_HOST_FUNCTION(os_abi_absent)
     OS_HOST_RETURNS(int32_t);
     OS_ABI_UNUSED();
     OS_HOST_RETURN(-WR_EUNSUPPORTED);
-}
-
-/* The same for WASI, whose calls return an errno. */
-static OS_HOST_FUNCTION(os_abi_absent_wasi)
-{
-    OS_HOST_RETURNS(int32_t);
-    OS_ABI_UNUSED();
-    OS_HOST_RETURN(52); /* ENOSYS; wasi.h is not in every build */
 }
 
 static OS_HOST_FUNCTION(os_abi_absent_quiet)
@@ -1681,9 +1212,9 @@ static OS_HOST_FUNCTION(os_abi_absent_quiet)
 
 /*
  * A function of the type the program declares for the import, that reports
- * the call unsupported: -WR_EUNSUPPORTED, or ENOSYS for WASI.
+ * the call unsupported: -WR_EUNSUPPORTED.
  */
-static WmResult os_abi_absent_function(const WmModule* program, const char* name, uint8_t wasi, WmFunc** out)
+static WmResult os_abi_absent_function(const WmModule* program, const char* name, WmFunc** out)
 {
     static const char letters[] = { 'i', 'I', 'f', 'F' };
     const uint8_t* params = NULL;
@@ -1720,7 +1251,7 @@ static WmResult os_abi_absent_function(const WmModule* program, const char* name
     {
         return os_host_function(signature, os_abi_absent_quiet, out);
     }
-    return os_host_function(signature, wasi ? os_abi_absent_wasi : os_abi_absent, out);
+    return os_host_function(signature, os_abi_absent, out);
 }
 
 /*
@@ -1764,40 +1295,20 @@ WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t mo
     }
     if (known)
     {
-        return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
+        return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, out) : NULL;
     }
-    for (index = 0U; index < hw_driver_count(); ++index)
+    /* The devices' interfaces: their library finds the call. */
     {
-        const HwDriver* driver = hw_driver_at(index);
-        if (!os_name_is(interface, interface_length, driver->interface))
+        int offered = 0;
+        const HwDriverCall* call = hw_driver_find_call(interface, interface_length, name, name_length, minor, &offered);
+        if (call != NULL)
         {
-            continue;
+            return os_host_function(call->signature, call->function, out);
         }
-        for (uint32_t call = 0U; call < driver->call_count; ++call)
+        if (offered)
         {
-            if (os_name_is(name, name_length, driver->calls[call].name) && minor >= driver->calls[call].since)
-            {
-                return os_host_function(driver->calls[call].signature, driver->calls[call].function, out);
-            }
+            return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, out) : NULL;
         }
-        return minor > OS_ABI_VERSION_MINOR ? os_abi_absent_function(program, name, 0U, out) : NULL;
     }
-    return os_abi_absent_function(program, name, 0U, out);
-}
-
-/*
- * A WASI call nothing answered (not the kernel, the files nor the
- * embedder): it links and returns ENOSYS, so a program that only might use
- * it still loads. *out NULL for any other module.
- */
-WmResult os_abi_resolve_absent_wasi(const WmModule* program, const char* module, uint32_t module_length,
-                                    const char* name, WmFunc** out)
-{
-    *out = NULL;
-    if (!os_name_is(module, module_length, "wasi_snapshot_preview1") &&
-        !os_name_is(module, module_length, "wasi_unstable"))
-    {
-        return NULL;
-    }
-    return os_abi_absent_function(program, name, 1U, out);
+    return os_abi_absent_function(program, name, out);
 }

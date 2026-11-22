@@ -1,4 +1,11 @@
 #include "os_kernel.h"
+#if OS_HAS_WASI
+#include "vm/source/wm_wasi.h"
+#include "wasi.h"
+#if OS_HAS_FS
+#include "fs.h"
+#endif
+#endif
 
 #if OS_HAS_MEMORY_ACCOUNTING
 
@@ -62,18 +69,6 @@ int os_name_is(const char* text, uint32_t length, const char* name)
     return strlen(name) == length && memcmp(text, name, length) == 0;
 }
 
-static uint8_t os_signature_type(char letter)
-{
-    switch (letter)
-    {
-        case 'i': case '*': return WM_I32;
-        case 'I': return WM_I64;
-        case 'f': return WM_F32;
-        case 'F': return WM_F64;
-        default: return 0U;
-    }
-}
-
 WmResult os_host_function(const char* signature, OsHostImportFunction function, WmFunc** out)
 {
     OsHostFunctionNode* node = NULL;
@@ -81,8 +76,6 @@ WmResult os_host_function(const char* signature, OsHostImportFunction function, 
     uint8_t results[1];
     uint32_t param_count = 0U;
     uint32_t result_count = 0U;
-    const char* at = signature;
-
     *out = NULL;
     for (node = g_os_host_functions; node != NULL; node = node->next)
     {
@@ -93,27 +86,10 @@ WmResult os_host_function(const char* signature, OsHostImportFunction function, 
         }
     }
 
-    /* "r(ppp)": one result letter or v, then the parameters. */
-    if (*at != 'v')
-    {
-        results[0] = os_signature_type(*at);
-        if (results[0] == 0U)
-        {
-            return "invalid host function signature";
-        }
-        result_count = 1U;
-    }
-    if (*++at != '(')
+    /* "r(ppp)": one result letter or v, then the parameters (read by the devices' library). */
+    if (hw_signature(signature, params, &param_count, results, &result_count) != 0)
     {
         return "invalid host function signature";
-    }
-    for (++at; *at != ')'; ++at)
-    {
-        if (param_count == sizeof(params) || os_signature_type(*at) == 0U)
-        {
-            return "invalid host function signature";
-        }
-        params[param_count++] = os_signature_type(*at);
     }
 
     node = (OsHostFunctionNode*)calloc(1U, sizeof(OsHostFunctionNode));
@@ -285,6 +261,9 @@ void os_shutdown(void)
     os_timer_free_all();
     os_host_import_free_list();
     os_host_functions_free();
+#if OS_HAS_WASI
+    wm_wasi_free();
+#endif
 #if OS_HAS_FS
     os_fs_shutdown();
 #endif
@@ -847,9 +826,90 @@ static int os_host_import_exists(const char* module_name, const char* import_nam
     return 0;
 }
 
+#if OS_HAS_WASI
+/*
+ * WASI without files is the interpreter's (wm_wasi.h, decision 15): the
+ * kernel gives it kernel time, sleeping and yielding that block only the
+ * calling task, the output port, a program's arguments and its exit.
+ */
+static uint64_t os_wasi_now_ns(void* context, uint32_t clock)
+{
+    (void)context;
+    (void)clock; /* every clock reads kernel time until a platform supplies wall time */
+    return os_time_ms64() * 1000000U;
+}
+
+static void os_wasi_sleep_ms(void* context, WmRuntime* runtime, uint32_t ms)
+{
+    (void)context;
+    (void)runtime;
+    (void)os_task_delay_ms(ms);
+}
+
+static void os_wasi_yield(void* context, WmRuntime* runtime)
+{
+    (void)context;
+    (void)runtime;
+    (void)os_task_yield();
+}
+
+/* fd 1 and 2 go to the output port with the writer's task id; files are read only. */
+static uint32_t os_wasi_write(void* context, WmRuntime* runtime, uint32_t fd, const void* data, uint32_t length)
+{
+    (void)context;
+    (void)runtime;
+    if (data == NULL)
+    {
+#if OS_HAS_FS
+        return os_fs_write_error(fd);
+#else
+        return OS_WASI_ERRNO_BADF;
+#endif
+    }
+    os_output_write(fd, data, length);
+    return OS_WASI_ERRNO_SUCCESS;
+}
+
+static uint32_t os_wasi_args(void* context, WmRuntime* runtime, const char* const** out_argv)
+{
+    (void)context;
+    (void)runtime;
+    return os_guest_args(out_argv);
+}
+
+static WmResult os_wasi_exit(void* context, WmRuntime* runtime, uint32_t code)
+{
+    (void)context;
+    (void)runtime;
+    return os_guest_exit(code);
+}
+
+static const WmWasiHost g_os_wasi_host =
+{
+    NULL, os_wasi_now_ns, 0U, os_wasi_sleep_ms, os_wasi_yield, os_wasi_write, os_wasi_args, NULL, os_wasi_exit
+};
+
+/* The interpreter's WASI call, made outside any task's memory account (shared by every task). */
+static WmResult os_wasi_resolve(const WmModule* program, const char* module, uint32_t module_length,
+                                const char* name, uint32_t name_length, int absent, WmFunc** out)
+{
+    WmResult result = NULL;
+#if OS_HAS_MEMORY_ACCOUNTING
+    OsMemoryAccount* account = g_os_memory_account;
+    g_os_memory_account = NULL;
+#endif
+    result = absent ? wm_wasi_resolve_absent(program, module, module_length, name, out)
+                    : wm_wasi_resolve(&g_os_wasi_host, module, module_length, name, name_length, out);
+#if OS_HAS_MEMORY_ACCOUNTING
+    g_os_memory_account = account;
+#endif
+    return result;
+}
+#endif
+
 /*
  * The host function an import names: the guest ABI first, then the file
- * system's WASI calls, the basic WASI calls, and what the embedder
+ * system's WASI calls, the interpreter's WASI calls, and what the embedder
  * registered; a WASI call none of them answers returns ENOSYS. *out stays
  * NULL when nothing answers.
  */
@@ -877,7 +937,7 @@ static WmResult os_resolve_host_import(
         return result;
     }
 #endif
-    result = os_abi_resolve_wasi(module, module_length, name, name_length, out);
+    result = os_wasi_resolve(program, module, module_length, name, name_length, 0, out);
     if (result != NULL || *out != NULL)
     {
         return result;
@@ -891,7 +951,11 @@ static WmResult os_resolve_host_import(
             return os_host_function(node->signature, node->function, out);
         }
     }
-    return os_abi_resolve_absent_wasi(program, module, module_length, name, out);
+#if OS_HAS_WASI
+    return os_wasi_resolve(program, module, module_length, name, name_length, 1, out);
+#else
+    return NULL;
+#endif
 }
 
 static WmResult os_resolve_import(

@@ -170,12 +170,6 @@ void** os_task_abi_state(OsTaskHandle task);
  */
 WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t module_length, const char* name,
                         uint32_t name_length, WmFunc** out);
-/* A WASI call for what nothing else answers (arguments, exit, random, standard streams), or *out NULL. */
-WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
-                             WmFunc** out);
-/* Any other WASI call: it links and returns ENOSYS. *out NULL for other modules. */
-WmResult os_abi_resolve_absent_wasi(const WmModule* program, const char* module, uint32_t module_length,
-                                    const char* name, WmFunc** out);
 void os_abi_release_task(OsTaskHandle task);
 /* Paging ends with the tasks: the page store is forgotten. */
 void os_page_shutdown(void);
@@ -349,5 +343,171 @@ void os_fs_save_task(uint32_t task_id, OsSystemStream* stream);
 /* Opens them again when apply is set; why one cannot be (the task is lost), or NULL. */
 const char* os_fs_restore_task(uint32_t task_id, OsSystemStream* stream, uint8_t apply);
 #endif
+
+/* ---- The host's RTOS (decision 15) ------------------------------------------
+ * Semaphores, event groups, mutexes, software timers and task notifications
+ * for native code, and helpers nothing outside used: the kernel's own and
+ * its tests', not part of the public API. Programs reach the objects
+ * through the ABI. */
+
+uint32_t os_queue_get_id(OsQueueHandle queue);
+
+OsQueueHandle os_queue_find_by_id(uint32_t queue_id);
+
+OsStatus os_queue_send_wait(
+    OsQueueHandle queue,
+    const void* item,
+    uint32_t timeout_ms
+);
+
+uint32_t os_queue_get_space(OsQueueHandle queue);
+
+uint32_t os_queue_get_item_size(OsQueueHandle queue);
+
+OsStatus os_mutex_set_name(OsMutexHandle mutex, const char* name);
+
+OsStatus os_semaphore_set_name(OsSemaphoreHandle semaphore, const char* name);
+
+OsStatus os_event_group_set_name(OsEventGroupHandle event_group, const char* name);
+
+OsStatus os_mutex_create(OsMutexHandle* out_mutex);
+
+void os_mutex_delete(OsMutexHandle mutex);
+
+uint32_t os_mutex_get_id(OsMutexHandle mutex);
+
+OsMutexHandle os_mutex_find_by_id(uint32_t mutex_id);
+
+OsStatus os_mutex_lock(OsMutexHandle mutex, uint32_t timeout_ms);
+
+OsStatus os_mutex_unlock(OsMutexHandle mutex);
+
+OsTaskHandle os_mutex_get_owner(OsMutexHandle mutex);
+
+OsStatus os_semaphore_create(
+    OsSemaphoreHandle* out_semaphore,
+    uint32_t max_count,
+    uint32_t initial_count
+);
+
+void os_semaphore_delete(OsSemaphoreHandle semaphore);
+
+uint32_t os_semaphore_get_id(OsSemaphoreHandle semaphore);
+
+OsSemaphoreHandle os_semaphore_find_by_id(uint32_t semaphore_id);
+
+OsStatus os_semaphore_take(OsSemaphoreHandle semaphore, uint32_t timeout_ms);
+
+OsStatus os_semaphore_give(OsSemaphoreHandle semaphore);
+
+uint32_t os_semaphore_get_count(OsSemaphoreHandle semaphore);
+
+uint32_t os_semaphore_get_max_count(OsSemaphoreHandle semaphore);
+
+OsStatus os_event_group_create(OsEventGroupHandle* out_event_group);
+
+void os_event_group_delete(OsEventGroupHandle event_group);
+
+uint32_t os_event_group_get_id(OsEventGroupHandle event_group);
+
+OsEventGroupHandle os_event_group_find_by_id(uint32_t event_group_id);
+
+uint32_t os_event_group_get_bits(OsEventGroupHandle event_group);
+
+uint32_t os_event_group_set_bits(OsEventGroupHandle event_group, uint32_t bits);
+
+uint32_t os_event_group_clear_bits(OsEventGroupHandle event_group, uint32_t bits);
+
+OsStatus os_event_group_wait_bits(
+    OsEventGroupHandle event_group,
+    uint32_t bits_to_wait_for,
+    uint8_t clear_on_exit,
+    uint8_t wait_for_all,
+    uint32_t timeout_ms
+);
+
+/*
+ * Advance *previous_wake_time_ms by period_ms and block until that absolute
+ * deadline when it is still in the future. The phase is advanced even when
+ * the deadline was missed, matching FreeRTOS vTaskDelayUntil semantics.
+ */
+OsStatus os_task_delay_until(
+    uint32_t* previous_wake_time_ms,
+    uint32_t period_ms
+);
+
+OsStatus os_task_write_snapshot(OsTaskHandle task, OsSnapshotWrite write, void* context);
+
+OsStatus os_task_read_snapshot(OsTaskHandle task, OsSnapshotRead read, void* context);
+
+/* A background read or write of an added store ended (os_page_read_done and os_page_write_done are the first store's). */
+void os_page_store_done(const OsPageStore* store, uint32_t slot, OsStatus status);
+
+/*
+ * Write the image of one loaded program that has none, and map it: what
+ * the scheduler does when no task is ready and none is due within
+ * OS_CODE_QUIET_MS. Writing takes a while (128 ms
+ * for CoreMark's on an ESP32), so a host whose tasks are never all waiting
+ * calls it where a pause suits it. OS_STATUS_OK: one written;
+ * OS_STATUS_NO_READY_TASKS: none waits for one.
+ */
+OsStatus os_code_store_write_pending(void);
+
+uint32_t os_task_get_last_wait_value(OsTaskHandle task);
+
+OsStatus os_task_notify(
+    OsTaskHandle task,
+    uint32_t value,
+    OsNotifyAction action
+);
+
+OsStatus os_task_notify_wait(
+    uint32_t clear_on_entry,
+    uint32_t clear_on_exit,
+    uint32_t timeout_ms
+);
+
+OsStatus os_task_notify_take(
+    uint8_t clear_count_on_exit,
+    uint32_t timeout_ms
+);
+
+uint32_t os_task_get_notification_value(OsTaskHandle task);
+
+uint8_t os_task_is_notification_pending(OsTaskHandle task);
+
+/* Timers notify their target task and are deleted when that task exits. */
+OsStatus os_timer_create(
+    OsTimerHandle* out_timer,
+    uint32_t period_ms,
+    uint8_t auto_reload,
+    OsTaskHandle target_task,
+    uint32_t notify_value,
+    OsNotifyAction notify_action
+);
+
+void os_timer_delete(OsTimerHandle timer);
+
+uint32_t os_timer_get_id(OsTimerHandle timer);
+
+OsTimerHandle os_timer_find_by_id(uint32_t timer_id);
+
+OsStatus os_timer_start(OsTimerHandle timer);
+
+OsStatus os_timer_stop(OsTimerHandle timer);
+
+OsStatus os_timer_reset(OsTimerHandle timer);
+
+OsStatus os_timer_change_period(OsTimerHandle timer, uint32_t period_ms);
+
+uint8_t os_timer_is_active(OsTimerHandle timer);
+
+uint32_t os_timer_get_period_ms(OsTimerHandle timer);
+
+/*
+ * Feed an absolute monotonic clock: time advances by the difference from the
+ * previous call, wrapping at 32 bits. The first call only sets the baseline.
+ */
+OsStatus os_update_time_ms(uint32_t now_ms);
 
 #endif

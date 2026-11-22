@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Each layer holds what is its own** (decision 15):
+  - WASI without files is the interpreter's (`vm/source/wm_wasi.h`); the
+    kernel gives it kernel time, task sleeps, the output port, arguments
+    and exit. File calls stay the kernel's. Programs see no change.
+  - Device imports are bound by the devices' library
+    (`hw_driver_resolve`); the devices' part of `include/wasm-rtos.h` is
+    `hw/include/wasm-rtos-hw.h`, which it includes.
+  - The host's RTOS is out of `os.h`: semaphores, event groups, mutexes,
+    timers, notifications and the queue calls programs use through the
+    ABI are the kernel's own (`os_internal.h`). Hosts keep queues to pass
+    data to programs.
+  - The public API at 1.0 in `docs/api-1.0.txt`, checked in CI.
 - **Devices in a library of their own** (decision 14): pins, buses,
   displays, input devices, analog inputs and outputs, PWM, serial ports,
   pulse trains, 1-Wire and counters moved to wasm-rtos-hw, a submodule at

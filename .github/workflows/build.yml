@@ -24,6 +24,10 @@ jobs:
         with:
           submodules: recursive
 
+      # The public API at 1.0 (docs/api-1.0.txt): names are only added.
+      - name: Check the API
+        run: python3 tools/check-api.py
+
       # ABI 1.x is frozen (docs/decisions.md, 8): the wit, the header and the
       # kernel's tables agree, and docs/abi-1.*.txt still holds line by line.
       - name: Check the ABI

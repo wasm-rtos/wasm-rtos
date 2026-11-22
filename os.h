@@ -300,15 +300,8 @@ OsStatus os_queue_create(
 );
 
 void os_queue_delete(OsQueueHandle queue);
-uint32_t os_queue_get_id(OsQueueHandle queue);
-OsQueueHandle os_queue_find_by_id(uint32_t queue_id);
 OsStatus os_queue_send(OsQueueHandle queue, const void* item);
 OsStatus os_queue_receive(OsQueueHandle queue, void* out_item);
-OsStatus os_queue_send_wait(
-    OsQueueHandle queue,
-    const void* item,
-    uint32_t timeout_ms
-);
 /*
  * A receive that can complete immediately accepts any writable C buffer.
  * If it must block, out_item must point into the current WASM task's linear
@@ -321,52 +314,11 @@ OsStatus os_queue_receive_wait(
     uint32_t timeout_ms
 );
 uint32_t os_queue_get_count(OsQueueHandle queue);
-uint32_t os_queue_get_space(OsQueueHandle queue);
-uint32_t os_queue_get_item_size(OsQueueHandle queue);
 /*
  * A name lets programs open the object (the guest sync interface). Objects
  * the host creates stay the host's: programs never delete them.
  */
 OsStatus os_queue_set_name(OsQueueHandle queue, const char* name);
-OsStatus os_mutex_set_name(OsMutexHandle mutex, const char* name);
-OsStatus os_semaphore_set_name(OsSemaphoreHandle semaphore, const char* name);
-OsStatus os_event_group_set_name(OsEventGroupHandle event_group, const char* name);
-
-OsStatus os_mutex_create(OsMutexHandle* out_mutex);
-void os_mutex_delete(OsMutexHandle mutex);
-uint32_t os_mutex_get_id(OsMutexHandle mutex);
-OsMutexHandle os_mutex_find_by_id(uint32_t mutex_id);
-OsStatus os_mutex_lock(OsMutexHandle mutex, uint32_t timeout_ms);
-OsStatus os_mutex_unlock(OsMutexHandle mutex);
-OsTaskHandle os_mutex_get_owner(OsMutexHandle mutex);
-
-OsStatus os_semaphore_create(
-    OsSemaphoreHandle* out_semaphore,
-    uint32_t max_count,
-    uint32_t initial_count
-);
-void os_semaphore_delete(OsSemaphoreHandle semaphore);
-uint32_t os_semaphore_get_id(OsSemaphoreHandle semaphore);
-OsSemaphoreHandle os_semaphore_find_by_id(uint32_t semaphore_id);
-OsStatus os_semaphore_take(OsSemaphoreHandle semaphore, uint32_t timeout_ms);
-OsStatus os_semaphore_give(OsSemaphoreHandle semaphore);
-uint32_t os_semaphore_get_count(OsSemaphoreHandle semaphore);
-uint32_t os_semaphore_get_max_count(OsSemaphoreHandle semaphore);
-
-OsStatus os_event_group_create(OsEventGroupHandle* out_event_group);
-void os_event_group_delete(OsEventGroupHandle event_group);
-uint32_t os_event_group_get_id(OsEventGroupHandle event_group);
-OsEventGroupHandle os_event_group_find_by_id(uint32_t event_group_id);
-uint32_t os_event_group_get_bits(OsEventGroupHandle event_group);
-uint32_t os_event_group_set_bits(OsEventGroupHandle event_group, uint32_t bits);
-uint32_t os_event_group_clear_bits(OsEventGroupHandle event_group, uint32_t bits);
-OsStatus os_event_group_wait_bits(
-    OsEventGroupHandle event_group,
-    uint32_t bits_to_wait_for,
-    uint8_t clear_on_exit,
-    uint8_t wait_for_all,
-    uint32_t timeout_ms
-);
 
 OsStatus os_host_import_register(
     const char* module_name,
@@ -380,7 +332,7 @@ void os_host_import_clear_all(void);
 /*
  * Host imports that block: pass the import's result slot (raw_return) to
  * os_host_wait_begin before calling a waiting function such as
- * os_task_notify_wait from inside the import, and return os_host_wait_end()
+ * os_queue_receive_wait or os_task_delay_ms from inside the import, and return os_host_wait_end()
  * from it. When the call started a wait the task blocks, and the slot gets
  * the wait's status (or value) when it wakes.
  */
@@ -475,15 +427,6 @@ OsStatus os_task_spawn_path(
 #endif
 OsStatus os_task_delay_ms(uint32_t delay_ms);
 /*
- * Advance *previous_wake_time_ms by period_ms and block until that absolute
- * deadline when it is still in the future. The phase is advanced even when
- * the deadline was missed, matching FreeRTOS vTaskDelayUntil semantics.
- */
-OsStatus os_task_delay_until(
-    uint32_t* previous_wake_time_ms,
-    uint32_t period_ms
-);
-/*
  * Wake a task blocked by a delay or synchronization wait. Blocking imports
  * that return a status resume with OS_STATUS_ABORTED.
  */
@@ -527,9 +470,6 @@ OsStatus os_task_resume(OsTaskHandle task);
  */
 typedef OsStatus (*OsSnapshotWrite)(void* context, const void* data, uint32_t size);
 typedef OsStatus (*OsSnapshotRead)(void* context, void* data, uint32_t size);
-
-OsStatus os_task_write_snapshot(OsTaskHandle task, OsSnapshotWrite write, void* context);
-OsStatus os_task_read_snapshot(OsTaskHandle task, OsSnapshotRead read, void* context);
 
 OsStatus os_task_get_snapshot_size(
     OsTaskHandle task,
@@ -693,8 +633,6 @@ OsStatus os_page_store_add(const OsPageStore* store, uint32_t priority);
 OsStatus os_page_store_priority(const OsPageStore* store, uint32_t priority);
 OsStatus os_page_store_remove(const OsPageStore* store);
 OsStatus os_page_store_lost(const OsPageStore* store);
-/* A background read or write of an added store ended (os_page_read_done and os_page_write_done are the first store's). */
-void os_page_store_done(const OsPageStore* store, uint32_t slot, OsStatus status);
 
 /* One store: its priority, slots, slots in use, frames written to it and read from it. */
 typedef struct OsPageStoreStats
@@ -786,15 +724,6 @@ typedef struct OsCodeStoreStats
     uint32_t mapped; /* programs mapped from it since the store was added */
 } OsCodeStoreStats;
 OsStatus os_code_store_get_stats(const OsCodeStore* store, OsCodeStoreStats* out_stats);
-/*
- * Write the image of one loaded program that has none, and map it: what
- * the scheduler does when no task is ready and none is due within
- * OS_CODE_QUIET_MS. Writing takes a while (128 ms
- * for CoreMark's on an ESP32), so a host whose tasks are never all waiting
- * calls it where a pause suits it. OS_STATUS_OK: one written;
- * OS_STATUS_NO_READY_TASKS: none waits for one.
- */
-OsStatus os_code_store_write_pending(void);
 #endif
 
 /*
@@ -921,48 +850,11 @@ uint32_t os_task_get_run_count(OsTaskHandle task);
  */
 uint64_t os_task_get_fuel_used(OsTaskHandle task);
 OsStatus os_task_get_last_wait_status(OsTaskHandle task);
-uint32_t os_task_get_last_wait_value(OsTaskHandle task);
-
-OsStatus os_task_notify(
-    OsTaskHandle task,
-    uint32_t value,
-    OsNotifyAction action
-);
-OsStatus os_task_notify_wait(
-    uint32_t clear_on_entry,
-    uint32_t clear_on_exit,
-    uint32_t timeout_ms
-);
-OsStatus os_task_notify_take(
-    uint8_t clear_count_on_exit,
-    uint32_t timeout_ms
-);
-uint32_t os_task_get_notification_value(OsTaskHandle task);
-uint8_t os_task_is_notification_pending(OsTaskHandle task);
-
-/* Timers notify their target task and are deleted when that task exits. */
-OsStatus os_timer_create(
-    OsTimerHandle* out_timer,
-    uint32_t period_ms,
-    uint8_t auto_reload,
-    OsTaskHandle target_task,
-    uint32_t notify_value,
-    OsNotifyAction notify_action
-);
-void os_timer_delete(OsTimerHandle timer);
-uint32_t os_timer_get_id(OsTimerHandle timer);
-OsTimerHandle os_timer_find_by_id(uint32_t timer_id);
-OsStatus os_timer_start(OsTimerHandle timer);
-OsStatus os_timer_stop(OsTimerHandle timer);
-OsStatus os_timer_reset(OsTimerHandle timer);
-OsStatus os_timer_change_period(OsTimerHandle timer, uint32_t period_ms);
-uint8_t os_timer_is_active(OsTimerHandle timer);
-uint32_t os_timer_get_period_ms(OsTimerHandle timer);
 
 /*
  * Time is the kernel's only platform dependency, and the kernel contains no
  * platform code: a board, the browser or a test either installs a clock port
- * or drives time itself with os_tick() / os_update_time_ms().
+ * or drives time itself with os_tick().
  *
  * now_ms is a monotonic platform clock. arm_wakeup and cancel_wakeup must
  * either both be supplied for tickless operation or both be NULL for polling.
@@ -987,13 +879,8 @@ const char* os_get_last_error_task_name(void);
 const char* os_task_get_error(OsTaskHandle task);
 OsStatus os_get_last_error_status(void);
 
-/* Advance kernel time by milliseconds; the next os_update_time_ms only re-baselines. */
+/* Advance kernel time by milliseconds. */
 void os_tick(uint32_t milliseconds);
-/*
- * Feed an absolute monotonic clock: time advances by the difference from the
- * previous call, wrapping at 32 bits. The first call only sets the baseline.
- */
-OsStatus os_update_time_ms(uint32_t now_ms);
 uint32_t os_get_tick_ms(void);
 uint32_t os_get_next_wakeup_ms(void);
 
