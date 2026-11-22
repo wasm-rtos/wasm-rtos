@@ -1,4 +1,5 @@
 #include "os_kernel.h"
+#include "vm/source/wm_heap.h"
 #if OS_HAS_WASI
 #include "vm/source/wm_wasi.h"
 #include "wasi.h"
@@ -46,11 +47,21 @@ static void* os_vm_allocate(void* pointer, size_t size)
     return moved + 1;
 }
 
-/* Predecoded records are a cache every task shares and none owns (wm_set_code_allocator): charged to none. */
+/*
+ * Predecoded records are a cache every task shares and none owns
+ * (wm_set_code_allocator): charged to none. With the interpreter's heap in
+ * use (wm_heap_use before os_init, vm decision 20) they come from its top,
+ * apart from what stays, so the code area's compaction frees one piece.
+ */
 static void* os_vm_code_allocate(void* pointer, size_t size)
 {
     OsMemoryAccount* account = g_os_memory_account;
     void* result;
+
+    if (wm_heap_current() != NULL)
+    {
+        return wm_heap_code_allocator(pointer, size);
+    }
 
     g_os_memory_account = NULL;
     result = os_vm_allocate(pointer, size);
