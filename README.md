@@ -266,6 +266,13 @@ the kernel gives it kernel time, task sleeps and the output port.
 `docs/api-1.0.txt` lists every public name of `os.h` at 1.0;
 `tools/check-api.py` checks in CI that names are only added.
 
+## Examples
+
+[wasm-rtos-examples](https://github.com/wasm-rtos/wasm-rtos-examples) has
+small, complete hosts and programs for every layer: the interpreter alone,
+a mini OS of the interpreter and the devices, and this kernel with tasks,
+queues and devices, each built and run in CI.
+
 ## Guest programs
 
 Any language that compiles to WebAssembly with WASI preview 1 works. Beyond
