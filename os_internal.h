@@ -170,12 +170,6 @@ void** os_task_abi_state(OsTaskHandle task);
  */
 WmResult os_abi_resolve(const WmModule* program, const char* module, uint32_t module_length, const char* name,
                         uint32_t name_length, WmFunc** out);
-/* A WASI call for what nothing else answers (arguments, exit, random, standard streams), or *out NULL. */
-WmResult os_abi_resolve_wasi(const char* module, uint32_t module_length, const char* name, uint32_t name_length,
-                             WmFunc** out);
-/* Any other WASI call: it links and returns ENOSYS. *out NULL for other modules. */
-WmResult os_abi_resolve_absent_wasi(const WmModule* program, const char* module, uint32_t module_length,
-                                    const char* name, WmFunc** out);
 void os_abi_release_task(OsTaskHandle task);
 /* Paging ends with the tasks: the page store is forgotten. */
 void os_page_shutdown(void);
