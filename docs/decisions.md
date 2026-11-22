@@ -1220,7 +1220,8 @@ Move, change no behaviour, keep the ABI.
   move. It can join after 1.0 as an addition (`WmWasiHost` grows).
 - The mini OS (`hw/examples/mini`) runs a program that blinks, waits for a
   button and prints through WASI: 48 KB of flash and 1.4 KB of static RAM
-  on an ATmega328P (39 KB and 0.9 KB without WASI), more than an Uno has.
+  on AVR (39 KB and 0.9 KB without WASI), more than an Uno has; its CI
+  builds it for an ATmega2560.
 - `hw_isr.h` replaced five copies of the interrupt-safe values; AVR, with
   no 32-bit atomics, turns interrupts off around them.
 
