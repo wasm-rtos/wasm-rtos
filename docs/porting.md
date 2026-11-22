@@ -117,6 +117,10 @@ memory runs this way from a file on an SD card.
 
 ## Program output
 
+WASI's calls without files are the interpreter's (`vm/source/wm_wasi.c`);
+the kernel answers what they mean here: kernel time for every clock, a
+sleep that blocks only the calling task, and the output port below.
+
 What programs write to stdout and stderr goes to the C library's `stdout`
 and `stderr` unless the platform installs an output port. Its `write` gets
 the id of the task that wrote, so the platform can keep a log per program,

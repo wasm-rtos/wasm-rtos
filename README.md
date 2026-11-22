@@ -151,7 +151,6 @@ OsStatus os_clock_poll(void);
 OsStatus os_clock_wakeup(void);
 uint8_t os_clock_is_tickless(void);
 void os_tick(uint32_t milliseconds);
-OsStatus os_update_time_ms(uint32_t now_ms);
 uint32_t os_get_tick_ms(void);
 uint32_t os_get_next_wakeup_ms(void);
 OsStatus os_schedule(void);
@@ -171,7 +170,6 @@ OsStatus os_task_spawn(OsTaskHandle* out_task, const uint8_t* wasm_bytes, uint32
 uint32_t os_task_get_parent_id(OsTaskHandle task);
 OsStatus os_task_spawn_path(OsTaskHandle* out_task, const char* path, const char* const* argv, uint32_t argc, uint32_t priority, uint32_t stack_size);
 OsStatus os_task_delay_ms(uint32_t delay_ms);
-OsStatus os_task_delay_until(uint32_t* previous_wake_time_ms, uint32_t period_ms);
 OsStatus os_task_abort_wait(OsTaskHandle task);
 OsStatus os_task_yield(void);
 void os_request_preempt(void);
@@ -195,77 +193,27 @@ OsStatus os_task_write_memory(OsTaskHandle task, uint32_t wasm_address, const ui
 const char* os_task_get_name(OsTaskHandle task);
 OsTaskHandle os_task_get_current(void);
 OsStatus os_task_get_last_wait_status(OsTaskHandle task);
-uint32_t os_task_get_last_wait_value(OsTaskHandle task);
-uint8_t os_task_is_notification_pending(OsTaskHandle task);
 ```
 
-### Queues, mutexes, semaphores, event groups
+### Queues
+
+Mutexes, semaphores, event groups, notifications and timers are the
+programs' (through the ABI) and the kernel's own; the host passes data to
+programs through queues.
 
 ```c
 OsStatus os_queue_create(OsQueueHandle* out_queue, uint32_t item_size, uint32_t item_count);
 void os_queue_delete(OsQueueHandle queue);
-uint32_t os_queue_get_id(OsQueueHandle queue);
-OsQueueHandle os_queue_find_by_id(uint32_t queue_id);
 OsStatus os_queue_send(OsQueueHandle queue, const void* item);
 OsStatus os_queue_receive(OsQueueHandle queue, void* out_item);
-OsStatus os_queue_send_wait(OsQueueHandle queue, const void* item, uint32_t timeout_ms);
 OsStatus os_queue_receive_wait(OsQueueHandle queue, void* out_item, uint32_t timeout_ms);
 uint32_t os_queue_get_count(OsQueueHandle queue);
-uint32_t os_queue_get_space(OsQueueHandle queue);
-uint32_t os_queue_get_item_size(OsQueueHandle queue);
 OsStatus os_queue_set_name(OsQueueHandle queue, const char* name);
-OsStatus os_mutex_set_name(OsMutexHandle mutex, const char* name);
-OsStatus os_semaphore_set_name(OsSemaphoreHandle semaphore, const char* name);
-OsStatus os_event_group_set_name(OsEventGroupHandle event_group, const char* name);
-OsStatus os_mutex_create(OsMutexHandle* out_mutex);
-void os_mutex_delete(OsMutexHandle mutex);
-uint32_t os_mutex_get_id(OsMutexHandle mutex);
-OsMutexHandle os_mutex_find_by_id(uint32_t mutex_id);
-OsStatus os_mutex_lock(OsMutexHandle mutex, uint32_t timeout_ms);
-OsStatus os_mutex_unlock(OsMutexHandle mutex);
-OsTaskHandle os_mutex_get_owner(OsMutexHandle mutex);
-OsStatus os_semaphore_create(OsSemaphoreHandle* out_semaphore, uint32_t max_count, uint32_t initial_count);
-void os_semaphore_delete(OsSemaphoreHandle semaphore);
-uint32_t os_semaphore_get_id(OsSemaphoreHandle semaphore);
-OsSemaphoreHandle os_semaphore_find_by_id(uint32_t semaphore_id);
-OsStatus os_semaphore_take(OsSemaphoreHandle semaphore, uint32_t timeout_ms);
-OsStatus os_semaphore_give(OsSemaphoreHandle semaphore);
-uint32_t os_semaphore_get_count(OsSemaphoreHandle semaphore);
-uint32_t os_semaphore_get_max_count(OsSemaphoreHandle semaphore);
-OsStatus os_event_group_create(OsEventGroupHandle* out_event_group);
-void os_event_group_delete(OsEventGroupHandle event_group);
-uint32_t os_event_group_get_id(OsEventGroupHandle event_group);
-OsEventGroupHandle os_event_group_find_by_id(uint32_t event_group_id);
-uint32_t os_event_group_get_bits(OsEventGroupHandle event_group);
-uint32_t os_event_group_set_bits(OsEventGroupHandle event_group, uint32_t bits);
-uint32_t os_event_group_clear_bits(OsEventGroupHandle event_group, uint32_t bits);
-OsStatus os_event_group_wait_bits(OsEventGroupHandle event_group, uint32_t bits_to_wait_for, uint8_t clear_on_exit, uint8_t wait_for_all, uint32_t timeout_ms);
-```
-
-### Notifications and timers
-
-```c
-OsStatus os_task_notify(OsTaskHandle task, uint32_t value, OsNotifyAction action);
-OsStatus os_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit, uint32_t timeout_ms);
-OsStatus os_task_notify_take(uint8_t clear_count_on_exit, uint32_t timeout_ms);
-uint32_t os_task_get_notification_value(OsTaskHandle task);
-OsStatus os_timer_create(OsTimerHandle* out_timer, uint32_t period_ms, uint8_t auto_reload, OsTaskHandle target_task, uint32_t notify_value, OsNotifyAction notify_action);
-void os_timer_delete(OsTimerHandle timer);
-uint32_t os_timer_get_id(OsTimerHandle timer);
-OsTimerHandle os_timer_find_by_id(uint32_t timer_id);
-OsStatus os_timer_start(OsTimerHandle timer);
-OsStatus os_timer_stop(OsTimerHandle timer);
-OsStatus os_timer_reset(OsTimerHandle timer);
-OsStatus os_timer_change_period(OsTimerHandle timer, uint32_t period_ms);
-uint8_t os_timer_is_active(OsTimerHandle timer);
-uint32_t os_timer_get_period_ms(OsTimerHandle timer);
 ```
 
 ### Snapshots, swapping and paging
 
 ```c
-OsStatus os_task_write_snapshot(OsTaskHandle task, OsSnapshotWrite write, void* context);
-OsStatus os_task_read_snapshot(OsTaskHandle task, OsSnapshotRead read, void* context);
 OsStatus os_task_get_snapshot_size(OsTaskHandle task, uint32_t* out_size);
 OsStatus os_task_save_snapshot(OsTaskHandle task, uint8_t* buffer, uint32_t buffer_size, uint32_t* out_size);
 OsStatus os_task_load_snapshot(OsTaskHandle task, const uint8_t* buffer, uint32_t buffer_size);
@@ -312,7 +260,11 @@ Devices are registered by the board through the ports of the device
 library (`hw_gpio_*`, `hw_display_*`, `hw_input_*`, `hw_i2c_*`, `hw_spi_*`,
 `hw_onewire_*`, `hw_adc_*`, `hw_dac_*`, `hw_pwm_*`, `hw_uart_*`,
 `hw_pulse_*`, `hw_counter_*`): see `hw/docs/porting.md`. The file system is
-in `fs.h`.
+in `fs.h`. WASI without files is the interpreter's (`vm/source/wm_wasi.h`):
+the kernel gives it kernel time, task sleeps and the output port.
+
+`docs/api-1.0.txt` lists every public name of `os.h` at 1.0;
+`tools/check-api.py` checks in CI that names are only added.
 
 ## Guest programs
 

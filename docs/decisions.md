@@ -1103,7 +1103,8 @@ and buses on chosen pins. Each is its own decision.
 
 ## 15. Each layer holds what is its own: vm, devices, operating system
 
-**Proposed (2026-11-22).**
+**Decided and built (2026-11-22)**, with one change while building:
+WASI's file calls stay in the kernel for 1.0 (see "Built" below).
 
 ### Problem
 
@@ -1207,6 +1208,21 @@ Move, change no behaviour, keep the ABI.
 - The API lists: every header checked in CI; changing a line fails.
 - Boards: ESP32 and Black Pill system checks as before; the simulator
   builds and its checks pass.
+
+### Built
+
+- `wm_wasi.c` answers the calls without files (wasm-rtos-vm decision 19);
+  the kernel gives it a `WmWasiHost` and the suite passes unchanged (1734
+  checks). **The file calls stay in `fs.c`**: they work on the kernel's
+  per-program table of open files, which snapshots save and the tar and
+  flash drivers fill; a file group in `wm_wasi` needs a table of its own
+  per program and a file interface below it, a new design rather than a
+  move. It can join after 1.0 as an addition (`WmWasiHost` grows).
+- The mini OS (`hw/examples/mini`) runs a program that blinks, waits for a
+  button and prints through WASI: 48 KB of flash and 1.4 KB of static RAM
+  on an ATmega328P (39 KB and 0.9 KB without WASI), more than an Uno has.
+- `hw_isr.h` replaced five copies of the interrupt-safe values; AVR, with
+  no 32-bit atomics, turns interrupts off around them.
 
 ### Work, all of it
 
