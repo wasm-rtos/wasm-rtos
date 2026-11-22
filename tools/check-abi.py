@@ -113,7 +113,8 @@ def c_param_letter(param):
 
 
 def header_calls_and_constants():
-    raw = read("include/wasm-rtos.h")
+    # The kernel's header and the devices' part of it (hw/include, kernel decision 15).
+    raw = read("include/wasm-rtos.h") + "\n" + read("hw/include/wasm-rtos-hw.h")
     text = strip_c_comments(raw)
     calls = {}
     for match in re.finditer(r'WR_IMPORT\("([\w-]+)",\s*"([\w-]+)"\)\s*([^;]*?)\(([^;]*?)\)\s*;', text, flags=re.S):
@@ -221,7 +222,7 @@ def main():
         elif wit[key] != (signature, since):
             problems.append("%s: kernel %s since 1.%d, wit %s since 1.%d" % ((name(key), signature, since) + wit[key]))
         if key not in header:
-            problems.append("%s: in the kernel but not in include/wasm-rtos.h" % name(key))
+            problems.append("%s: in the kernel but not in include/wasm-rtos.h or hw/include/wasm-rtos-hw.h" % name(key))
         elif header[key][0] != signature:
             problems.append("%s: kernel %s, header %s" % (name(key), signature, header[key][0]))
 
