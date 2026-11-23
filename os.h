@@ -191,6 +191,7 @@ typedef enum OsTaskExitReason
 
 typedef enum OsTaskPriority
 {
+    /* Makes no predecoded code of its own: uses others', runs the rest in place (vm decision 21). */
     OS_TASK_PRIORITY_IDLE = 0,
     OS_TASK_PRIORITY_LOW = 1,
     OS_TASK_PRIORITY_NORMAL = 5,
