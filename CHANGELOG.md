@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Idle tasks make no code of their own** (vm decision 21): a task at
+  `OS_TASK_PRIORITY_IDLE` uses the predecoded code other tasks made and
+  runs the rest in place, so it takes no memory or time from them for
+  code; above idle, or while it inherits a priority through a mutex, it
+  is as fast as any. Results and fuel are the same either way. A
+  function whose code finds no room now runs in place instead of failing
+  the call.
 - **Each layer holds what is its own** (decision 15):
   - WASI without files is the interpreter's (`vm/source/wm_wasi.h`); the
     kernel gives it kernel time, task sleeps, the output port, arguments

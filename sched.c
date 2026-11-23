@@ -724,6 +724,13 @@ static OsTaskRunResult os_run_task_slice(OsTaskHandle task)
     }
     wm_set_fuel(task->wasm_runtime,
                 OS_TASK_SLICE_FUEL > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)OS_TASK_SLICE_FUEL);
+    /*
+     * Idle tasks make no records of their own (vm decision 21): they use what
+     * others made and run the rest in place, taking no memory or time from
+     * them for code. Set at every slice, it follows every change of priority:
+     * set, inherited through a mutex, restored from a snapshot.
+     */
+    wm_set_makes_code(task->wasm_runtime, task->priority > OS_TASK_PRIORITY_IDLE);
     task->fuel_taken_back = 0U;
     if (g_os.preempt_requested)
     {
