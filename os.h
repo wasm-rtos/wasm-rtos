@@ -14,7 +14,6 @@
  *   OS_FS_TAR         read-only tar image driver (needs OS_HAS_FS)
  *   OS_HAS_WASI       the WASI preview 1 calls programs built for it use
  * Off unless defined to 1:
- *   OS_HAS_DYLINK     dylink.0 programs and shared libraries (vm/source/wm_dylink.c)
  *   OS_HAS_MEMORY_ACCOUNTING  all interpreter memory per task in os_task_get_memory_usage
  */
 #ifndef OS_HAS_PROCESSES
@@ -28,9 +27,6 @@
 #endif
 #ifndef OS_HAS_WASI
 #define OS_HAS_WASI 1
-#endif
-#ifndef OS_HAS_DYLINK
-#define OS_HAS_DYLINK 0
 #endif
 #ifndef OS_HAS_MEMORY_ACCOUNTING
 #define OS_HAS_MEMORY_ACCOUNTING 0
@@ -51,10 +47,6 @@
 #define OS_HAS_CODE_STORES 1
 #endif
 #endif
-#if OS_HAS_DYLINK
-#include "vm/source/wm_dylink.h"
-#endif
-
 /* Finite delays, timeouts, and timer periods must not exceed INT32_MAX. */
 #define OS_WAIT_FOREVER UINT32_MAX
 
@@ -64,9 +56,6 @@ typedef struct OsMutex* OsMutexHandle;
 typedef struct OsSemaphore* OsSemaphoreHandle;
 typedef struct OsEventGroup* OsEventGroupHandle;
 typedef struct OsTimer* OsTimerHandle;
-#if OS_HAS_DYLINK
-typedef struct OsWasmLibrary* OsWasmLibraryHandle;
-#endif
 
 /*
  * Host functions (the kernel's imports and os_host_import_register's) get
@@ -340,28 +329,41 @@ void os_host_import_clear_all(void);
 OsStatus os_host_wait_begin(uint32_t* result_slot);
 WmResult os_host_wait_end(void);
 
-#if OS_HAS_DYLINK
 /*
- * Register a dylink.0 side module (a shared library) under the name programs
- * list as needed. The byte buffer must remain valid until os_shutdown().
+ * Loaders (decision 16): other ways of making a program out of its module,
+ * joined as drivers are (wasm-rtos-dylink's os_dylink_add is one). A task's
+ * module is offered to each in the order added, the kernel's own (one
+ * module, nothing linked) last. The three steps are the interpreter's:
  *
- * A PIE program is loaded with its dependencies into its own runtime: every
- * process gets private copies of each library's memory, globals and
- * indirect-function table, like shared objects in an ELF process. Only the
- * library bytes are shared. Libraries may be registered at any time; a
- * program needing one that is missing fails to load.
+ *   build  the program's instances, running none of their code: NULL, or
+ *          os_not_mine for a module that is not this loader's (the next is
+ *          asked), or an error. host resolves the kernel's functions
+ *          (host_context is its context). memory is NULL; it is for a
+ *          memory kept apart, which no loader is given yet. process is the
+ *          loader's own, given back to start and free.
+ *   start  what build left to run: start functions, relocations,
+ *          constructors. Called once, as the kernel starts any program.
+ *   free   everything build made, the instance included.
+ *
+ * A loader that builds the same instances from the same module, and keeps
+ * its state in WebAssembly's objects, has its tasks saved and read back as
+ * any (os_task_save_snapshot, os_system_save): the instance's snapshot
+ * holds every instance linked to it (wasm-rtos-vm decision 23). Loaded
+ * tasks do not swap yet (os_task_swap_out: OS_STATUS_UNSUPPORTED).
  */
-OsStatus os_wasm_library_register(
-    OsWasmLibraryHandle* out_library,
-    const char* module_name,
-    uint8_t* wasm_bytes,
-    uint32_t wasm_size
-);
-OsWasmLibraryHandle os_wasm_library_find(const char* module_name);
-uint32_t os_wasm_library_get_id(OsWasmLibraryHandle library);
-const char* os_wasm_library_get_name(OsWasmLibraryHandle library);
-uint32_t os_wasm_library_get_count(void);
-#endif
+extern const char os_not_mine[];
+
+typedef struct OsLoader
+{
+    WmResult (*build)(void* context, WmModule* program, WmMemory* memory, WmResolver host, void* host_context,
+                      void** out_process, WmInstance** out_instance);
+    WmResult (*start)(void* process, WmRuntime* runtime);
+    void (*free)(void* process);
+    void* context;
+} OsLoader;
+
+/* Up to OS_MAX_LOADERS (4); the loader must outlive os_shutdown(). */
+OsStatus os_loader_add(const OsLoader* loader);
 
 OsStatus os_task_delete(OsTaskHandle task);
 
@@ -464,7 +466,9 @@ OsStatus os_task_resume(OsTaskHandle task);
  * with the task they belong to. So saving needs a task that is neither
  * waiting nor the target of a timer (OS_STATUS_BUSY), and loading needs one
  * that has not run yet (OS_STATUS_BUSY). A load that fails leaves the task
- * as it was created. Linked (dylink.0) tasks return OS_STATUS_UNSUPPORTED.
+ * as it was created. A loader's task (os_loader_add) is saved with every
+ * instance linked to its program's, and loads into a task its loader built
+ * the same way.
  *
  * The stream calls write or read the snapshot in pieces through a callback;
  * a callback error stops the call and is returned as it is.
@@ -502,12 +506,12 @@ OsStatus os_task_load_snapshot(
  * by task name; a module of other bytes is refused.
  *
  * Saving returns OS_STATUS_BUSY while a transfer or page is on its way (try
- * after the next slice) and OS_STATUS_UNSUPPORTED while a task runs a
- * dylink.0 program or holds a display that loses its picture in the sleep
- * (OsDisplayInfo.keeps_image); the last error says which.
+ * after the next slice) and OS_STATUS_UNSUPPORTED while a task holds a
+ * display that loses its picture in the sleep (OsDisplayInfo.keeps_image);
+ * the last error says which.
  *
  * Restore into a kernel set up as at start (os_init, clock, page store,
- * drivers, host imports, libraries) that has no task or object yet. The
+ * drivers, host imports, loaders) that has no task or object yet. The
  * clock goes on from where it was plus slept_ms, and what fell due during
  * the sleep is delivered at once. A stream that is cut, of another format
  * or that does not agree with itself restores nothing: an error, and the

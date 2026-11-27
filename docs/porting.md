@@ -203,8 +203,9 @@ due during the sleep is delivered at once.
 
 - **Saving** happens between slices. It returns `OS_STATUS_BUSY` while a
   transfer or page is on its way (save after the next slice) and
-  `OS_STATUS_UNSUPPORTED` while a program runs a dylink.0 program or holds
-  a display that loses its picture in the sleep; the last error says which.
+  `OS_STATUS_UNSUPPORTED` while a program holds a display that loses its
+  picture in the sleep; the last error says which. A loader's task is saved
+  as any; restore into a kernel its loaders joined again first.
 - **Devices** are saved by their drivers and found again by name, so the
   firmware may register them in another order. Each is set up again as the
   program left it: a pin's mode and level, a PWM output's frequency and
