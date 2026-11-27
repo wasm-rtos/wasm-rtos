@@ -428,11 +428,6 @@ OsStatus os_task_swap_out(OsTaskHandle task)
     {
         return OS_STATUS_UNSUPPORTED;
     }
-    /* A loader's memory is its own: it is not kept apart yet (decision 16). */
-    if (task->loader != NULL)
-    {
-        return OS_STATUS_UNSUPPORTED;
-    }
     if (g_os.current_task == task)
     {
         return OS_STATUS_ERROR;
@@ -482,6 +477,17 @@ OsStatus os_task_swap_out(OsTaskHandle task)
                 }
             }
             task->swapped_memory = wm_instance_detach_memory(task->wasm_instance);
+            /*
+             * A memory the program's instance does not own (a loader's program that imports
+             * one the loader made, decision 17) cannot be kept apart: the task stays in RAM.
+             */
+            if (task->swapped_memory == NULL)
+            {
+                os_swap_discard(task);
+                status = OS_STATUS_UNSUPPORTED;
+                os_set_last_error(task, "swap_out", "unsupported: the program's memory is not its own", status);
+                return status;
+            }
         }
     }
 

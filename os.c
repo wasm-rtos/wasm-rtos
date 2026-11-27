@@ -1021,13 +1021,17 @@ OsStatus os_task_create_wasm(
         return status;
     }
 
-    /* A loader's program (decision 16): the first that takes it builds and starts it; the kernel's own path otherwise. */
+    /*
+     * A loader's program (decision 16): the first that takes it builds and starts it; the kernel's own path
+     * otherwise. Back from swap (decision 17) it builds on the memory kept apart and nothing starts again.
+     */
     for (uint32_t i = 0; i < g_os.loader_count; ++i)
     {
         const OsLoader* loader = g_os.loaders[i];
+        WmMemory* kept_memory = task->swapped_memory;
         void* process = NULL;
         WmInstance* instance = NULL;
-        result = loader->build(loader->context, task->wasm_module, NULL, os_loader_host_import, NULL, &process,
+        result = loader->build(loader->context, task->wasm_module, kept_memory, os_loader_host_import, NULL, &process,
                                &instance);
         if (result == os_not_mine)
         {
@@ -1037,6 +1041,11 @@ OsStatus os_task_create_wasm(
         task->loader = loader;
         task->loader_process = process;
         task->wasm_instance = instance;
+        /* Taken: the program's instance holds it now (a failed swap-in keeps it apart again). */
+        if (kept_memory != NULL && instance != NULL && wm_instance_memory(instance) == kept_memory)
+        {
+            task->swapped_memory = NULL;
+        }
         if (result == NULL && instance == NULL)
         {
             result = "unlinkable: the loader made no instance";
@@ -1047,7 +1056,7 @@ OsStatus os_task_create_wasm(
             os_set_last_error(task, "load", result, status);
             return status;
         }
-        if (loader->start != NULL && (result = loader->start(process, task->wasm_runtime)) != NULL)
+        if (kept_memory == NULL && loader->start != NULL && (result = loader->start(process, task->wasm_runtime)) != NULL)
         {
             OsStatus status = os_wasm_result_to_status(result);
             os_set_last_error(task, "start", result, status);
