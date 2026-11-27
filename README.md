@@ -43,7 +43,8 @@ for (;;)
   its position is in the module's terms, not the host's.
 - **Processes as in an OS.** Programs start other programs from memory or a
   file path with arguments, wait for their exit codes, and can share
-  `dylink.0` libraries.
+  `dylink.0` libraries through a loader that joins the kernel
+  ([wasm-rtos-dylink](https://github.com/wasm-rtos/wasm-rtos-dylink)).
 - **No platform code in the kernel.** A board gives it a clock and the
   devices it has, through small ports; a build carries only the drivers its
   board uses.
@@ -67,8 +68,11 @@ for (;;)
   bytes and parsed module are loaded once, found by their contents.
 - Virtual file system behind the WASI file calls, with a read-only tar
   driver. Files from memory-mapped storage run without a copy.
-- Optional `dylink.0` shared libraries: every process gets its own copy of a
-  library's data, as with ELF shared objects.
+- Loaders (decision 16): other ways of making a program out of modules
+  join as drivers do (`os_loader_add`). `dylink.0` shared libraries are
+  one, in wasm-rtos-dylink: every process gets its own copy of a library's
+  data, as with ELF shared objects, and a linked task is saved and read
+  back as any.
 - GPIO by pin name from the device profile, one owner per pin, edges from
   interrupt handlers delivered to waiting programs.
 - Devices for programs besides pins: displays, input devices, I2C, SPI and
@@ -113,7 +117,6 @@ board's devices (`hw/docs/porting.md`).
 | `OS_FS_MAX_MOUNTS` | 8 | mount points |
 | `OS_FS_MAX_FILES` | 16 | open files per process |
 | `OS_HAS_WASI` | 1 | the WASI preview 1 calls (arguments, exit, clocks, standard streams, files) |
-| `OS_HAS_DYLINK` | 0 | `dylink.0` libraries (`os_wasm_library_register`) |
 | `OS_HAS_MEMORY_ACCOUNTING` | 0 | full per-task interpreter memory in `os_task_get_memory_usage` |
 | `OS_MAX_SPAWNED_TASKS` | 16 | processes alive at once |
 | `OS_ABI_MAX_HANDLES` | 32 | handles one program may hold |
@@ -243,17 +246,13 @@ const char* os_task_get_error(OsTaskHandle task);
 OsStatus os_get_last_error_status(void);
 ```
 
-### Host functions and libraries
+### Host functions and loaders
 
 ```c
 OsStatus os_host_import_register(const char* module_name, const char* import_name, const char* signature, OsHostImportFunction function);
 void os_host_import_clear_all(void);
 OsStatus os_host_wait_begin(uint32_t* result_slot);
-OsStatus os_wasm_library_register(OsWasmLibraryHandle* out_library, const char* module_name, uint8_t* wasm_bytes, uint32_t wasm_size);
-OsWasmLibraryHandle os_wasm_library_find(const char* module_name);
-uint32_t os_wasm_library_get_id(OsWasmLibraryHandle library);
-const char* os_wasm_library_get_name(OsWasmLibraryHandle library);
-uint32_t os_wasm_library_get_count(void);
+OsStatus os_loader_add(const OsLoader* loader);   /* build, start, free: os.h, Loaders */
 ```
 
 Devices are registered by the board through the ports of the device

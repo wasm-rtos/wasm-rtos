@@ -1237,3 +1237,160 @@ Move, change no behaviour, keep the ABI.
 | 6 | The host's RTOS into the internal header; test of `os_code_store_priority` | kernel, tests |
 | 7 | API lists and CI checks | vm, hw, kernel |
 | 8 | Tests, simulator, local ports, READMEs, `porting.md`, CHANGELOGs, org README | all |
+
+## 16. Loaders join by what the platform registers: dylink.0 out of the kernel
+
+**Decided and built (2026-11-27)**; loaded tasks do not swap yet (see
+"Built" below). The user: «dylink из репо вытеснить и сделать
+не по def а как .h… чтобы можно было сделать похожий например свой
+механизм при желании», «мне просто понравилось решение с hw типа add
+gpio и тд используем и делаем только то что нужно», «мне нужно
+максимально элегантное решение». With wasm-rtos-vm decision 23.
+
+### Problem
+
+1. **One way of making a program out of modules, welded in.** dylink.0 is
+   switched on by `OS_HAS_DYLINK`: 18 `#if` in `os.c`, `os.h`,
+   `os_kernel.h`, `system.c` and `snapshot.c`, a task field
+   (`wasm_dylink`), the libraries' registry (`os_wasm_library_register`)
+   and its stack size (`OS_DYLINK_LINEAR_STACK_SIZE`). Another way (names
+   without position-independent code, a memory per library, libraries
+   from a card, the Component Model one day) means editing the kernel.
+2. **A linked program cannot be saved**: `snapshot.c` and `system.c`
+   answer `OS_STATUS_UNSUPPORTED` for it (snapshots, swap as state, deep
+   sleep), because the interpreter's snapshots were of one instance.
+3. **The flag is not how the rest joins.** Drivers join by what the
+   platform registers (decision 3; `hw_gpio_add_pin` and the like): a
+   build carries what it calls, the linker drops the rest. dylink is the
+   one part chosen by a define.
+
+Size and speed are not the problem: dylink.0 is about 7.4 KB on a
+Cortex-M4 (`wm_dylink.c` 6630 bytes, its part of `os.c` 834 bytes and 16
+of RAM) where it is used, nothing where not, and works only while a
+program loads.
+
+### Decision
+
+**1. A loader is three functions, the interpreter's own steps**
+(`wm_instantiate` with no runtime, `wm_instance_start`,
+`wm_instance_free`), and joins the way drivers do:
+
+```c
+extern const char os_not_mine[];
+
+typedef struct OsLoader {
+    /*
+     * Build the program's instances from its module, running none of
+     * their code; os_not_mine when the module is not this loader's.
+     * memory: kept apart (back from swap) to build on, its data not
+     * written again; NULL for a new one. host: the kernel's imports.
+     */
+    WmResult (*build)(void* context, WmModule* program, WmMemory* memory, WmResolver host,
+                      void* host_context, void** out_process, WmInstance** out_instance);
+    /* What the build left to run: start functions, relocations, constructors. */
+    WmResult (*start)(void* process, WmRuntime* runtime);
+    void (*free)(void* process);
+    void* context;
+} OsLoader;
+
+OsStatus os_loader_add(const OsLoader* loader);
+```
+
+The kernel asks the loaders in the order added, as Linux asks its
+formats (`load_binary`, `-ENOEXEC` for the next); its own loader of one
+module is last and always there, the path every program takes now. A
+loader knows its programs by a custom section of its own (dylink.0's is
+`dylink.0`), as Linux knows a format by its magic: that is a convention,
+not something the kernel checks.
+
+**2. Saving needs nothing from a loader.** The kernel calls `build`
+where it instantiates now, `start` where it calls `wm_instance_start`
+now (not after swap), and saves and loads the program's instance, which
+covers every instance linked to it (vm decision 23). A loader that
+builds the same group from the same modules, and keeps its state in
+WebAssembly's objects rather than in C variables of its own, has
+snapshots, swap and deep sleep with no line of its own; one that does
+not, fails the interpreter's check (`wm_snapshot_invalid`), not
+silently. The refusals of linked tasks go.
+
+**3. dylink.0, a loader in a repository of its own** (wasm-rtos-dylink,
+next to wasm-rtos-hw: a library of the system, not of programs, which
+wasm-rtos-libraries' decision 1 keeps out):
+
+```c
+OsStatus os_dylink_add(void);                     /* the loader joins */
+OsStatus os_dylink_add_library(const char* name, const uint8_t* bytes, uint32_t size);
+```
+
+Written on `wm.h` and `os.h` only. A build that does not call
+`os_dylink_add` has none of it; one that does, the same dylink.0 as now
+(`clang -pie` programs, `-shared` libraries, DynamicLinking.md).
+
+**Leaves the kernel:** `OS_HAS_DYLINK` and its 18 `#if`,
+`os_wasm_library_register` and its handle, `wasm_dylink`,
+`OS_DYLINK_LINEAR_STACK_SIZE`, `os_dylink_find`,
+`os_dylink_host_import`, the refusals in `snapshot.c` and `system.c`.
+
+### Why
+
+- Every kernel that runs more than one format does this: Linux
+  (`register_binfmt`, and `binfmt_misc` at run time: Wine, qemu-user),
+  XNU and FreeBSD (`execsw`, image activators), NuttX
+  (`register_binfmt`), Zephyr (LLEXT, a subsystem one may leave out).
+  The dynamic linker itself is outside the kernel (`ld.so`, `dyld`), as
+  dylink.0 is outside V8 in the browser (Emscripten's JavaScript).
+- It is how this kernel already takes drivers (decision 3): what a build
+  carries is what its platform calls.
+- Three functions that are the interpreter's three steps add no idea of
+  their own; a loader is written by someone who knows `wm.h`.
+
+### Instead
+
+- **Keep `OS_HAS_DYLINK`.** One format, a define, unsaved.
+- **A loader that says whether it can be saved, lists its instances or
+  writes a recipe to rebuild them**: the interpreter finds the instances
+  from their links and checks them; a loader only has to build the same
+  thing twice.
+- **One function `load` doing build and start together**: swap would run
+  start functions over a kept memory.
+- **dylink in wasm-rtos-libraries**: those libraries are built into a
+  program's `.wasm`; this one is the system's.
+- **A loader written in WebAssembly** (like `ld.so`, a program): it fits
+  the same `OsLoader` through a small native bridge, but needs a linking
+  API for programs, with handles and a rule for who may call it. Later,
+  not for 1.0.
+
+### Steps
+
+| # | What | Where |
+|---|---|---|
+| 1 | vm decision 23 (reading, late linking, snapshots of linked instances) | vm |
+| 2 | `OsLoader`, `os_loader_add`, `os_not_mine`; the kernel's own loader last; create, swap, snapshots and sleep through it | kernel |
+| 3 | wasm-rtos-dylink: the loader on `wm.h`, `os_dylink_add`, `os_dylink_add_library`, tests, CI | new repository |
+| 4 | `OS_HAS_DYLINK` and the rest out; `api-1.0.txt` | kernel |
+| 5 | Tests: dylink programs from wasm-rtos-dylink; a linked program saved, swapped, slept and back | tests |
+| 6 | Boards (ESP32, Black Pill): the checks before and after, sizes | local ports |
+| 7 | `porting.md`, READMEs, CHANGELOGs, examples, org Roadmap | all |
+
+### Built
+
+- **Swap of a loader's task is not built**: its memory is the loader's
+  process's (dylink.0 makes one memory for the program and its
+  libraries), and the kernel keeps apart only an instance's own.
+  `os_task_swap_out` answers `OS_STATUS_UNSUPPORTED` for it; `build`'s
+  `memory` is NULL until a loader can take a memory kept apart. Snapshots
+  and deep sleep work.
+- A loader's program shares its parsed module with the program's other
+  processes (decision 9 had dylink.0 programs parse their own; nothing in
+  linking needs it).
+- `os_dylink_add_library` keeps the caller's name as it keeps the bytes:
+  a fixed table of `OS_DYLINK_MAX_LIBRARIES`, nothing allocated, nothing to
+  free. `os_shutdown` forgets the loaders, as it forgets drivers; the
+  libraries stay with the loader.
+- `OS_MAX_LOADERS` is 4.
+- Checked: the kernel's tests on the new interpreter, and wasm-rtos-dylink's
+  test: the program alone and on the kernel, two tasks and two spawned
+  processes of one program, a task stopped inside a library saved and
+  read into another (it finishes in fewer slices, with the library's data
+  it was saved with), the whole system saved and restored after a deep
+  sleep, and without `os_dylink_add` the program does not load.

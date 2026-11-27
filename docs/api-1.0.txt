@@ -14,7 +14,6 @@ OS_CODE_QUIET_MS
 OS_FS_TAR
 OS_HAS_CODE_STORES
 OS_HAS_COMPRESSED_STORE
-OS_HAS_DYLINK
 OS_HAS_FS
 OS_HAS_MEMORY_ACCOUNTING
 OS_HAS_PROCESSES
@@ -103,6 +102,7 @@ OsCodeStoreStats
 OsEventGroup
 OsEventGroupHandle
 OsHostImportFunction
+OsLoader
 OsModuleFind
 OsMutex
 OsMutexHandle
@@ -129,8 +129,7 @@ OsTimerHandle
 OsValue
 OsValueData
 OsValueType
-OsWasmLibrary
-OsWasmLibraryHandle
+WmResult
 os_clock_is_tickless
 os_clock_poll
 os_clock_port_clear
@@ -167,6 +166,7 @@ os_host_wait_end
 os_host_write32
 os_host_write64
 os_init
+os_loader_add
 os_output_port_set
 os_page_get_stats
 os_page_get_store_stats
@@ -231,9 +231,4 @@ os_task_swap_out
 os_task_write_memory
 os_task_yield
 os_tick
-os_wasm_library_find
-os_wasm_library_get_count
-os_wasm_library_get_id
-os_wasm_library_get_name
-os_wasm_library_register
 uint32_t

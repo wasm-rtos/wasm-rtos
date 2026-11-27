@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Loaders** (decision 16): other ways of making a program out of
+  modules join the kernel as drivers do, `os_loader_add` with three steps
+  that are the interpreter's (build, start, free). A task is offered to
+  each, the kernel's own last. A loader's task is saved, put to deep sleep
+  and read back as any (its snapshot holds every linked instance,
+  wasm-rtos-vm decision 23); it does not swap out yet.
+- **dylink.0 leaves the kernel** for wasm-rtos-dylink, a loader
+  (`os_dylink_add`, `os_dylink_add_library`): `OS_HAS_DYLINK` and the
+  `os_wasm_library_*` calls are gone. A dylink.0 program now shares its
+  parsed module with its other processes, as any program.
 - **Idle tasks make no code of their own** (vm decision 21): a task at
   `OS_TASK_PRIORITY_IDLE` uses the predecoded code other tasks made and
   runs the rest in place, so it takes no memory or time from them for

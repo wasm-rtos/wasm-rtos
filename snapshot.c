@@ -34,12 +34,6 @@ static OsStatus os_task_check_snapshot(OsTaskHandle task)
     {
         return OS_STATUS_TASK_DEAD;
     }
-#if OS_HAS_DYLINK
-    if (task->wasm_dylink != NULL)
-    {
-        return OS_STATUS_UNSUPPORTED;
-    }
-#endif
     if (task->swapped)
     {
         return OS_STATUS_BUSY;
@@ -434,12 +428,11 @@ OsStatus os_task_swap_out(OsTaskHandle task)
     {
         return OS_STATUS_UNSUPPORTED;
     }
-#if OS_HAS_DYLINK
-    if (task->wasm_dylink != NULL)
+    /* A loader's memory is its own: it is not kept apart yet (decision 16). */
+    if (task->loader != NULL)
     {
         return OS_STATUS_UNSUPPORTED;
     }
-#endif
     if (g_os.current_task == task)
     {
         return OS_STATUS_ERROR;

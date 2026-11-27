@@ -68,9 +68,7 @@ jobs:
           -DOS_HAS_PROCESSES=0
           -DOS_HAS_FS=0
           -DOS_HAS_WASI=0
-          -DOS_HAS_DYLINK=1
           -DOS_HAS_MEMORY_ACCOUNTING=1
-          -DOS_HAS_DYLINK=1 -DOS_HAS_MEMORY_ACCOUNTING=1
           -DOS_HAS_PROCESSES=0 -DOS_HAS_FS=0 -DOS_HAS_WASI=0
           -DWM_FRAME_SIZE=0
           -DWM_PREDECODE=0

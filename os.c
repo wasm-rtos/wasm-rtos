@@ -181,9 +181,6 @@ WmResult os_guest_exit(uint32_t code)
 static char* os_duplicate_string(const char* value);
 static void os_host_import_free_list(void);
 static int os_host_import_exists(const char* module_name, const char* import_name);
-#if OS_HAS_DYLINK
-static void os_wasm_library_free_all(void);
-static WmResult os_dylink_find(void* context, const char* name, WmModule** out);
 static WmResult os_resolve_host_import(
     const WmModule* program,
     const char* module,
@@ -192,7 +189,7 @@ static WmResult os_resolve_host_import(
     uint32_t name_length,
     WmFunc** out
 );
-static WmResult os_dylink_host_import(
+static WmResult os_loader_host_import(
     void* context,
     const char* module,
     uint32_t module_length,
@@ -201,7 +198,6 @@ static WmResult os_dylink_host_import(
     uint8_t kind,
     WmExtern* out
 );
-#endif
 static OsStatus os_wasm_result_to_status(WmResult result);
 static OsStatus os_check_module_imports(OsTaskHandle task, const struct OsImportLink* link);
 static const char* os_detect_entry_function(const WmInstance* instance);
@@ -220,9 +216,6 @@ OsStatus os_init(void)
     g_os.next_semaphore_id = 1U;
     g_os.next_event_group_id = 1U;
     g_os.next_timer_id = 1U;
-#if OS_HAS_DYLINK
-    g_os.next_wasm_library_id = 1U;
-#endif
     g_os.next_wait_sequence = 1U;
 #if OS_HAS_PROCESSES
     g_os.spawned_task_count = 0U;
@@ -260,10 +253,6 @@ void os_shutdown(void)
         os_task_free(task);
         task = next;
     }
-
-#if OS_HAS_DYLINK
-    os_wasm_library_free_all();
-#endif
 
     os_queue_free_all();
     os_mutex_free_all();
@@ -344,22 +333,14 @@ void os_host_import_clear_all(void)
 {
     os_host_import_free_list();
 }
-#if OS_HAS_DYLINK
-OsStatus os_wasm_library_register(
-    OsWasmLibraryHandle* out_library,
-    const char* module_name,
-    uint8_t* wasm_bytes,
-    uint32_t wasm_size
-)
-{
-    OsWasmLibraryHandle library = NULL;
+const char os_not_mine[] = "not this loader's program";
 
-    if (out_library == NULL || module_name == NULL || module_name[0] == '\0' ||
-        wasm_bytes == NULL || wasm_size == 0U)
+OsStatus os_loader_add(const OsLoader* loader)
+{
+    if (loader == NULL || loader->build == NULL || loader->free == NULL)
     {
         return OS_STATUS_INVALID_ARGUMENT;
     }
-    *out_library = NULL;
     if (!g_os.initialized)
     {
         OsStatus status = os_init();
@@ -368,81 +349,16 @@ OsStatus os_wasm_library_register(
             return status;
         }
     }
-    if (os_wasm_library_find(module_name) != NULL)
+    if (g_os.loader_count >= OS_MAX_LOADERS)
     {
-        return OS_STATUS_INVALID_ARGUMENT;
+        return OS_STATUS_LIMIT_REACHED;
     }
-
-    library = (OsWasmLibraryHandle)calloc(1U, sizeof(struct OsWasmLibrary));
-    if (library == NULL)
-    {
-        return OS_STATUS_OUT_OF_MEMORY;
-    }
-    library->module_name = os_duplicate_string(module_name);
-    if (library->module_name == NULL)
-    {
-        free(library);
-        return OS_STATUS_OUT_OF_MEMORY;
-    }
-    library->id = g_os.next_wasm_library_id++;
-    library->wasm_bytes = wasm_bytes;
-    library->wasm_size = wasm_size;
-    library->next = g_os.wasm_library_list;
-    g_os.wasm_library_list = library;
-    ++g_os.wasm_library_count;
-    *out_library = library;
+    g_os.loaders[g_os.loader_count++] = loader;
     return OS_STATUS_OK;
 }
 
-OsWasmLibraryHandle os_wasm_library_find(const char* module_name)
-{
-    OsWasmLibraryHandle library = NULL;
-    if (module_name == NULL)
-    {
-        return NULL;
-    }
-    for (library = g_os.wasm_library_list;
-         library != NULL;
-         library = library->next)
-    {
-        if (strcmp(library->module_name, module_name) == 0)
-        {
-            return library;
-        }
-    }
-    return NULL;
-}
-
-uint32_t os_wasm_library_get_id(OsWasmLibraryHandle library)
-{
-    return library != NULL ? library->id : 0U;
-}
-
-const char* os_wasm_library_get_name(OsWasmLibraryHandle library)
-{
-    return library != NULL ? library->module_name : NULL;
-}
-
-uint32_t os_wasm_library_get_count(void)
-{
-    return g_os.wasm_library_count;
-}
-
-static WmResult os_dylink_find(void* context, const char* name, WmModule** out)
-{
-    OsWasmLibraryHandle library = os_wasm_library_find(name);
-
-    (void)context;
-    *out = NULL;
-    if (library == NULL)
-    {
-        return "unlinkable: dylink.0 dependency is missing";
-    }
-    /* Each process loads its own module; only the bytes are shared. */
-    return wm_module_load(out, library->wasm_bytes, library->wasm_size);
-}
-
-static WmResult os_dylink_host_import(
+/* The kernel's functions, for a loader's modules: other kinds of imports are the loader's. */
+static WmResult os_loader_host_import(
     void* context,
     const char* module,
     uint32_t module_length,
@@ -457,7 +373,6 @@ static WmResult os_dylink_host_import(
     out->as.func = NULL;
     return os_resolve_host_import(NULL, module, module_length, name, name_length, &out->as.func);
 }
-#endif
 
 static uint8_t os_read_leb_u32(const uint8_t** cursor, const uint8_t* end, uint32_t* out_value)
 {
@@ -805,22 +720,6 @@ static void os_host_import_free_list(void)
 
     g_os.host_import_list = NULL;
 }
-#if OS_HAS_DYLINK
-static void os_wasm_library_free_all(void)
-{
-    OsWasmLibraryHandle library = g_os.wasm_library_list;
-    while (library != NULL)
-    {
-        OsWasmLibraryHandle next = library->next;
-        free(library->module_name);
-        free(library);
-        library = next;
-    }
-    g_os.wasm_library_list = NULL;
-    g_os.wasm_library_count = 0U;
-}
-#endif
-
 static int os_host_import_exists(const char* module_name, const char* import_name)
 {
     OsHostImportNode* node = NULL;
@@ -1037,8 +936,7 @@ static uint8_t os_retry_without_code_cache(WmResult result)
 
 /*
  * The task's module: its program's, shared with the program's other
- * processes, or parsed for it alone (a task the host created, or a
- * dylink.0 program, which links its libraries into it).
+ * processes, or parsed for it alone (a task the host created).
  */
 static WmResult os_task_load_module(OsTaskHandle task, const uint8_t* wasm_bytes, uint32_t wasm_size)
 {
@@ -1051,14 +949,6 @@ static WmResult os_task_load_module(OsTaskHandle task, const uint8_t* wasm_bytes
             return result;
         }
         task->module_shared = 1U;
-#if OS_HAS_DYLINK
-        if (wm_module_is_dylink(task->wasm_module))
-        {
-            os_program_module_give(task->program);
-            task->module_shared = 0U;
-            return wm_module_load(&task->wasm_module, wasm_bytes, wasm_size);
-        }
-#endif
         return NULL;
     }
 #endif
@@ -1131,33 +1021,41 @@ OsStatus os_task_create_wasm(
         return status;
     }
 
-#if OS_HAS_DYLINK
-    if (wm_module_is_dylink(task->wasm_module))
+    /* A loader's program (decision 16): the first that takes it builds and starts it; the kernel's own path otherwise. */
+    for (uint32_t i = 0; i < g_os.loader_count; ++i)
     {
-        /*
-         * A PIE program: load it and its dylink.0 dependencies into the
-         * task's own runtime. Every process gets private library memory,
-         * globals and table, like shared objects in an ELF process.
-         */
-        WmDylinkOptions options;
-
-        memset(&options, 0, sizeof(options));
-        options.context = task;
-        options.find = os_dylink_find;
-        options.host = os_dylink_host_import;
-        options.stack_size = OS_DYLINK_LINEAR_STACK_SIZE;
-        result = wm_dylink_load(&task->wasm_dylink, task->wasm_module, task->name, task->wasm_runtime, &options);
+        const OsLoader* loader = g_os.loaders[i];
+        void* process = NULL;
+        WmInstance* instance = NULL;
+        result = loader->build(loader->context, task->wasm_module, NULL, os_loader_host_import, NULL, &process,
+                               &instance);
+        if (result == os_not_mine)
+        {
+            continue;
+        }
+        /* Kept on failure too: free releases what the build made. */
+        task->loader = loader;
+        task->loader_process = process;
+        task->wasm_instance = instance;
+        if (result == NULL && instance == NULL)
+        {
+            result = "unlinkable: the loader made no instance";
+        }
         if (result != NULL)
         {
             OsStatus status = os_wasm_result_to_status(result);
-            os_set_last_error(task, "dylink_load", result, status);
+            os_set_last_error(task, "load", result, status);
             return status;
         }
-        task->wasm_instance = wm_dylink_instance(task->wasm_dylink);
+        if (loader->start != NULL && (result = loader->start(process, task->wasm_runtime)) != NULL)
+        {
+            OsStatus status = os_wasm_result_to_status(result);
+            os_set_last_error(task, "start", result, status);
+            return status;
+        }
         /* Look only in the program: a library may export the same name. */
         return os_find_entry_function(task, entry_function_name);
     }
-#endif
 
     memset(&link, 0, sizeof(link));
     link.program = task->wasm_module;
@@ -1526,14 +1424,13 @@ void os_task_cleanup_wasm(OsTaskHandle task)
     task->wasm_needs_resume = 0U;
     task->wasm_entry_function = NULL;
 
-#if OS_HAS_DYLINK
-    if (task->wasm_dylink != NULL)
+    if (task->loader != NULL)
     {
-        wm_dylink_free(task->wasm_dylink);
-        task->wasm_dylink = NULL;
+        task->loader->free(task->loader_process);
+        task->loader = NULL;
+        task->loader_process = NULL;
         task->wasm_instance = NULL;
     }
-#endif
     wm_instance_free(task->wasm_instance);
     task->wasm_instance = NULL;
     os_task_free_module(task);

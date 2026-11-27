@@ -782,14 +782,6 @@ static OsStatus os_system_check(void)
         {
             continue;
         }
-#if OS_HAS_DYLINK
-        if (task->wasm_dylink != NULL)
-        {
-            os_set_last_error(task, "system_save", "unsupported: a dylink.0 program cannot be saved yet",
-                              OS_STATUS_UNSUPPORTED);
-            return OS_STATUS_UNSUPPORTED;
-        }
-#endif
         if (task->wait_type == OS_TASK_WAIT_TRANSFER || task->wait_type == OS_TASK_WAIT_PAGE)
         {
             os_set_last_error(task, "system_save", "a transfer or page is on its way: try after the next slice",

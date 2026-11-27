@@ -55,8 +55,9 @@ typedef struct OsCodeImage
 #ifndef OS_TASK_SLICE_FUEL
 #define OS_TASK_SLICE_FUEL 10000ULL
 #endif
-#if OS_HAS_DYLINK
-#define OS_DYLINK_LINEAR_STACK_SIZE (64U * 1024U)
+/* Loaders os_loader_add takes (decision 16). */
+#ifndef OS_MAX_LOADERS
+#define OS_MAX_LOADERS 4U
 #endif
 
 typedef enum OsTaskRunResult
@@ -146,16 +147,6 @@ typedef struct OsHostImportNode
     OsHostImportFunction function;
     struct OsHostImportNode* next;
 } OsHostImportNode;
-#if OS_HAS_DYLINK
-struct OsWasmLibrary
-{
-    uint32_t id;
-    char* module_name;
-    uint8_t* wasm_bytes;
-    uint32_t wasm_size;
-    struct OsWasmLibrary* next;
-};
-#endif
 
 struct OsQueue
 {
@@ -243,11 +234,8 @@ typedef struct OsState
     OsEventGroupHandle event_group_list;
     OsTimerHandle timer_list;
     OsHostImportNode* host_import_list;
-#if OS_HAS_DYLINK
-    OsWasmLibraryHandle wasm_library_list;
-    uint32_t next_wasm_library_id;
-    uint32_t wasm_library_count;
-#endif
+    const OsLoader* loaders[OS_MAX_LOADERS];
+    uint32_t loader_count;
     OsClockPort clock_port;
     uint32_t tick_ms;
     uint64_t tick_ms_extended;
@@ -365,7 +353,7 @@ struct OsTask
     uint8_t reap_pending;
     /* The program the process runs, shared with its other processes; released with the task. */
     OsProgram* program;
-    /* The module came from the program (a dylink.0 program parses its own). */
+    /* The module came from the program. */
     uint8_t module_shared;
 #if OS_HAS_CODE_STORES
     /* The code image of the module it parsed for itself (not shared): decision 11. */
@@ -391,10 +379,9 @@ struct OsTask
     uint32_t swap_return_offset;
     uint32_t swap_return_value;
 
-#if OS_HAS_DYLINK
-    /* The program and its libraries, for a dylink.0 program. */
-    WmDylink* wasm_dylink;
-#endif
+    /* The loader that built it (decision 16) and what it made, or NULL for the kernel's own. */
+    const OsLoader* loader;
+    void* loader_process;
 #if OS_HAS_MEMORY_ACCOUNTING
     /* Interpreter memory allocated while working on this task. */
     OsMemoryAccount memory_account;
