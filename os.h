@@ -338,18 +338,22 @@ WmResult os_host_wait_end(void);
  *   build  the program's instances, running none of their code: NULL, or
  *          os_not_mine for a module that is not this loader's (the next is
  *          asked), or an error. host resolves the kernel's functions
- *          (host_context is its context). memory is NULL; it is for a
- *          memory kept apart, which no loader is given yet. process is the
- *          loader's own, given back to start and free.
+ *          (host_context is its context). memory is NULL, or, back from
+ *          swap, the program's memory kept apart with its bytes: build on
+ *          it (wm_instantiate_with_memory) and write nothing into it.
+ *          process is the loader's own, given back to start and free.
  *   start  what build left to run: start functions, relocations,
- *          constructors. Called once, as the kernel starts any program.
+ *          constructors. Called once, as the kernel starts any program;
+ *          not back from swap, where the state already holds it.
  *   free   everything build made, the instance included.
  *
  * A loader that builds the same instances from the same module, and keeps
  * its state in WebAssembly's objects, has its tasks saved and read back as
  * any (os_task_save_snapshot, os_system_save): the instance's snapshot
- * holds every instance linked to it (wasm-rtos-vm decision 23). Loaded
- * tasks do not swap yet (os_task_swap_out: OS_STATUS_UNSUPPORTED).
+ * holds every instance linked to it (wasm-rtos-vm decision 23), and swaps
+ * out as any (decision 17) when its program's instance owns its memory; a
+ * program that imports a memory the loader made answers
+ * OS_STATUS_UNSUPPORTED to os_task_swap_out.
  */
 extern const char os_not_mine[];
 

@@ -1394,3 +1394,78 @@ Written on `wm.h` and `os.h` only. A build that does not call
   read into another (it finishes in fewer slices, with the library's data
   it was saved with), the whole system saved and restored after a deep
   sleep, and without `os_dylink_add` the program does not load.
+
+## 17. A loader's task swaps out as any
+
+**Decided and built (2026-11-27).** The user: «да делай своп». Decision 16 left
+swap of a loader's task unbuilt (`OS_STATUS_UNSUPPORTED`): a program
+linked from modules could not leave RAM whole, which is what paging is
+for.
+
+### Problem
+
+Swapping a task out saves its state (stack, calls, globals, tables, not
+the memory), sends its memory's frames to the page store, keeps the
+memory apart from the instance (`wm_instance_detach_memory`) and frees
+the rest; it comes back by instantiating the module on that memory, with
+no data written and no start function, and reading the state over it.
+For a loader's task, two things are missing:
+
+- `build` is always given no memory (`OsLoader.build`'s `memory` is
+  NULL), so a task cannot come back on its own.
+- A linked program's libraries cannot be rebuilt on a memory kept from
+  before (wasm-rtos-vm decision 24 makes them).
+
+Decision 16 put the refusal down to the memory being the loader's. That
+holds only for a program that imports its memory (the loader makes it
+then); a program built with `clang -pie` defines its memory and its
+libraries import it, so the memory is the program instance's, and the
+kernel keeps it apart as any.
+
+### Decision
+
+- **Swapping out** a loader's task is a swap like any: state, frames,
+  memory kept apart, the loader's process freed (`free`). Where the
+  program instance does not own its memory (it imports one the loader
+  made), the memory cannot be kept apart: that task answers
+  `OS_STATUS_UNSUPPORTED` and stays in RAM.
+- **Coming back**, the kernel gives `build` the kept memory, as it gives
+  it to `wm_instantiate_with_memory` for its own path, and does not call
+  `start` (nothing runs again; the state is read over the instances).
+  `OsLoader`'s signature is unchanged: `memory` is now used.
+- **dylink.0** (wasm-rtos-dylink) builds on a kept memory: the program on
+  its own memory and each library on the memory it imports, both with
+  `wm_instantiate_with_memory`, the memory not sized again. A program
+  that imports its memory is refused a kept one (the kernel gives it
+  none).
+
+### Why
+
+A swapped-out program is one the board does not hold in RAM, whichever
+way it was made; a loader that builds the same instances twice already
+comes back from a snapshot (decision 16), and swap is the same with the
+memory kept.
+
+### Steps
+
+| # | What | Where |
+|---|---|---|
+| 1 | wasm-rtos-vm decision 24 | vm |
+| 2 | `build` given the kept memory; `start` only without one; the refusal goes; a memory not the instance's refused | kernel |
+| 3 | dylink.0 on a kept memory | wasm-rtos-dylink |
+| 4 | Tests: a linked task swapped out in the middle of a library's work comes back and ends as it would have, its frames from the store; swapped and slept; the test of wasm-rtos-dylink, the kernel's tests | dylink, tests |
+| 5 | Boards: a linked task swapped out to the page store and back (ESP32, Black Pill) | local ports |
+| 6 | `os.h`, README, CHANGELOG, Roadmap | all |
+
+### Built
+
+As on paper. A task whose program does not own its memory answers
+`OS_STATUS_UNSUPPORTED` once its state is written (the state is dropped
+and the task stays in RAM; its frames come back as they are touched).
+Checked: wasm-rtos-dylink's test (a linked task stopped inside a library
+swapped out with its frames on the store, back, ending as a run that
+never left: the same result in the same slices; swapped out and then the
+whole system saved and restored), the kernel's tests through
+wasm-rtos-vm's `check.sh` (91/91, also paged), and on the boards a linked
+task swapped out inside the library and back with 3 frames on the store
+(ESP32, Black Pill).
